@@ -17,5 +17,3 @@ class Product(Base):
     stock_status = Column(Text, default="موجود")
     additional_info = Column(JSON)
     link = Column(Text, nullable=False)
-    vector_store_ID = Column(Text, nullable=True)
-    file_ID = Column(Text, nullable=True)

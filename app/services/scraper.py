@@ -1,5 +1,6 @@
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import unquote
 import logging
 from ..models.product import Product
 from ..models.base import SessionLocal
@@ -33,14 +34,15 @@ class CozmozScraper:
             url = f'{self.base_url}/shop/page/{page_number}/?count=36'
             response = requests.get(url, headers=self.headers)
             if response.status_code == 404:
-                logger.warning(f'read the list of products with {page_number} pages')
+                logger.info(f'read the list of products with {page_number} pages')
                 break
             soup = BeautifulSoup(response.content, 'html.parser')
             logger.info(f'extracting product list page number:{page_number}')
             for product in soup.find_all('li', class_='product-col'):
                 product_id = product.find(attrs={"data-original-product-id": True}).get("data-original-product-id")
-                link = product.find('a')['href']
-                product_links[int(product_id)] = link
+                encoded_link = product.find('a')['href']
+                decoded_link = unquote(encoded_link)
+                product_links[int(product_id)] = decoded_link
         return product_links
 
     def extract_description(self, soup):

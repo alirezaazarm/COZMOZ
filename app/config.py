@@ -16,7 +16,7 @@ class Config:
     OPENAI_TRANSLATOR_ID =  os.getenv('OPENAI_TRANSLATOR_ID')
     VECTOR_DSORE_ID = os.getenv('VECTOR_DSORE_ID')
     POOL_CLASS = QueuePool
-    BATCH_WINDOW_SECONDS = 60
+    BATCH_WINDOW_SECONDS = 30
 
 
 

@@ -12,6 +12,8 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+werkzeug_logger = logging.getLogger('werkzeug')
+werkzeug_logger.setLevel(logging.ERROR)
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 1200 * 1024 * 1024

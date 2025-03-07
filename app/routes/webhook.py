@@ -118,47 +118,70 @@ def process_event(db, event):
 
 
 def process_message_event(db, event, sender_id, recipient_id, timestamp):
-    logger.debug("Processing message event")
-    message = event['message']
+    logger.debug("Processing message event.")
+    try:
+        message = event['message']
 
-    message_data = {
-        'id': message['mid'],
-        'from': {
-            'id': sender_id,
-            'username': f"ig_user_{sender_id}",
-            'full_name': '',
-            'profile_picture_url': ''
-        },
-        'recipient_id': recipient_id,
-        'text': message.get('text'),
-        'timestamp': timestamp
-    }
+        message_data = {
+            'id': message['mid'],
+            'from': {
+                'id': sender_id,
+                'username': f"ig_user_{sender_id}",
+                'full_name': '',
+                'profile_picture_url': ''
+            },
+            'recipient_id': recipient_id,
+            'text': message.get('text'),
+            'timestamp': timestamp
+        }
 
-    attachments = message.get('attachments', [])
-    if attachments:
-        first_attachment = attachments[0]
-        message_data['media_type'] = first_attachment.get('type')
-        message_data['media_url'] = first_attachment.get('payload', {}).get('url')
-        attachments_type = first_attachment.get('type')
+        logger.debug(f"Message data initialized: {message_data}")
 
-        if attachments_type in ['ig_reel', 'ig_post']:
-            title = first_attachment.get('payload', {}).get('title', 'No Title')
-            message_data['text'] = f"Instagram shared reel caption: {title}"
+        attachments = message.get('attachments', [])
+        if attachments:
+            logger.debug(f"Found {len(attachments)} attachment(s) in the message.")
+            first_attachment = attachments[0]
+            message_data['media_type'] = first_attachment.get('type')
+            message_data['media_url'] = first_attachment.get('payload', {}).get('url')
+            attachments_type = first_attachment.get('type')
 
-        elif attachments_type == "share":
-            shared_content_type = check_content_type(message_data['media_url'])
+            logger.debug(f"Attachment type: {attachments_type}, Media URL: {message_data['media_url']}")
 
-            if shared_content_type == 'image':
-                message_data['media_type'] += '_image'
+            if attachments_type in ['ig_reel', 'ig_post']:
+                title = first_attachment.get('payload', {}).get('title', 'No Title')
+                message_data['text'] = f"Instagram shared reel caption: {title}"
+                logger.debug(f"Updated message text with reel caption: {message_data['text']}")
+
+            elif attachments_type == "share":
+                logger.debug("Processing shared content.")
+                shared_content_type = check_content_type(message_data['media_url'])
+
+                if shared_content_type == 'image':
+                    logger.debug("Shared content is an image.")
+                    message_data['media_type'] += '_image'
+                    image = download_image(message_data['media_url'])
+                    if image:
+                        logger.debug("Image downloaded successfully.")
+                        message_data['text'] = process_image(image)
+                        logger.debug(f"Updated message text with processed image: {message_data['text']}")
+                    else:
+                        logger.error("Failed to download image.")
+
+            if message_data['media_type'] == 'image':
+                logger.debug("Processing standalone image attachment.")
                 image = download_image(message_data['media_url'])
-                message_data['text'] = process_image(image)
+                if image:
+                    logger.debug("Image downloaded successfully.")
+                    message_data['text'] = process_image(image)
+                    logger.debug(f"Updated message text with processed image: {message_data['text']}")
+                else:
+                    logger.error("Failed to download image.")
 
-        if message_data['media_type'] == 'image':
-            image = download_image(message_data['media_url'])
-            if image:
-                message_data['text'] = process_image(image)
-
-    return handle_message(db, message_data)
+        logger.debug("Message event processed successfully. Passing to handle_message.")
+        return handle_message(db, message_data)
+    except Exception as e:
+        logger.error(f"Error processing message event: {str(e)}")
+        raise
 
 
 def process_comment_event(db, change):

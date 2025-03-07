@@ -6,11 +6,14 @@ class MessageDirection(Enum):
     OUTGOING = "outgoing"
 
 class MessageStatus(Enum):
-    """Enumeration for message status."""
-    PENDING = "pending"
-    SENT_TO_ASSISTANT = "sent_to_assist"
-    ASSISTANT_RESPONDED = "assist_respond"
-    ASSISTANT_FAILED = "assist_failed_to_respond"
-    REPLIED_TO_INSTAGRAM = "replied_to_instagram"
-    INSTAGRAM_FAILED = "failed_to_reply_instagram"
-    COMPLETED = "completed"
+# =================== PHASE 1 ============================
+    PENDING = "pending"                                     # just received from webhook
+# =================== PHASE 2 ============================
+    ASSISTANT_RESPONDED = "assistant_responded"                # but have not sent to instagram yet
+    ASSISTANT_FAILED = "assist_failed_to_respond"           # assist timout
+# =================== PHASE 3 ============================
+    INSTAGRAM_FAILED = "failed_to_reply_instagram"          # still needs to send assist reponse to instagram
+# =================== PHASE 4 ============================
+    REPLIED_BY_ASSIST = "replied_by_assist"                 # completed
+    REPLIED_BY_ADMIN = "replied_by_admin"                   # completed
+

@@ -1,5 +1,4 @@
 import requests
-import re
 from datetime import datetime, UTC
 from PIL import Image
 from io import BytesIO
@@ -12,7 +11,7 @@ from ..models.base import engine, SessionLocal
 from ..config import Config
 from ..models.user import User
 from ..models.comment import Comment
-from ..models.message import AssistantResponse, DirectMessage
+from ..models.message import DirectMessage
 from ..models.enums import MessageStatus, MessageDirection
 from contextlib import contextmanager
 from ..utils.exceptions import PermanentError
@@ -90,6 +89,21 @@ def en_to_ar_number(number_str):
     mapping = {'0': '٠','1': '١','2': '٢','3': '٣','4': '٤','5': '٥','6': '٦','7': '٧','8': '٨','9': '٩', }
     return ''.join([mapping.get(digit, digit) for digit in number_str])
 
+def reload_app_settings(app_settings):
+    try:
+        settings = {}
+        for setting in app_settings:
+            for key, value in setting.items():
+                settings[key] = value.lower() == 'true'
+
+        global APP_SETTINGS
+        APP_SETTINGS = settings
+
+        return True
+    except Exception as e:
+        logging.info(f"Error occurred when reloading app settings: {e}")
+        return False
+
 def reload_fixed_responses(fixed_responses, incoming):
 
     try:
@@ -166,6 +180,18 @@ def handle_message(db, message_data):
             else:
                 logger.error("Failed to send fixed response")
                 return False
+
+        elif message_data.get('echo', False):                                                       # Admin reply
+            outgoing_msg = DirectMessage(
+                message_id=message_data['id'],
+                sender_id=recipient.user_id,
+                recipient_id=sender.user_id,
+                message_text=message_data.get('text'),
+                direction=MessageDirection.OUTGOING,
+                status=MessageStatus.REPLIED_BY_ADMIN,
+                timestamp=datetime.now(UTC))
+            db.add(outgoing_msg)
+            return True
 
         else:
             message = DirectMessage(
@@ -292,9 +318,6 @@ def handle_comment(db, comment_data):
             else:
                 update_comment_status(db, comment.comment_id, "not_replied")
 
-
-
-
         db.commit()
         logger.debug(f"Added comment {comment.comment_id} to database")
         return True
@@ -313,31 +336,6 @@ def handle_comment(db, comment_data):
         logger.error(f"Unexpected error in handle_comment: {str(e)}", exc_info=True)
         db.rollback()
         return False
-
-
-def handle_instagram_outcome(db, messages, success):
-    status = (
-        MessageStatus.REPLIED_TO_INSTAGRAM
-        if success
-        else MessageStatus.INSTAGRAM_FAILED
-    )
-    try:
-        with db.begin_nested():
-            for msg in messages:
-                msg.status = status.value
-
-            message_ids = [msg.message_id for msg in messages]
-            db.query(AssistantResponse).filter(
-                AssistantResponse.message_ids.contains(message_ids)
-            ).update(
-                {"instagram_status": status.value},
-                synchronize_session="fetch"
-            )
-        logger.info(f"Updated status to {status} for {len(messages)} messages")
-
-    except Exception as e:
-        logger.error(f"Failed to update Instagram outcome: {str(e)}")
-
 
 def process_user(db, user_data):
     try:
@@ -373,30 +371,3 @@ def safe_db_operation(func):
             engine.dispose()
             raise
     return wrapper
-
-
-def handle_batch_error(db: Session, error: Exception, messages):
-    try:
-        with db.begin_nested():
-            if isinstance(error, PermanentError):
-                new_status = MessageStatus.ASSISTANT_FAILED.value
-            else:
-                new_status = MessageStatus.PENDING.value
-            for msg in messages:
-                msg.status = new_status
-            db.query(AssistantResponse).filter(
-                AssistantResponse.message_ids.contains([msg.message_id for msg in messages])
-            ).update({"assistant_status": new_status}, synchronize_session=False)
-            db.commit()
-    except Exception as e:
-        logger.critical("Error recovery failed!", exc_info=True)
-        db.rollback()
-
-
-def clean_openai_response(response_text):
-    metadata_pattern = r"【\d+:\d+†source】"
-    cleaned_text = re.sub(metadata_pattern, "", response_text).strip()
-    return cleaned_text
-
-
-

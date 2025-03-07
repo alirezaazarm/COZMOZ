@@ -2,307 +2,436 @@ import streamlit as st
 from app.services.backend import Backend
 from app.services.scraper import CozmozScraper
 from app.services.openai_service import OpenAIService
-import json
+import logging
+from app.config import Config
 
-backend = Backend()
-scraper = CozmozScraper()
-openai_service = OpenAIService()
-# ======================================= EMOJY SHORT CODES ====================================================== #
-ICON_SCRAPER = ":building_construction:"  # 🏗️
-ICON_SCRAPE = ":rocket:"          # 🚀
-ICON_UPDATE = ":arrows_counterclockwise:"  # 🔄
-ICON_VS = ":brain:"               # 🧠
-ICON_DELETE = ":wastebasket:"     # 🗑️
-ICON_ADD = ":heavy_plus_sign:"    # ➕
-ICON_TRANSLATE = ":earth_asia:"   # 🌍
-ICON_AI = ":robot_face:"          # 🤖
-ICON_SUCCESS = ":white_check_mark:"  # ✅
-ICON_ERROR = ":x:"                # ❌
-ICON_PREVIEW = ":package:"        # 📦
-# =========================================== APP SETTINGS ======================================================= #
-st.header("App Status")
-
-try:
-    # Fetch current app settings
-    assist_status = backend.get_app_setting("assistant")
-    fixed_responses_status = backend.get_app_setting("fixed_responses")
-
-    # Toggle for Assistant
-    assistant_toggle = st.toggle(
-        label=f"{ICON_SUCCESS} Enable Assistant",
-        value=(assist_status == "true"),
-        key="assistant_toggle"
-    )
-    if assistant_toggle and assist_status != "true":
-        backend.update_is_active(key="assistant", value="true")
-        st.success(f"{ICON_SUCCESS} Assistant enabled successfully!")
-    elif not assistant_toggle and assist_status != "false":
-        backend.update_is_active(key="assistant", value="false")
-        st.success(f"{ICON_ERROR} Assistant disabled successfully!")
-
-    # Toggle for Fixed Responses
-    fixed_responses_toggle = st.toggle(
-        label=f"{ICON_SUCCESS} Enable Fixed Responses",
-        value=(fixed_responses_status == "true"),
-        key="fixed_responses_toggle"
-    )
-    if fixed_responses_toggle and fixed_responses_status != "true":
-        backend.update_is_active(key="fixed_responses", value="true")
-        st.success(f"{ICON_SUCCESS} Fixed Responses enabled successfully!")
-    elif not fixed_responses_toggle and fixed_responses_status != "false":
-        backend.update_is_active(key="fixed_responses", value="false")
-        st.success(f"{ICON_ERROR} Fixed Responses disabled successfully!")
-
-except RuntimeError as e:
-    st.error(f"Error managing app status: {str(e)}")
-st.write("---")
-# ========================================= PRODUCTS SCRAPER ============================================================== #
-st.header(f"{ICON_SCRAPER} Product Scraper")
-col1, col2 = st.columns(2)
-with col1:
-    if st.button(f"{ICON_SCRAPE} Scrape All Products", help="Scrape all products from scratch"):
-        try:
-            with st.spinner("Scraping all products. This may take several minutes..."):
-                scraper.scrape_products()
-                st.success(f"{ICON_SUCCESS} Scraping completed!")
-                st.rerun()
-        except Exception as e:
-            st.error(f"{ICON_ERROR} Scraping failed: {str(e)}")
-
-with col2:  # Update Products button
-    if st.button(f"{ICON_UPDATE} Update Products", help="Add new products only"):
-        try:
-            with st.spinner("Checking for new products..."):
-                scraper.update_products()
-                st.success(f"{ICON_SUCCESS} Update completed!")
-                st.rerun()
-        except Exception as e:
-            st.error(f"{ICON_ERROR} Update failed: {str(e)}")
-
-# Update the product preview to show translations
-st.subheader(f"{ICON_PREVIEW} Product table")
-try:
-    products = backend.get_products()
-    if products:
-        st.dataframe(
-            products,
-            column_config={
-                "Link": st.column_config.LinkColumn("Product Link"),
-                "Vector Store ID": "VS ID",
-                "File ID": "File ID",
-            },
-            use_container_width=True,
-            height=400
-        )
-    else:
-        st.info("No products found. Click 'Scrape All Products' to get started!")
-except Exception as e:
-    st.error(f"Failed to load products: {str(e)}")
-
-# ============================================= OPENAI ==================================================================== #
-st.header(f"{ICON_AI} OpenAI Management")
-openai_service = OpenAIService()
-
-if st.button(f"{ICON_VS} Process All Products",
-             help="Generate File IDs, Vector Store IDs, and Translated Titles for all products"):
-    try:
-        with st.spinner("Processing products - this may take several minutes..."):
-            translate_success = openai_service.translate_titles()
-            vs_success = openai_service.create_vs()
-
-            if vs_success and translate_success:
-                st.success(f"{ICON_SUCCESS} All products processed successfully!")
-                st.rerun()
-            else:
-                st.error(f"{ICON_ERROR} Some operations failed. Check logs for details.")
-    except Exception as e:
-        st.error(f"Processing failed: {str(e)}")
-
-st.write("---")
-#=========================================== FIXED RESPONSES ===============================================================#
-st.header("Fixed Responses")
-
-# Incoming Toggle: Direct or Comment
-incoming_type = st.radio(
-    "Select Incoming Type",
-    options=["Direct", "Comment"],
-    index=0,
-    horizontal=True,
-    key="incoming_type"
+logging.basicConfig(
+    handlers=[logging.FileHandler('logs.txt', encoding='utf-8'), logging.StreamHandler()],
+    level=logging.ERROR,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+class AppConstants:
+    """Centralized configuration for icons and messages"""
+    ICONS = {
+        "scraper": ":building_construction:" , # 🏗️
+        "scrape": ":rocket:", # 🚀
+        "update": ":arrows_counterclockwise:" , # 🔄
+        "ai": ":robot_face:", # 🤖
+        "delete": ":wastebasket:" , # 🗑️
+        "add": ":heavy_plus_sign:" , # ➕
+        "translate": ":earth_asia:" , # 🌍
+        "success": ":white_check_mark:" , # ✅
+        "error": ":x:" , # ❌
+        "preview": ":package:" , # 📦
+        "brain": ":brain:" , # 🧠
+        "chat": ":speech_balloon:", # 💬
+        "connect": ":link:", # 🔗
+    }
 
-# Tabs for Existing and Add New
-existing_tab, add_new_tab = st.tabs(["Existing", "Add New"])
-st.write("---")
+    MESSAGES = {
+        "scraping_start": "Scraping all products. This may take several minutes...",
+        "update_start": "Checking for new products...",
+        "processing_start": "Processing products - this may take several minutes..."
+    }
 
-# Existing Responses Subsection
-with existing_tab:
-    st.subheader(f"Existing {incoming_type} Fixed Responses")
-    try:
-        # Fetch fixed responses based on incoming type
-        responses = backend.get_fixed_responses(incoming=incoming_type)
+class BaseSection:
+    """Base class for UI sections"""
+    def __init__(self, backend, scraper, openai_service):
+        self.backend = backend
+        self.scraper = scraper
+        self.openai_service = openai_service
+        self.const = AppConstants()
 
-        if responses:
-            for resp in responses:
-                with st.container():
-                    # Display the updated time
-                    updated_time = backend.format_updated_at(resp.get("updated_at"))
-                    st.markdown(f"Updated {updated_time}")
+class AppStatusSection(BaseSection):
+    """Handles application status settings"""
+    def render(self):
+        st.header("App Status")
 
-                    # Trigger keyword input
-                    trigger = st.text_input(
-                        "Trigger",
-                        value=resp["trigger_keyword"],
-                        key=f"trigger_{resp['id']}"
-                    )
+        try:
+            self._render_toggles()
+            st.write("---")
+        except RuntimeError as e:
+            st.error(f"Error managing app status: {str(e)}")
 
-                    if incoming_type == "Direct":
-                        # For Direct, only show the Direct Response Text field
-                        direct_text = st.text_area(
-                            "Direct Response Text",
-                            value=resp["direct_response_text"] or "",
-                            key=f"direct_text_{resp['id']}",
-                            height=100
-                        )
-                        col1, col2 = st.columns([1, 1])
+    def _render_toggles(self):
+        """Render configuration toggles"""
+        settings = {
+            "assistant": f"{self.const.ICONS['success']} Enable Assistant",
+            "fixed_responses": f"{self.const.ICONS['success']} Enable Fixed Responses"
+        }
 
-                        # Save button
-                        with col1:
-                            if st.button("Save", key=f"save_{resp['id']}"):
-                                try:
-                                    backend.update_fixed_response(
-                                        resp["id"],
-                                        trigger,
-                                        comment_response_text=None,  # No comment for Direct
-                                        direct_response_text=direct_text,
-                                        incoming="Direct"
-                                    )
-                                    st.success("Fixed response updated successfully!")
-                                    st.rerun()
-                                except RuntimeError as e:
-                                    st.error(str(e))
+        for key, label in settings.items():
+            current_status = self.backend.get_app_setting(key)
+            new_state = st.toggle(label, value=(current_status == "true"), key=f"{key}_toggle")
 
-                        # Delete button
-                        with col2:
-                            if st.button(":wastebasket:", key=f"delete_{resp['id']}"):
-                                try:
-                                    backend.delete_fixed_response(resp["id"])
-                                    st.success("Fixed response deleted successfully!")
-                                    st.rerun()
-                                except RuntimeError as e:
-                                    st.error(str(e))
+            if new_state != (current_status == "true"):
+                self.backend.update_is_active(key, str(new_state).lower())
+                status_msg = "enabled" if new_state else "disabled"
+                icon = self.const.ICONS['success'] if new_state else self.const.ICONS['error']
+                st.success(f"{icon} {key.replace('_', ' ').title()} {status_msg} successfully!")
 
-                    elif incoming_type == "Comment":
-                        # For Comment, show toggles for Direct and Comment
-                        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+class ProductScraperSection(BaseSection):
+    """Handles product scraping functionality"""
+    def render(self):
+        st.header(f"{self.const.ICONS['scraper']} Product Scraper")
 
-                        # Toggles for Direct and Comment
-                        with col1:
-                            direct_toggle = st.toggle(
-                                "Direct",
-                                value=bool(resp["direct_response_text"]),  # Sync with database
-                                key=f"direct_toggle_{resp['id']}"
-                            )
-                        with col2:
-                            comment_toggle = st.toggle(
-                                "Comment",
-                                value=bool(resp["comment_response_text"]),  # Sync with database
-                                key=f"comment_toggle_{resp['id']}"
-                            )
-
-                        # Dynamically show text fields based on toggles
-                        if direct_toggle:
-                            direct_text = st.text_area(
-                                "Direct Response Text",
-                                value=resp["direct_response_text"] or "",
-                                key=f"direct_text_{resp['id']}",
-                                height=100
-                            )
-                        else:
-                            direct_text = None
-
-                        if comment_toggle:
-                            comment_text = st.text_area(
-                                "Comment Response Text",
-                                value=resp["comment_response_text"] or "",
-                                key=f"comment_text_{resp['id']}",
-                                height=100
-                            )
-                        else:
-                            comment_text = None
-
-                        # Save button
-                        with col3:
-                            if st.button("Save", key=f"save_{resp['id']}"):
-                                try:
-                                    backend.update_fixed_response(
-                                        resp["id"],
-                                        trigger,
-                                        comment_response_text=comment_text,
-                                        direct_response_text=direct_text,
-                                        incoming="Comment"
-                                    )
-                                    st.success("Fixed response updated successfully!")
-                                    st.rerun()
-                                except RuntimeError as e:
-                                    st.error(str(e))
-
-                        # Delete button
-                        with col4:
-                            if st.button(":wastebasket:", key=f"delete_{resp['id']}"):
-                                try:
-                                    backend.delete_fixed_response(resp["id"])
-                                    st.success("Fixed response deleted successfully!")
-                                    st.rerun()
-                                except RuntimeError as e:
-                                    st.error(str(e))
-                st.write("---")  # Divider between cards
-        else:
-            st.info(f"No {incoming_type.lower()} fixed responses available.")
-    except RuntimeError as e:
-        st.error(str(e))
-
-# Add New Response Subsection
-with add_new_tab:
-    st.subheader(f"Add New {incoming_type} Response")
-    new_trigger = st.text_input("New Trigger", key="new_trigger")
-
-    if incoming_type == "Direct":
-        # For Direct, only show the Direct Response Text field
-        new_direct_text = st.text_area("Direct Response Text", key="new_direct_text", height=100)
-        new_comment_text = None  # No comment for Direct
-
-    elif incoming_type == "Comment":
-        # For Comment, show toggles for Direct and Comment
-        col1, col2, _ = st.columns([1, 1, 1])
+        col1, col2, col3 = st.columns(3)
         with col1:
-            new_direct_toggle = st.toggle("Direct", value=False, key="new_direct_toggle")
+            self._render_scrape_button()
         with col2:
-            new_comment_toggle = st.toggle("Comment", value=False, key="new_comment_toggle")
+            self._render_update_button()
+        with col3:
+            self._render_connect_button()
 
-        # Dynamically show text fields based on toggles
-        if new_direct_toggle:
-            new_direct_text = st.text_area("Direct Response Text", key="new_direct_text", height=100)
+        self._render_product_table()
+        st.write("---")
+
+    def _render_scrape_button(self):
+        if st.button(f"{self.const.ICONS['scrape']} Scrape All Products",
+                     help="Scrape all products from scratch"):
+            self._handle_scraping_action(self.scraper.scrape_products)
+
+    def _render_update_button(self):
+        if st.button(f"{self.const.ICONS['update']} Update Products",
+                    help="Add new products only"):
+            self._handle_scraping_action(self.scraper.update_products)
+            
+    def _render_connect_button(self):
+        if st.button(f"{self.const.ICONS['connect']} Connect to Vector Store", 
+                     help="Process all products, create a vector store, and connect it to the assistant."):
+            with st.spinner("Processing products and connecting to assistant..."):
+                result = self.backend.connect_assistant_to_vs()
+                if result['success']:
+                    st.success(f"{self.const.ICONS['success']} {result['message']}")
+                    
+                    # Display basic confirmation information
+                    st.info(f"Processed {result['product_count']} products and connected to vector store.")
+                else:
+                    st.error(f"{self.const.ICONS['error']} {result['message']}")
+
+    def _handle_scraping_action(self, action):
+        try:
+            with st.spinner(self.const.MESSAGES["scraping_start"]):
+                action()
+                st.success(f"{self.const.ICONS['success']} Operation completed!")
+                st.rerun()
+        except Exception as e:
+            st.error(f"{self.const.ICONS['error']} Operation failed: {str(e)}")
+
+    def _render_product_table(self):
+        st.subheader(f"{self.const.ICONS['preview']} Product Table")
+        try:
+            products = self.backend.get_products()
+            if products:
+                st.dataframe(
+                    products,
+                    column_config={
+                        "Link": st.column_config.LinkColumn("Product Link"),
+                    },
+                    use_container_width=True,
+                    height=400
+                )
+            else:
+                st.info("No products found. Click 'Scrape All Products' to get started!")
+        except Exception as e:
+            st.error(f"Failed to load products: {str(e)}")
+
+class OpenAIManagementSection(BaseSection):
+    """Handles OpenAI processing with improved UX"""
+    def render(self):
+        st.header(f"{self.const.ICONS['ai']} OpenAI Management")
+
+        # Only show warning if no vector store is configured
+        vs_id = self.backend.get_current_vs_id()
+        if not vs_id:
+            st.warning("No vector store currently available. Please connect to a vector store before testing the assistant.")
+            
+        # Create tabs for instruction management and chat testing
+        instruction_tab, chat_tab = st.tabs([
+            f"{self.const.ICONS['brain']} Assistant Instructions", 
+            f"{self.const.ICONS['chat']} Test Assistant"
+        ])
+        
+        # Instructions tab content
+        with instruction_tab:
+            self._render_instructions_section()
+            
+        # Chat testing tab content
+        with chat_tab:
+            if vs_id:
+                self._render_chat_testing_section()
+            else:
+                st.error("You need to connect to a vector store first before testing the assistant. Go to the Product Scraper section and click 'Connect to Vector Store'.")
+
+        # Add separator line between OpenAI Management and Fixed Responses sections
+        st.markdown("---")
+
+    def _render_instructions_section(self):
+        # Get current instructions
+        current_instructions = self.backend.get_assistant_instructions()
+        
+        if current_instructions:
+            # Display the current instructions in a text area that can be edited
+            new_instructions = st.text_area(
+                "Edit Assistant Instructions", 
+                value=current_instructions,
+                height=300,
+                help="Edit the instructions and click 'Update Instructions' to save changes."
+            )
         else:
-            new_direct_text = None
+            new_instructions = st.text_area(
+                "Set Assistant Instructions", 
+                value="Enter instructions for the assistant...",
+                height=300,
+                help="Enter instructions and click 'Update Instructions' to save."
+            )
 
-        if new_comment_toggle:
-            new_comment_text = st.text_area("Comment Response Text", key="new_comment_text", height=100)
-        else:
-            new_comment_text = None
-
-    if st.button("Add Response", key="add_response_button"):
-        if new_trigger:
+        # Button to update instructions
+        if st.button(f"{self.const.ICONS['update']} Update Instructions", 
+                    help="Update the assistant's instructions with the text above."):
+            with st.spinner("Updating assistant instructions..."):
+                result = self.backend.update_assistant_instructions(new_instructions)
+                if result['success']:
+                    st.success(f"{self.const.ICONS['success']} {result['message']}")
+                else:
+                    st.error(f"{self.const.ICONS['error']} {result['message']}")
+                    
+    def _render_chat_testing_section(self):
+        st.subheader("Test your assistant")
+        
+        # Create a new thread for each session if not already created
+        if 'thread_id' not in st.session_state:
             try:
-                backend.add_fixed_response(
+                # Create a new thread and store its ID
+                thread_id = self.openai_service.create_thread()
+                st.session_state['thread_id'] = thread_id
+                st.session_state['messages'] = []
+            except Exception as e:
+                st.error(f"Failed to create thread: {str(e)}")
+                return
+
+        # Create a container for the chat messages
+        chat_container = st.container()
+        
+        # Create a container for the input field at the bottom
+        input_container = st.container()
+        
+        # Display existing messages in the chat container
+        with chat_container:
+            for message in st.session_state.get('messages', []):
+                with st.chat_message(message["role"]):
+                    st.write(message["content"])
+        
+        # Get user input at the bottom
+        with input_container:
+            user_input = st.chat_input("Type your message here...")
+        
+        if user_input:
+            # Add user message to chat
+            st.session_state['messages'].append({"role": "user", "content": user_input})
+            with chat_container:
+                with st.chat_message("user"):
+                    st.write(user_input)
+            
+            # Send to assistant and get response
+            with st.spinner("Assistant is thinking..."):
+                try:
+                    response = self.openai_service.send_message_to_thread(
+                        st.session_state['thread_id'], 
+                        user_input
+                    )
+                    
+                    # Add assistant response to chat
+                    st.session_state['messages'].append({"role": "assistant", "content": response})
+                    with chat_container:
+                        with st.chat_message("assistant"):
+                            st.write(response)
+                except Exception as e:
+                    st.error(f"Error getting response: {str(e)}")
+
+class FixedResponsesSection(BaseSection):
+    """Manages fixed responses configuration"""
+    def render(self):
+        st.header("Fixed Responses")
+        incoming_type = st.radio(
+            "Select Incoming Type",
+            options=["Direct", "Comment"],
+            index=0,
+            horizontal=True,
+            key="incoming_type"
+        )
+
+        existing_tab, add_new_tab = st.tabs(["Existing", "Add New"])
+
+        with existing_tab:
+            self._render_existing_responses(incoming_type)
+
+        with add_new_tab:
+            self._render_new_response_form(incoming_type)
+
+        st.write("---")
+
+    def _render_existing_responses(self, incoming_type):
+        st.subheader(f"Existing {incoming_type} Fixed Responses")
+        try:
+            responses = self.backend.get_fixed_responses(incoming=incoming_type)
+            if responses:
+                for resp in responses:
+                    self._render_response_card(resp, incoming_type)
+            else:
+                st.info(f"No {incoming_type.lower()} fixed responses available.")
+        except RuntimeError as e:
+            st.error(str(e))
+
+    def _render_response_card(self, response, incoming_type):
+        with st.container():
+            updated_time = self.backend.format_updated_at(response.get("updated_at"))
+            st.markdown(f"Updated {updated_time}")
+
+            trigger = st.text_input(
+                "Trigger",
+                value=response["trigger_keyword"],
+                key=f"trigger_{response['id']}"
+            )
+
+            if incoming_type == "Direct":
+                self._render_direct_response(response, trigger)
+            else:
+                self._render_comment_response(response, trigger)
+
+            st.write("---")
+
+    def _render_direct_response(self, response, trigger):
+        direct_text = st.text_area(
+            "Direct Response Text",
+            value=response["direct_response_text"] or "",
+            key=f"direct_text_{response['id']}",
+            height=100
+        )
+
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("Save", key=f"save_{response['id']}"):
+                self._update_response(response, trigger, direct_text, None)
+        with col2:
+            self._render_delete_button(response["id"])
+
+    def _render_comment_response(self, response, trigger):
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+        with col1:
+            direct_toggle = st.toggle(
+                "Direct",
+                value=bool(response["direct_response_text"]),
+                key=f"direct_toggle_{response['id']}"
+            )
+        with col2:
+            comment_toggle = st.toggle(
+                "Comment",
+                value=bool(response["comment_response_text"]),
+                key=f"comment_toggle_{response['id']}"
+            )
+
+        direct_text = self._conditional_text_area(
+            direct_toggle,
+            "Direct Response Text",
+            response["direct_response_text"],
+            f"direct_text_{response['id']}"
+        )
+
+        comment_text = self._conditional_text_area(
+            comment_toggle,
+            "Comment Response Text",
+            response["comment_response_text"],
+            f"comment_text_{response['id']}"
+        )
+
+        with col3:
+            if st.button("Save", key=f"save_{response['id']}"):
+                self._update_response(response, trigger, direct_text, comment_text)
+        with col4:
+            self._render_delete_button(response["id"])
+
+    def _conditional_text_area(self, condition, label, value, key):
+        if condition:
+            return st.text_area(label, value=value or "", key=key, height=100)
+        return None
+
+    def _update_response(self, response, trigger, direct_text, comment_text):
+        try:
+            self.backend.update_fixed_response(
+                response["id"],
+                trigger,
+                comment_response_text=comment_text,
+                direct_response_text=direct_text,
+                incoming=response["incoming"]
+            )
+            st.success("Fixed response updated successfully!")
+            st.rerun()
+        except RuntimeError as e:
+            st.error(str(e))
+
+    def _render_delete_button(self, response_id):
+        if st.button(self.const.ICONS['delete'], key=f"delete_{response_id}"):
+            try:
+                self.backend.delete_fixed_response(response_id)
+                st.success("Fixed response deleted successfully!")
+                st.rerun()
+            except RuntimeError as e:
+                st.error(str(e))
+
+    def _render_new_response_form(self, incoming_type):
+        st.subheader(f"Add New {incoming_type} Response")
+        new_trigger = st.text_input("New Trigger", key="new_trigger")
+
+        if incoming_type == "Direct":
+            new_direct_text = st.text_area("Direct Response Text", key="new_direct_text", height=100)
+            new_comment_text = None
+        else:
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                new_direct_toggle = st.toggle("Direct", key="new_direct_toggle")
+            with col2:
+                new_comment_toggle = st.toggle("Comment", key="new_comment_toggle")
+
+            new_direct_text = self._conditional_text_area(new_direct_toggle, "Direct Response Text", "", "new_direct_text")
+            new_comment_text = self._conditional_text_area(new_comment_toggle, "Comment Response Text", "", "new_comment_text")
+
+        if st.button("Add Response", key="add_response_button"):
+            if not new_trigger:
+                st.error("Trigger is required.")
+                return
+
+            try:
+                self.backend.add_fixed_response(
                     new_trigger,
-                    comment_response_text=new_comment_text if incoming_type == "Comment" else None,
+                    comment_response_text=new_comment_text,
                     direct_response_text=new_direct_text,
                     incoming=incoming_type
                 )
-                st.rerun()
                 st.success("Fixed response added successfully!")
+                st.rerun()
             except RuntimeError as e:
                 st.error(str(e))
-        else:
-            st.error("Trigger is required.")
+
+class AdminUI:
+    """Main application container"""
+    def __init__(self):
+        self.backend = Backend()
+        self.scraper = CozmozScraper()
+        self.openai_service = OpenAIService()
+
+        self.sections = [
+            AppStatusSection(self.backend, self.scraper, self.openai_service),
+            ProductScraperSection(self.backend, self.scraper, self.openai_service),
+            OpenAIManagementSection(self.backend, self.scraper, self.openai_service),
+            FixedResponsesSection(self.backend, self.scraper, self.openai_service)
+        ]
+
+    def render(self):
+        """Render all application sections"""
+        for section in self.sections:
+            section.render()
+
+if __name__ == "__main__":
+    app = AdminUI()
+    app.render()

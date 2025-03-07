@@ -23,14 +23,12 @@ def process_messages_job():
         logger.info("Completed processing cycle")
 
 def cleanup_processed_messages():
+
     with get_db() as db:
         cutoff = datetime.now(UTC) - timedelta(hours=24)
-        valid_statuses = [e.value for e in MessageStatus]
-        if "completed" not in valid_statuses:
-            logger.error("Invalid status value: 'completed'")
-            return
+        valid_statuses = [  MessageStatus.REPLIED_BY_ASSIST.value,  MessageStatus.REPLIED_BY_ADMIN.value  ]
         db.query(DirectMessage).filter(
-            DirectMessage.status == MessageStatus.REPLIED_TO_INSTAGRAM,
+            DirectMessage.status.in_(valid_statuses),
             DirectMessage.timestamp < cutoff
-        ).update({"status": MessageStatus.COMPLETED.value}, synchronize_session=False)
+        ).update({"status": MessageStatus.COMPLETED.value})
         db.commit()
