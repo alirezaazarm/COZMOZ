@@ -3,8 +3,6 @@ from bs4 import BeautifulSoup
 from urllib.parse import unquote
 import logging
 from ..models.product import Product
-from ..models.base import SessionLocal
-from contextlib import contextmanager
 import json
 
 logger = logging.getLogger(__name__)
@@ -14,19 +12,6 @@ class CozmozScraper:
     def __init__(self):
         self.base_url = 'https://cozmoz.ir'
         self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-
-    @contextmanager
-    def get_db(self):
-        """Database context manager."""
-        db = SessionLocal()
-        try:
-            yield db
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
 
     def extract_product_links(self, max_pages=100):
         product_links = {}
@@ -39,10 +24,10 @@ class CozmozScraper:
             soup = BeautifulSoup(response.content, 'html.parser')
             logger.info(f'extracting product list page number:{page_number}')
             for product in soup.find_all('li', class_='product-col'):
-                product_id = product.find(attrs={"data-original-product-id": True}).get("data-original-product-id")
+                product_title = product.find('h3', class_='woocommerce-loop-product__title').text
                 encoded_link = product.find('a')['href']
                 decoded_link = unquote(encoded_link)
-                product_links[int(product_id)] = decoded_link
+                product_links[product_title] = decoded_link
         return product_links
 
     def extract_description(self, soup):
@@ -107,13 +92,12 @@ class CozmozScraper:
         else :
             return 'N/A'
 
-    def scrape(self, url, pID):
+    def scrape(self, url):
         try:
             response = requests.get(url, headers=self.headers)
             response.raise_for_status()
             soup = BeautifulSoup(response.content, 'html.parser')
             product_info = {
-                'pID': pID,
                 'title': soup.find('h1', class_='page-title').text.strip() if soup.find('h1', class_='page-title') else 'N/A',
                 'category': self.extract_category(soup) if self.extract_category(soup) else 'N/A',
                 'tags': soup.find('span', class_='tagged_as').text.split(':')[-1].strip() if soup.find('span', class_='tagged_as') else 'N/A',
@@ -136,51 +120,51 @@ class CozmozScraper:
 
     def scrape_products(self):
         product_links = self.extract_product_links()
-        with self.get_db() as db:
-            for pID, link in product_links.items():
-                product_info = self.scrape(link, pID)
-                if product_info:
-                    product = Product(
-                        pID=pID,
-                        title=product_info['title'],
-                        category=product_info['category'],
-                        tags=product_info['tags'],
-                        price=product_info['price'],
-                        excerpt=product_info['excerpt'],
-                        sku=product_info['sku'],
-                        description=product_info['description'],
-                        stock_status=product_info['stock_status'],
-                        additional_info=product_info['additional_info'],
-                        link=product_info['link']
-                    )
-                    db.add(product)
-                    db.flush()
-                    logger.info(f"Stored product {pID} in the database")
+        for title, link in product_links.items():
+            product_info = self.scrape(link)
+            if product_info:
+                result = Product.create(
+                    title=product_info['title'],
+                    category=product_info['category'],
+                    tags=product_info['tags'],
+                    price=product_info['price'],
+                    excerpt=product_info['excerpt'],
+                    sku=product_info['sku'],
+                    description=product_info['description'],
+                    stock_status=product_info['stock_status'],
+                    additional_info=product_info['additional_info'],
+                    link=product_info['link']
+                )
+                if result:
+                    logger.info(f"Stored product {title} in the database")
+                else:
+                    logger.error(f"Failed to store product {title} in the database")
 
     def update_products(self):
         product_links = self.extract_product_links()
-        with self.get_db() as db:
-            existing_pIDs = {p.pID for p in db.query(Product.pID).all()}
-            for pID, link in product_links.items():
-                if pID in existing_pIDs:
-                    continue
+        existing_products = Product.get_all()
+        existing_titles = {p['title'] for p in existing_products}
+        
+        for title, link in product_links.items():
+            if title in existing_titles:
+                continue
 
-                product_info = self.scrape(link, pID)
-                if product_info:
-                    product = Product(
-                        pID=pID,
-                        title=product_info['title'],
-                        category=product_info['category'],
-                        tags=product_info['tags'],
-                        price=product_info['price'],
-                        excerpt=product_info['excerpt'],
-                        sku=product_info['sku'],
-                        description=product_info['description'],
-                        stock_status=product_info['stock_status'],
-                        additional_info=product_info['additional_info'],
-                        link=product_info['link']
-                    )
-                    db.add(product)
-                    db.flush()
-                    logger.info(f"Added new product {pID} to the database")
+            product_info = self.scrape(link)
+            if product_info:
+                result = Product.create(
+                    title=product_info['title'],
+                    category=product_info['category'],
+                    tags=product_info['tags'],
+                    price=product_info['price'],
+                    excerpt=product_info['excerpt'],
+                    sku=product_info['sku'],
+                    description=product_info['description'],
+                    stock_status=product_info['stock_status'],
+                    additional_info=product_info['additional_info'],
+                    link=product_info['link']
+                )
+                if result:
+                    logger.info(f"Added new product {title} to the database")
+                else:
+                    logger.error(f"Failed to add new product {title} to the database")
 

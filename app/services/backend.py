@@ -2,11 +2,9 @@ import logging
 from datetime import datetime, timezone
 from ..models.appsettings import AppSettings
 from ..models.fixedresponse import FixedResponse
-from ..models.base import SessionLocal
 from ..models.product import Product
 from ..config import Config
 import requests
-import json
 
 logger = logging.getLogger(__name__)
 
@@ -20,23 +18,22 @@ class Backend:
     def get_products(self):
         logger.info("Fetching products from the database.")
         try:
-            with SessionLocal() as db:
-                products = db.query(Product).all()
-                products_data = [
-                    {
-                        "ID": p.pID,
-                        "Title": p.title,
-                        "Price": json.loads(p.price) if isinstance(p.price, dict) else p.price,
-                        "Additional info": json.loads(p.additional_info) if isinstance(p.additional_info, dict) else p.additional_info,
-                        "Category": p.category,
-                        "Stock status" : p.stock_status,
-                        "Translated Title": p.translated_title,
-                        "Link": p.link
-                    }
-                    for p in products
-                ]
-                logger.info(f"Successfully fetched {len(products_data)} products.")
-                return products_data
+            # Use the MongoDB Product model directly
+            products = Product.get_all()
+            products_data = [
+                {
+                    "Title": p['title'],
+                    "Price": p['price'] if isinstance(p['price'], dict) else p['price'],
+                    "Additional info": p['additional_info'] if isinstance(p['additional_info'], dict) else p['additional_info'],
+                    "Category": p['category'],
+                    "Stock status": p['stock_status'],
+                    "Translated Title": p['translated_title'],
+                    "Link": p['link']
+                }
+                for p in products
+            ]
+            logger.info(f"Successfully fetched {len(products_data)} products.")
+            return products_data
         except Exception as e:
             logger.error(f"Error fetching products: {e}")
             return []
@@ -44,18 +41,32 @@ class Backend:
     def app_settings_to_main(self):
         logger.info("Sending app settings to the main server.")
         try:
-            with SessionLocal() as db:
-                setting = db.query(AppSettings).all()
-                setting = [{s.key:s.value} for s in setting]
-
-                response = requests.post(self.app_setting_url, headers=self.headers, json=setting)
-                if response.status_code == 200:
-                    logger.info("App settings successfully sent to the main server.")
-                    return True
-                else:
-                    logger.error(f"Failed to send app settings. Status code: {response.status_code}")
-                    logger.debug(f"Settings data: {setting}")
-                    return False
+            # Use the MongoDB AppSettings model directly
+            settings = AppSettings.get_all()
+            
+            # Make sure settings is not empty
+            if not settings:
+                logger.warning("No app settings found in database")
+                return False
+                
+            # Format settings as a list of dictionaries with key-value pairs
+            setting_list = [{s['key']: s['value']} for s in settings]
+            
+            # Log the data being sent for debugging
+            logger.info(f"Sending the following app settings: {setting_list}")
+            
+            # Send to main app
+            response = requests.post(self.app_setting_url, headers=self.headers, json=setting_list)
+            
+            # Check response status
+            if response.status_code == 200:
+                logger.info("App settings successfully sent to the main server.")
+                return True
+            else:
+                logger.error(f"Failed to send app settings. Status code: {response.status_code}")
+                logger.error(f"Response text: {response.text}")
+                logger.debug(f"Settings data: {setting_list}")
+                return False
         except Exception as e:
             logger.error(f"Error in app_settings_to_main: {str(e)}")
             return {"error in app_settings_to_main calling": str(e)}
@@ -77,10 +88,10 @@ class Backend:
         logger.info(f"Fetching app setting for key: {key}.")
         self.app_settings_to_main()
         try:
-            with SessionLocal() as db:
-                setting = db.query(AppSettings).filter(AppSettings.key == key).first()
-                logger.info(f"App setting for key '{key}' fetched successfully.")
-                return setting.value if setting else None
+            # Use the MongoDB AppSettings model directly
+            setting = AppSettings.get_by_key(key)
+            logger.info(f"App setting for key '{key}' fetched successfully.")
+            return setting['value'] if setting else None
         except Exception as e:
             logger.error(f"Error in get_app_setting for key '{key}': {str(e)}")
             return {"error in get_app_setting calling": str(e)}
@@ -88,16 +99,12 @@ class Backend:
     def update_is_active(self, key, value):
         logger.info(f"Updating app setting for key: {key} with value: {value}.")
         try:
-            with SessionLocal() as db:
-                setting = db.query(AppSettings).filter(AppSettings.key == key).first()
-                if not setting:
-                    setting = AppSettings(key=key, value=value)
-                    db.add(setting)
-                    logger.info(f"New app setting created for key: {key}.")
-                else:
-                    setting.value = value
-                    logger.info(f"App setting updated for key: {key}.")
-                db.commit()
+            # Use the MongoDB AppSettings model directly
+            result = AppSettings.create_or_update(key, value)
+            if result:
+                logger.info(f"App setting updated for key: {key}.")
+            else:
+                logger.error(f"Failed to update app setting for key: {key}.")
             self.app_settings_to_main()
         except Exception as e:
             logger.error(f"Error in update_is_active for key '{key}': {str(e)}")
@@ -106,21 +113,23 @@ class Backend:
     def get_fixed_responses(self, incoming=None):
         logger.info(f"Fetching fixed responses for incoming type: {incoming}.")
         try:
-            with SessionLocal() as db:
-                responses = db.query(FixedResponse).filter(FixedResponse.incoming == incoming).all()
-                responses = [
-                    {
-                        "id": r.id,
-                        "trigger_keyword": r.trigger_keyword,
-                        "comment_response_text": r.comment_response_text,
-                        "direct_response_text": r.direct_response_text,
-                        "updated_at": r.updated_at.strftime("%Y-%m-%d %H:%M:%S.%f") if r.updated_at else None
-                    }
-                    for r in responses
-                ]
-                logger.info(f"Successfully fetched {len(responses)} fixed responses.")
-                self.fixedresponses_to_main(responses, incoming)
-                return responses
+            # Use the MongoDB FixedResponse model directly
+            # Find all responses with matching incoming type
+            responses = []
+            all_responses = FixedResponse.get_all()
+            for r in all_responses:
+                if r['incoming'] == incoming:
+                    responses.append({
+                        "id": str(r['_id']),
+                        "trigger_keyword": r['trigger_keyword'],
+                        "comment_response_text": r['comment_response_text'],
+                        "direct_response_text": r['direct_response_text'],
+                        "updated_at": r['updated_at'].strftime("%Y-%m-%d %H:%M:%S.%f") if r['updated_at'] else None
+                    })
+            
+            logger.info(f"Successfully fetched {len(responses)} fixed responses.")
+            self.fixedresponses_to_main(responses, incoming)
+            return responses
         except Exception as e:
             logger.error(f"Failed to fetch fixed responses for incoming type '{incoming}': {str(e)}")
             raise RuntimeError(f"Failed to fetch fixed responses: {str(e)}")
@@ -128,20 +137,20 @@ class Backend:
     def add_fixed_response(self, trigger, comment_response_text, direct_response_text, incoming):
         logger.info(f"Adding new fixed response for trigger: {trigger} and incoming type: {incoming}.")
         try:
-            with SessionLocal() as db:
-                new_response = FixedResponse(
-                    trigger_keyword=trigger,
-                    comment_response_text=comment_response_text if incoming == "Comment" else None,
-                    direct_response_text=direct_response_text,
-                    incoming=incoming,
-                    created_at=datetime.now(timezone.utc),
-                    updated_at=datetime.now(timezone.utc)
-                )
-                db.add(new_response)
-                db.commit()
-                db.refresh(new_response)
-                logger.info(f"Fixed response added successfully with ID: {new_response.id}.")
-                return new_response.id
+            # Use the MongoDB FixedResponse model directly
+            new_response = FixedResponse.create(
+                incoming=incoming,
+                trigger_keyword=trigger,
+                comment_response_text=comment_response_text if incoming == "Comment" else None,
+                direct_response_text=direct_response_text
+            )
+            
+            if new_response:
+                logger.info(f"Fixed response added successfully with ID: {new_response['_id']}.")
+                return str(new_response['_id'])
+            else:
+                logger.error("Failed to add fixed response.")
+                return None
         except Exception as e:
             logger.error(f"Failed to add fixed response: {str(e)}")
             raise RuntimeError(f"Failed to add fixed response: {str(e)}")
@@ -149,18 +158,20 @@ class Backend:
     def update_fixed_response(self, response_id, trigger, comment_response_text, direct_response_text, incoming):
         logger.info(f"Updating fixed response with ID: {response_id}.")
         try:
-            with SessionLocal() as db:
-                response = db.query(FixedResponse).filter(FixedResponse.id == response_id).first()
-                if response:
-                    response.trigger_keyword = trigger
-                    response.comment_response_text = comment_response_text if incoming == "Comment" else None,
-                    response.direct_response_text = direct_response_text
-                    response.incoming = incoming
-                    response.updated_at = datetime.now(timezone.utc)
-                    db.commit()
-                    db.refresh(response)
-                    logger.info(f"Fixed response with ID {response_id} updated successfully.")
-                return True
+            # Use the MongoDB FixedResponse model directly
+            update_data = {
+                "trigger_keyword": trigger,
+                "comment_response_text": comment_response_text if incoming == "Comment" else None,
+                "direct_response_text": direct_response_text,
+                "incoming": incoming
+            }
+            
+            result = FixedResponse.update(response_id, update_data)
+            if result:
+                logger.info(f"Fixed response with ID {response_id} updated successfully.")
+            else:
+                logger.warning(f"No changes made to fixed response with ID {response_id}.")
+            return result
         except Exception as e:
             logger.error(f"Failed to update fixed response with ID {response_id}: {str(e)}")
             raise RuntimeError(f"Failed to update fixed response: {str(e)}")
@@ -168,13 +179,13 @@ class Backend:
     def delete_fixed_response(self, response_id):
         logger.info(f"Deleting fixed response with ID: {response_id}.")
         try:
-            with SessionLocal() as db:
-                response = db.query(FixedResponse).filter(FixedResponse.id == response_id).first()
-                if response:
-                    db.delete(response)
-                    db.commit()
-                    logger.info(f"Fixed response with ID {response_id} deleted successfully.")
-                return True
+            # Use the MongoDB FixedResponse model directly
+            result = FixedResponse.delete(response_id)
+            if result:
+                logger.info(f"Fixed response with ID {response_id} deleted successfully.")
+            else:
+                logger.warning(f"Fixed response with ID {response_id} not found or could not be deleted.")
+            return result
         except Exception as e:
             logger.error(f"Failed to delete fixed response with ID {response_id}: {str(e)}")
             raise RuntimeError(f"Failed to delete fixed response: {str(e)}")
@@ -210,14 +221,14 @@ class Backend:
         """Get the current vector store ID from the database."""
         logger.info("Fetching current vector store ID.")
         try:
-            with SessionLocal() as db:
-                vs_setting = db.query(AppSettings).filter_by(key='vs_id').first()
-                if vs_setting:
-                    logger.info(f"Current vector store ID: {vs_setting.value}")
-                    return vs_setting.value
-                else:
-                    logger.info("No vector store ID found in database.")
-                    return None
+            # Use the MongoDB AppSettings model directly
+            vs_setting = AppSettings.get_by_key('vs_id')
+            if vs_setting:
+                logger.info(f"Current vector store ID: {vs_setting['value']}")
+                return vs_setting['value']
+            else:
+                logger.info("No vector store ID found in database.")
+                return None
         except Exception as e:
             logger.error(f"Error fetching vector store ID: {str(e)}")
             return None
@@ -265,13 +276,42 @@ class Backend:
         logger.info("Connecting assistant to vector store.")
         try:
             openai_service = OpenAIService()
-            result = openai_service.connect_assistant_to_vs()
+            result = openai_service.update_or_create_vs()
+            
             if result['success']:
-                logger.info("Assistant connected to vector store successfully.")
-                return result
+                # After successful vector store creation, connect it to the assistant
+                assistant_result = openai_service.update_assistant_instructions(
+                    openai_service.get_assistant_instructions() or "You are a helpful assistant with knowledge about our products."
+                )
+                
+                if assistant_result['success']:
+                    logger.info("Assistant connected to vector store successfully.")
+                    # Return combined result with logs
+                    return {
+                        'success': True,
+                        'message': f"Created vector store with {result['processed_count']} of {result['total_count']} products and connected to assistant.",
+                        'vector_store_id': result.get('vector_store_id'),
+                        'processed_count': result.get('processed_count'),
+                        'total_count': result.get('total_count'),
+                        'logs': result.get('logs', [])
+                    }
+                else:
+                    logger.warning(f"Vector store created but failed to update assistant: {assistant_result['message']}")
+                    return {
+                        'success': True,
+                        'message': f"Vector store created successfully but failed to update assistant: {assistant_result['message']}",
+                        'vector_store_id': result.get('vector_store_id'),
+                        'processed_count': result.get('processed_count'),
+                        'total_count': result.get('total_count'),
+                        'logs': result.get('logs', [])
+                    }
             else:
-                logger.warning(f"Failed to connect assistant to vector store: {result['message']}")
-                return result
+                logger.warning(f"Failed to create vector store: {result['message']}")
+                return {
+                    'success': False,
+                    'message': result['message'],
+                    'logs': result.get('logs', [])
+                }
         except Exception as e:
-            logger.error(f"Error connecting assistant to vector store: {str(e)}")
-            return {'success': False, 'message': str(e)}
+            logger.error(f"Error connecting assistant to vector store: {str(e)}", exc_info=True)
+            return {'success': False, 'message': str(e), 'logs': [f"Error: {str(e)}"]}

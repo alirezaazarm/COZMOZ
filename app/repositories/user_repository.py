@@ -1,27 +1,33 @@
-from sqlalchemy.orm import Session
 from ..models.user import User
+from ..models.database import USERS_COLLECTION, db
 
 class UserRepository:
-    def __init__(self, session: Session):
-        self.session = session
-
+    def __init__(self, db_instance=None):
+        self.db = db_instance or db
+    
     def get_or_create_system_users(self):
-        sender = self.session.query(User).get(User.SYSTEM_SENDER_ID)
+        # Check if system sender exists
+        sender = self.db[USERS_COLLECTION].find_one({"user_id": User.SYSTEM_SENDER_ID})
         if not sender:
-            sender = User(
+            # Create system sender
+            sender_doc = User.create_user_document(
                 user_id=User.SYSTEM_SENDER_ID,
                 username="system_sender",
                 full_name="System Sender Account"
             )
-            self.session.add(sender)
-
-        recipient = self.session.query(User).get(User.SYSTEM_RECIPIENT_ID)
+            self.db[USERS_COLLECTION].insert_one(sender_doc)
+            sender = sender_doc
+        
+        # Check if system recipient exists
+        recipient = self.db[USERS_COLLECTION].find_one({"user_id": User.SYSTEM_RECIPIENT_ID})
         if not recipient:
-            recipient = User(
+            # Create system recipient
+            recipient_doc = User.create_user_document(
                 user_id=User.SYSTEM_RECIPIENT_ID,
                 username="system_recipient",
                 full_name="System Recipient Account"
             )
-            self.session.add(recipient)
-        self.session.commit()
+            self.db[USERS_COLLECTION].insert_one(recipient_doc)
+            recipient = recipient_doc
+            
         return sender, recipient

@@ -1,13 +1,9 @@
 from .openai_service import OpenAIService
-from .instagram_service import InstagramService
+from .instagram_service import InstagramService, APP_SETTINGS
 from .message_service import MessageService
-from ..models.user import User
-from ..models.message import DirectMessage
-from ..models.enums import MessageStatus, MessageDirection
-from sqlalchemy import select
+from ..models.enums import UserStatus, MessageRole
 import logging
-import uuid
-from datetime import datetime, UTC
+from datetime import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -20,174 +16,142 @@ class Mediator:
     def process_pending_messages(self, cutoff_time=None):
         logger.info("Starting message processing cycle")
 
-        # Get all users with pending messages without a transaction
-        users_with_pending_messages = self._get_users_with_pending_messages(cutoff_time)
-        logger.info(f"Found {len(users_with_pending_messages)} users with pending messages")
+        # Check if assistant is disabled in app settings
+        if not APP_SETTINGS.get('assistant', True):
+            logger.info("Assistant is disabled in app settings. Skipping message processing.")
+            return
 
-        for sender_id in users_with_pending_messages:
+        # Get all users with WAITING status that have messages
+        users_waiting = self._get_waiting_users(cutoff_time)
+        logger.info(f"Found {len(users_waiting)} users with WAITING status")
+
+        for user_id in users_waiting:
             try:
-                # Make sure we're not in a transaction when starting a new batch
-                if self.db.in_transaction():
-                    self.db.commit()
-
-                self._process_user_batch(sender_id, cutoff_time)
+                # Process each user's messages
+                self._process_user_messages(user_id, cutoff_time)
             except Exception as user_error:
-                logger.error(f"Failed processing user {sender_id}: {str(user_error)}", exc_info=True)
-                if self.db.in_transaction():
-                    self.db.rollback()
+                logger.error(f"Failed processing user {user_id}: {str(user_error)}", exc_info=True)
+                # Update user status to indicate failure
+                self.message_service.update_user_status(user_id, UserStatus.ASSISTANT_FAILED.value)
                 continue
 
-    def _get_users_with_pending_messages(self, cutoff_time=None):
-        logger.info(f"Getting users with pending messages since {cutoff_time}")
-        query = (
-            select(DirectMessage.sender_id)
-            .where(
-                DirectMessage.status == MessageStatus.PENDING.value,
-                DirectMessage.direction == MessageDirection.INCOMING.value
-            )
-        )
-        if cutoff_time:
-            query = query.where(DirectMessage.timestamp >= cutoff_time)
+    def _get_waiting_users(self, cutoff_time=None):
+        logger.info(f"Getting users with WAITING status and messages older than {cutoff_time}")
+        
+        # Make sure cutoff_time is timezone-aware if it's not None
+        if cutoff_time is not None and cutoff_time.tzinfo is None:
+            cutoff_time = cutoff_time.replace(tzinfo=timezone.utc)
+        
+        # Build the match condition - only status check
+        match_condition = {"status": UserStatus.WAITING.value}
+        
+        # Add additional match condition if cutoff_time is provided
+        # Find users whose LATEST message is older than the cutoff time
+        if cutoff_time is not None:
+            # Add aggregate pipeline to find users with messages older than cutoff
+            pipeline = [
+                # Match users with WAITING status
+                {"$match": {"status": UserStatus.WAITING.value}},
+                
+                # Find users with at least one message
+                {"$match": {"direct_messages": {"$exists": True, "$ne": []}}},
+                
+                # Unwind the direct_messages array
+                {"$unwind": "$direct_messages"},
+                
+                # Only consider user messages
+                {"$match": {"direct_messages.role": MessageRole.USER.value}},
+                
+                # Group by user_id and find the max timestamp of user messages
+                {"$group": {
+                    "_id": "$user_id",
+                    "latest_msg_time": {"$max": "$direct_messages.timestamp"},
+                    "user_id": {"$first": "$user_id"}
+                }},
+                
+                # Only include users whose latest message is older than cutoff_time
+                {"$match": {"latest_msg_time": {"$lte": cutoff_time}}},
+                
+                # Only return the user_id
+                {"$project": {"user_id": 1, "_id": 0}}
+            ]
+        else:
+            # If no cutoff_time, just get all waiting users
+            pipeline = [
+                {"$match": match_condition},
+                {"$project": {"user_id": 1, "_id": 0}}
+            ]
+        
+        users = list(self.db.users.aggregate(pipeline))
+        user_ids = [user.get('user_id') for user in users]
+        
+        logger.info(f"Found {len(user_ids)} users with WAITING status and latest message older than cutoff")
+        return user_ids
 
-        users = self.db.scalars(query.group_by(DirectMessage.sender_id).distinct()).all()
-        logger.info(f"Found {len(users)} users with pending messages")
-
-        # Log each user's ID for debugging
-        if users:
-            logger.debug(f"User IDs with pending messages: {users}")
-
-        return users
-
-    def _process_user_batch(self, sender_id, cutoff_time=None):
-        messages = []
-        outgoing_msg = None
-        transaction_started = False
-
+    def _process_user_messages(self, user_id, cutoff_time=None):
+        logger.info(f"Processing batch messages for user {user_id}")
+        
         try:
-            logger.info(f"Processing batch for user {sender_id}")
-
-            # Only start a transaction if not already in one
-            if not self.db.in_transaction():
-                self.db.begin()
-                transaction_started = True
-
-            # Get user first
-            user = self.db.get(User, sender_id)
+            # Get user
+            user = self.db.users.find_one({"user_id": user_id})
             if not user:
-                logger.warning(f"User {sender_id} not found")
-                if transaction_started:
-                    self.db.commit()
+                logger.warning(f"User {user_id} not found")
                 return
-
-            # Get messages with proper locking
-            messages = self.message_service.lock_and_get_messages(sender_id, cutoff_time)
-            if not messages:
-                logger.info(f"No messages found for user {sender_id}")
-                if transaction_started:
-                    self.db.commit()
+            
+            # Ensure cutoff_time is properly timezone-aware if provided (for logging only)
+            if cutoff_time is not None and cutoff_time.tzinfo is None:
+                cutoff_time = cutoff_time.replace(tzinfo=timezone.utc)
+            
+            # Get all user messages since the last assistant/admin reply as a single batch
+            # We don't do any filtering by timestamp here - that was done in _get_waiting_users
+            user_messages = self.message_service.get_user_messages(user_id, cutoff_time)
+            if not user_messages:
+                logger.info(f"No user messages found for user {user_id}")
                 return
-
-            message_texts = [msg.message_text for msg in messages]
-            logger.info(f"Processing {len(messages)} messages with texts: {message_texts}")
-
-            # Commit current transaction before OpenAI call
-            if self.db.in_transaction():
-                self.db.commit()
-                transaction_started = False
-
-            # Process with OpenAI outside of transaction
+            
+            # Get the message texts for processing
+            message_texts = [msg.get('text') for msg in user_messages]
+            logger.info(f"Processing batch of {len(user_messages)} user messages: {message_texts}")
+            
+            # Process with OpenAI
             thread_id = self.openai_service.ensure_thread(user)
-            self.openai_service.wait_for_active_run_completion(thread_id)
-            response_text = self.openai_service.process_messages(thread_id, message_texts)
-
-            # Create and save response
-            if not self.db.in_transaction():
-                self.db.begin()
-                transaction_started = True
-
-            # Create response message
-            outgoing_msg = DirectMessage(
-                message_id=f"resp_{uuid.uuid4()}",
-                sender_id=messages[0].recipient_id,
-                recipient_id=sender_id,
-                message_text=response_text,
-                direction=MessageDirection.OUTGOING.value,
-                status=MessageStatus.ASSISTANT_RESPONDED.value,
-                response_to=[msg.message_id for msg in messages],
-                timestamp=datetime.now(UTC))
-
-            # Save response and update message statuses
-            self.db.add(outgoing_msg)
-            self.message_service.update_message_statuses(messages, MessageStatus.ASSISTANT_RESPONDED.value)
-
-            if transaction_started:
-                self.db.commit()
-                transaction_started = False
-
-            # Handle Instagram sending
+            response_text = self.openai_service.process_messages(
+                thread_id, 
+                message_texts, 
+                user
+            )
+            
+            if not response_text:
+                logger.warning(f"No response generated for user {user_id}")
+                self.message_service.update_user_status(user_id, UserStatus.ASSISTANT_FAILED.value)
+                return
+            
+            logger.info(f"Generated response: {response_text}")
+            
+            # Save response
+            success = self.message_service.save_assistant_response(user_messages, response_text, user_id)
+            if not success:
+                logger.error(f"Failed to save response for user {user_id}")
+                self.message_service.update_user_status(user_id, UserStatus.ASSISTANT_FAILED.value)
+                return
+            
+            # Try to send to Instagram
             try:
-                success = InstagramService.send_message(sender_id, response_text)
-
-                if not self.db.in_transaction():
-                    self.db.begin()
-                    transaction_started = True
-
-                new_status = (MessageStatus.REPLIED_BY_ASSIST.value if success
-                            else MessageStatus.INSTAGRAM_FAILED.value)
-                self.message_service.update_message_statuses(
-                    messages + [outgoing_msg],
-                    new_status
-                )
-
-                if transaction_started:
-                    self.db.commit()
-                    transaction_started = False
-
+                instagram_success = InstagramService.send_message(user_id, response_text)
+                
+                # Update user status based on Instagram success
+                if instagram_success:
+                    self.message_service.update_user_status(user_id, UserStatus.REPLIED.value)
+                else:
+                    self.message_service.update_user_status(user_id, UserStatus.INSTAGRAM_FAILED.value)
+                    
             except Exception as insta_error:
                 logger.error(f"Instagram update failed: {str(insta_error)}")
-
-                if not self.db.in_transaction():
-                    self.db.begin()
-                    transaction_started = True
-
-                self.message_service.update_message_statuses(
-                    [outgoing_msg],
-                    MessageStatus.INSTAGRAM_FAILED.value
-                )
-
-                if transaction_started:
-                    self.db.commit()
-                    transaction_started = False
+                self.message_service.update_user_status(user_id, UserStatus.INSTAGRAM_FAILED.value)
                 raise
-
-        except Exception as unexpected_error:
-            logger.error(f"Processing failed: {str(unexpected_error)}")
-
-            if self.db.in_transaction():
-                self.db.rollback()
-                transaction_started = False
-
-            if messages:
-                self.message_service.handle_batch_error(unexpected_error, messages)
-
-            if outgoing_msg:
-                if not self.db.in_transaction():
-                    self.db.begin()
-                    transaction_started = True
-
-                self.db.delete(outgoing_msg)
-
-                if transaction_started:
-                    self.db.commit()
+                
+        except Exception as e:
+            logger.error(f"Processing failed for user {user_id}: {str(e)}", exc_info=True)
+            self.message_service.update_user_status(user_id, UserStatus.ASSISTANT_FAILED.value)
             raise
-
-        finally:
-            # Always make sure we don't leave transactions open
-            if transaction_started and self.db.in_transaction():
-                self.db.rollback()
-
-    def _link_response_to_messages(self, messages, response_msg):
-        for msg in messages:
-            if not msg.response_to:
-                msg.response_to = []
-            msg.response_to.append(response_msg.message_id)
+            raise

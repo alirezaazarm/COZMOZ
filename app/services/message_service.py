@@ -1,119 +1,156 @@
-from sqlalchemy.orm import Session
-from sqlalchemy import select
-from ..models.message import DirectMessage
-from ..models.enums import MessageStatus, MessageDirection
-from ..utils.exceptions import PermanentError
+from ..models.enums import UserStatus, MessageRole
 import logging
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
 class MessageService:
-    def __init__(self, db: Session):
+    def __init__(self, db):
         self.db = db
 
-    def lock_and_get_messages(self, sender_id, cutoff_time):
-        logger.info(f"Locking messages for user {sender_id}")
-        try:
-            self.db.expire_all()
+    def get_user_messages(self, user_id, cutoff_time=None):
+        """
+        Get all user messages since the last assistant/admin message as a single batch.
+        
+        Args:
+            user_id: The user ID to get messages for
+            cutoff_time: This is used to log information only, not for filtering messages
             
-            # Execute the query directly if already in a transaction
-            query = (
-                select(DirectMessage)
-                .where(
-                    DirectMessage.sender_id == sender_id,
-                    DirectMessage.status == MessageStatus.PENDING,
-                    DirectMessage.direction == MessageDirection.INCOMING
-                )
-                .with_for_update(skip_locked=True)
-                .order_by(DirectMessage.timestamp)
+        Returns:
+            List of user messages since the last assistant/admin message
+        """
+        logger.info(f"Getting batch messages for user {user_id}")
+        try:
+            # Find user and get their direct messages
+            user = self.db.users.find_one(
+                {"user_id": user_id, "status": UserStatus.WAITING.value},
+                {"direct_messages": 1}
             )
             
-            # Use cutoff_time if provided
-            if cutoff_time:
-                query = query.where(DirectMessage.timestamp >= cutoff_time)
+            if not user or "direct_messages" not in user:
+                logger.info(f"No user found or no messages for user {user_id}")
+                return []
             
-            messages = self.db.execute(query).scalars().all()
-            message_count = len(messages)
+            # Get all messages and ensure they're sorted by timestamp
+            all_messages = user.get("direct_messages", [])
+            
+            # Convert datetime objects to be timezone-aware
+            for msg in all_messages:
+                if "timestamp" in msg and msg["timestamp"].tzinfo is None:
+                    msg["timestamp"] = msg["timestamp"].replace(tzinfo=timezone.utc)
+            
+            # Sort all messages by timestamp
+            all_messages.sort(key=lambda x: x.get("timestamp", datetime.min))
+            
+            # Find the index of the last assistant or admin message
+            last_non_user_idx = -1
+            for i, msg in enumerate(all_messages):
+                role = msg.get("role")
+                if role in [MessageRole.ASSISTANT.value, MessageRole.ADMIN.value]:
+                    last_non_user_idx = i
+            
+            # Get messages after the last assistant/admin message (or all if none found)
+            start_idx = last_non_user_idx + 1
+            recent_messages = all_messages[start_idx:]
+            
+            # Filter to only include user messages (no timestamp filtering)
+            user_messages = [msg for msg in recent_messages if msg.get("role") == MessageRole.USER.value]
+            
+            message_count = len(user_messages)
             
             if message_count:
-                logger.info(f"Locked {message_count} pending messages for user {sender_id}")
-                message_ids = [msg.message_id for msg in messages]
-                logger.debug(f"Message IDs: {message_ids}")
-            else:
-                logger.info(f"No pending messages found for user {sender_id}")
+                logger.info(f"Found {message_count} user messages since last assistant/admin reply for user {user_id}")
                 
-            return messages
+                # For debugging, check if any messages are newer than cutoff_time
+                if cutoff_time is not None:
+                    if cutoff_time.tzinfo is None:
+                        cutoff_time = cutoff_time.replace(tzinfo=timezone.utc)
+                    
+                    newer_messages = sum(1 for msg in user_messages 
+                                       if msg.get("timestamp") > cutoff_time)
+                    
+                    if newer_messages > 0:
+                        logger.debug(f"{newer_messages} messages are newer than cutoff time, but including in batch anyway")
+                
+                return user_messages
+            else:
+                logger.info(f"No user messages since last assistant/admin reply for user {user_id}")
+                return []
+                
         except Exception as e:
-            logger.error(f"Locking failed: {str(e)}")
+            logger.error(f"Error getting messages: {str(e)}", exc_info=True)
             raise
 
-    def update_message_statuses(self, messages, status):
-        try:
-            for msg in messages:
-                msg.status = status
-            self.db.flush()
-        except Exception as e:
-            logger.error(f"Status update failed: {str(e)}")
-            raise
+    def _normalize_timestamp(self, timestamp):
+        """Ensure timestamp is timezone-aware."""
+        if timestamp.tzinfo is None:
+            return timestamp.replace(tzinfo=timezone.utc)
+        return timestamp
 
-    def get_pending_users_query(self, cutoff_time):
-        logger.info(f"Constructing query to retrieve pending users with cutoff_time: {cutoff_time}")
+    def update_user_status(self, user_id, status):
+        logger.info(f"Updating user {user_id} status to {status}")
         try:
-            query = (
-                select(DirectMessage.sender_id)
-                .where(
-                    DirectMessage.status == MessageStatus.PENDING,
-                    DirectMessage.timestamp >= cutoff_time
-                )
-                .group_by(DirectMessage.sender_id)
-                .distinct()
+            result = self.db.users.update_one(
+                {"user_id": user_id},
+                {"$set": {"status": status, "updated_at": datetime.now(timezone.utc)}}
             )
-            logger.debug(f"Query constructed: {query}")
-            return query
+            
+            success = result.modified_count > 0
+            if success:
+                logger.info(f"Updated user {user_id} status to {status}")
+            else:
+                logger.warning(f"Failed to update user {user_id} status")
+            
+            return success
         except Exception as e:
-            logger.error(f"Error while constructing query for pending users: {str(e)}")
-            raise
+            logger.error(f"Error updating user status: {str(e)}", exc_info=True)
+            return False
 
-    def handle_batch_error(self, error, messages):
+    def save_assistant_response(self, messages, response_text, user_id):
+        """Save the assistant's response for a user."""
+        if not messages or not response_text:
+            logger.warning("Missing data for saving assistant response")
+            return False
+        
         try:
-            if not messages:
-                logger.warning("No messages to handle in batch error")
-                return
-
-            new_status = MessageStatus.PENDING.value
-            if isinstance(error, PermanentError):
-                new_status = MessageStatus.ASSISTANT_FAILED.value
-
-            valid_statuses = [e.value for e in MessageStatus]
-            if new_status not in valid_statuses:
-                raise ValueError(f"Invalid status {new_status}")
-
-            message_ids = [msg.message_id for msg in messages]
-
-            # Check if we need to start a transaction
-            transaction_started = False
-            if not self.db.in_transaction():
-                self.db.begin()
-                transaction_started = True
-
-            # Update message statuses
-            self.db.query(DirectMessage).filter(
-                DirectMessage.message_id.in_(message_ids)
-            ).update({"status": new_status}, synchronize_session=False)
-
-            self.db.query(DirectMessage).filter(
-                DirectMessage.response_to.contains(message_ids)
-            ).update(
-                {"status": MessageStatus.ASSISTANT_FAILED.value},
-                synchronize_session=False
+            # Create message document for assistant response
+            message_doc = {
+                "text": response_text,
+                "role": MessageRole.ASSISTANT.value,
+                "timestamp": datetime.now(timezone.utc)
+            }
+            
+            # Add message to user's direct_messages array and update status
+            result = self.db.users.update_one(
+                {"user_id": user_id},
+                {
+                    "$push": {"direct_messages": message_doc},
+                    "$set": {"status": UserStatus.REPLIED.value, "updated_at": datetime.now(timezone.utc)}
+                }
             )
-
-            # Only commit if we started the transaction
-            if transaction_started:
-                self.db.commit()
-
+            
+            if result.modified_count == 0:
+                logger.error("Failed to save assistant response")
+                return False
+                
+            logger.info(f"Saved assistant response for user {user_id} and updated status")
+            return True
+            
         except Exception as e:
-            logger.critical(f"Batch error handling failed: {str(e)}")
-            if self.db.in_transaction():
-                self.db.rollback()
-            raise
+            logger.error(f"Error saving assistant response: {str(e)}", exc_info=True)
+            return False
+
+    def handle_processing_failure(self, user_id, error):
+        """Handle failures in processing messages."""
+        logger.error(f"Processing failed for user {user_id}: {str(error)}")
+        
+        # Update user status to indicate failure
+        status = UserStatus.ASSISTANT_FAILED.value
+        
+        try:
+            self.update_user_status(user_id, status)
+            logger.info(f"Updated user {user_id} status to {status} due to failure")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update user status after failure: {str(e)}")
+            return False

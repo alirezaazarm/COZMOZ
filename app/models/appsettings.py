@@ -1,52 +1,94 @@
-from sqlalchemy import Column, String, Integer, event
-from .base import Base
+from .database import db, APP_SETTINGS_COLLECTION, with_db
 import logging
+from pymongo.errors import PyMongoError
 
 logger = logging.getLogger(__name__)
 
 # In-memory store for app settings
 _settings_store = {}
 
-class AppSettings(Base):
-    __tablename__ = 'app_settings'
-    id = Column(Integer, primary_key=True)
-    key = Column(String(50), unique=True, nullable=False)
-    value = Column(String(255), nullable=False)
-
+class AppSettings:
+    """App settings model for MongoDB with in-memory caching"""
+    
+    @staticmethod
+    def create_app_setting_document(key, value):
+        """Create a new app setting document structure"""
+        return {
+            "key": key,
+            "value": value
+        }
+    
+    @staticmethod
+    @with_db
+    def get_by_key(key):
+        """Get a setting by key from the database"""
+        return db[APP_SETTINGS_COLLECTION].find_one({"key": key})
+    
     @staticmethod
     def get_from_memory(key):
         """Get setting value from memory store"""
         return _settings_store.get(key)
-
+    
     @staticmethod
     def get_all_from_memory():
         """Get all settings from memory store"""
         return _settings_store.copy()
+    
+    @staticmethod
+    @with_db
+    def create_or_update(key, value):
+        """Create or update a setting"""
+        try:
+            # Upsert the setting
+            result = db[APP_SETTINGS_COLLECTION].update_one(
+                {"key": key},
+                {"$set": {"value": value}},
+                upsert=True
+            )
+            
+            # Update in-memory store
+            _update_memory_store(key, value)
+            
+            return result.acknowledged
+        except PyMongoError as e:
+            logger.error(f"Failed to create/update app setting: {str(e)}")
+            return False
+    
+    @staticmethod
+    @with_db
+    def delete(key):
+        """Delete a setting"""
+        try:
+            result = db[APP_SETTINGS_COLLECTION].delete_one({"key": key})
+            
+            # Remove from in-memory store
+            _settings_store.pop(key, None)
+            logger.info(f"Removed app setting from memory: {key}")
+            
+            return result.deleted_count > 0
+        except PyMongoError as e:
+            logger.error(f"Failed to delete app setting: {str(e)}")
+            return False
+    
+    @staticmethod
+    @with_db
+    def get_all():
+        """Get all settings from the database"""
+        return list(db[APP_SETTINGS_COLLECTION].find())
 
-def _update_memory_store(setting):
+def _update_memory_store(key, value):
     """Update the in-memory store with a setting"""
-    _settings_store[setting.key] = setting.value
-    logger.info(f"Updated app setting in memory: {setting.key}")
+    _settings_store[key] = value
+    logger.info(f"Updated app setting in memory: {key}")
 
-@event.listens_for(AppSettings, 'after_insert')
-def receive_after_insert(mapper, connection, target):
-    """Listen for new settings"""
-    _update_memory_store(target)
-
-@event.listens_for(AppSettings, 'after_update')
-def receive_after_update(mapper, connection, target):
-    """Listen for setting updates"""
-    _update_memory_store(target)
-
-@event.listens_for(AppSettings, 'after_delete')
-def receive_after_delete(mapper, connection, target):
-    """Listen for setting deletions"""
-    _settings_store.pop(target.key, None)
-    logger.info(f"Removed app setting from memory: {target.key}")
-
-def load_all_settings(session):
+@with_db
+def load_all_settings():
     """Load all settings into memory"""
-    settings = session.query(AppSettings).all()
+    settings = db[APP_SETTINGS_COLLECTION].find()
+    count = 0
+    
     for setting in settings:
-        _update_memory_store(setting)
-    logger.info(f"Loaded {len(settings)} app settings into memory")
+        _update_memory_store(setting["key"], setting["value"])
+        count += 1
+        
+    logger.info(f"Loaded {count} app settings into memory") 

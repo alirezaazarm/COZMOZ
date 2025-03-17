@@ -1,0 +1,16 @@
+flask
+python-dotenv
+pymongo
+openai
+requests
+apscheduler
+tenacity
+python-dateutil
+pandas
+torch
+transformers
+pillow
+gdown
+pathlib
+streamlit
+beautifulsoup4

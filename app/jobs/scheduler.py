@@ -1,14 +1,21 @@
 from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+from apscheduler.jobstores.mongodb import MongoDBJobStore
 from apscheduler.executors.pool import ThreadPoolExecutor
-from ..models.base import engine
+from ..models.database import client, SCHEDULER_JOBS_COLLECTION
+from ..config import Config
 import logging
 
 logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler(
     daemon=False,
-    jobstores={'default': SQLAlchemyJobStore(engine=engine)},
+    jobstores={
+        'default': MongoDBJobStore(
+            client=client,
+            database=Config.MONGODB_DB_NAME,
+            collection=SCHEDULER_JOBS_COLLECTION
+        )
+    },
     executors={'default': ThreadPoolExecutor(1)},
     job_defaults={'misfire_grace_time': 60, 'coalesce': True}
 )
@@ -31,4 +38,4 @@ def shutdown_hook():
         scheduler.shutdown(wait=True)
         logger.info("Scheduler shutdown complete.")
     logger.info("Closing database connections")
-    engine.dispose()
+    # No need to dispose client - MongoDB manages connections internally

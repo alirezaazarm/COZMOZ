@@ -99,15 +99,55 @@ class ProductScraperSection(BaseSection):
     def _render_connect_button(self):
         if st.button(f"{self.const.ICONS['connect']} Connect to Vector Store", 
                      help="Process all products, create a vector store, and connect it to the assistant."):
-            with st.spinner("Processing products and connecting to assistant..."):
-                result = self.backend.connect_assistant_to_vs()
+            
+            # Create a placeholder for the status and logs
+            status_placeholder = st.empty()
+            log_placeholder = st.container()
+            
+            with status_placeholder:
+                st.info("Starting product processing and vector store creation...")
+            
+            # Process the products and create vector store
+            result = self.backend.connect_assistant_to_vs()
+            
+            # Display error logs if any (they're already filtered by the service)
+            if 'logs' in result and result['logs']:
+                # Only show the log container if there are error logs
+                with log_placeholder:
+                    log_container = st.expander("Error Logs", expanded=True)
+                    with log_container:
+                        for log in result['logs']:
+                            if "error" in log.lower() or "failed" in log.lower():
+                                st.error(log)
+                            else:
+                                st.warning(log)
+            
+            # Update the status with final result
+            with status_placeholder:
                 if result['success']:
-                    st.success(f"{self.const.ICONS['success']} {result['message']}")
+                    st.success(f"{self.const.ICONS['success']} Vector store created successfully")
                     
                     # Display basic confirmation information
-                    st.info(f"Processed {result['product_count']} products and connected to vector store.")
+                    if 'processed_count' in result and 'total_count' in result:
+                        processed_count = result['processed_count']
+                        total_count = result['total_count']
+                        batch_count = result.get('batch_count', 1)
+                        error_count = total_count - processed_count if total_count > processed_count else 0
+                        
+                        batch_info = f" in {batch_count} batch{'es' if batch_count > 1 else ''}" if batch_count else ""
+                        st.info(f"Successfully processed {processed_count} of {total_count} products{batch_info}. " + 
+                                (f"({error_count} errors)" if error_count > 0 else ""))
+                    
+                    if 'vector_store_id' in result:
+                        st.code(f"Vector Store ID: {result['vector_store_id']}")
                 else:
-                    st.error(f"{self.const.ICONS['error']} {result['message']}")
+                    # Don't show the detailed error message here since it's already in the error logs
+                    st.error(f"{self.const.ICONS['error']} Failed to create vector store")
+                    if 'logs' in result and not result['logs']:
+                        # Only show message in status if no logs are displayed
+                        st.error(result['message'])
+                    
+            # Don't trigger rerun as we want to keep the logs visible
 
     def _handle_scraping_action(self, action):
         try:

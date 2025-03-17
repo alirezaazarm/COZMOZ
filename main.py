@@ -1,6 +1,5 @@
 from flask import Flask
 from apscheduler.triggers.interval import IntervalTrigger
-from app.models.base import engine, Base
 from app.jobs.scheduler import scheduler, start_scheduler, shutdown_hook
 from app.jobs.message_job import process_messages_job, cleanup_processed_messages
 from app.routes.webhook import webhook_bp
@@ -22,8 +21,6 @@ app.register_blueprint(update_bp)
 
 if __name__ == '__main__':
     try:
-        Base.metadata.create_all(bind=engine)
-
         start_scheduler()
 
         scheduler.add_job(

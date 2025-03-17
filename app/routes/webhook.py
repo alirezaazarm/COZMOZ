@@ -1,11 +1,13 @@
 from flask import Blueprint, request, jsonify
-from sqlalchemy.exc import SQLAlchemyError
-from datetime import datetime, UTC
+from pymongo.errors import PyMongoError
+from datetime import datetime, timezone
 import logging
 import json
 from ..services.img_search import process_image
-from ..utils.helpers import download_image, handle_message, check_content_type, handle_comment, get_db
+from ..services.instagram_service import InstagramService
+from ..utils.helpers import get_db
 from ..config import Config
+from ..models.enums import MessageRole
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +62,6 @@ def handle_webhook_post():
                     except Exception as e:
                         logger.error(f"Event processing failed: {str(e)}", exc_info=True)
                         failure_count += 1
-                        db.rollback()
 
                 comment_events = entry.get('changes', [])
                 logger.info(f"Processing {len(comment_events)} changes")
@@ -73,7 +74,6 @@ def handle_webhook_post():
                     except Exception as e:
                         logger.error(f"Change processing failed: {str(e)}", exc_info=True)
                         failure_count += 1
-                        db.rollback()
 
             logger.info(f"Processed {success_count} events successfully, {failure_count} failures")
             return jsonify({
@@ -82,58 +82,125 @@ def handle_webhook_post():
                 "failed": failure_count
             }), 200
 
-        except SQLAlchemyError as e:
+        except PyMongoError as e:
             logger.error(f"Database error: {str(e)}")
-            db.rollback()
             return jsonify({"status": "error", "message": "Database operation failed"}), 500
 
         except Exception as e:
             logger.error(f"Unexpected error: {str(e)}", exc_info=True)
-            db.rollback()
             return jsonify({"status": "error", "message": "Internal server error"}), 500
 
         finally:
-            db.expire_all()
-            logger.debug("Database connection closed")
+            logger.debug("Database operation completed")
 
 
 def process_event(db, event):
     sender_id = event['sender']['id']
-    recipient_id = event['recipient']['id']
-    timestamp = datetime.fromtimestamp(event['timestamp'] / 1000, UTC).replace(tzinfo=None)
+    # We don't need to use the recipient_id as it's always the main account
+    timestamp = datetime.fromtimestamp(event['timestamp'] / 1000, timezone.utc).replace(tzinfo=None)
 
-    if event.get('message', {}).get('is_echo'):
-        logger.debug("Skipping echo message")
-        return False
-
+    # Check if this is an echo message (from business account)
+    is_echo = event.get('message', {}).get('is_echo', False)
+    
+    # Get app settings directly from the instagram_service module to ensure we have the latest
+    from ..services.instagram_service import APP_SETTINGS
+    
+    # Get the current assistant setting
+    is_assistant_enabled = APP_SETTINGS.get('assistant', True)
+    
+    # Explicitly check if the value is a string and convert accordingly
+    if isinstance(is_assistant_enabled, str):
+        is_assistant_enabled = is_assistant_enabled.lower() == 'true'
+    
+    logger.info(f"Webhook - Processing event with assistant {'ENABLED' if is_assistant_enabled else 'DISABLED'}")
+    logger.debug(f"Webhook - APP_SETTINGS: {APP_SETTINGS}")
+    logger.debug(f"Processing event: sender_id={sender_id}, is_echo={is_echo}, is_assistant_enabled={is_assistant_enabled}, CONFIG.PAGE_ID={Config.PAGE_ID}")
+    logger.debug(f"Is sender business account? {sender_id == Config.PAGE_ID}")
+    
+    # Echo message handling:
+    if is_echo:
+        # When the echo is from our page ID
+        if sender_id == Config.PAGE_ID:
+            # If assistant is enabled, skip all page echoes (bot replies)
+            if is_assistant_enabled:
+                logger.debug(f"Assistant enabled - Skipping echo message from business account (ID: {sender_id})")
+                return True
+            else:
+                # When assistant is disabled, we WANT to process these as admin replies
+                logger.debug(f"Assistant disabled - Processing admin echo message (ID: {sender_id})")
+                # Process the message as an admin reply
+                if 'message' in event:
+                    process_result = process_message_event(db, event, sender_id, timestamp)
+                    logger.debug(f"Process message result for admin echo: {process_result}")
+                    return process_result
+                return False
+        else:
+            # Handle other echo message logic
+            if is_assistant_enabled:
+                logger.debug("Assistant is enabled - Skipping echo message")
+                return False
+            else:
+                logger.debug("Assistant is disabled - Processing admin echo message")
+    
     if 'message' in event:
-        return process_message_event(db, event, sender_id, recipient_id, timestamp)
-
+        return process_message_event(db, event, sender_id, timestamp)
     elif 'reaction' in event:
-        return process_reaction_event(db, event, sender_id, recipient_id, timestamp)
-
+        return process_reaction_event(db, event, sender_id, timestamp)
     else:
         logger.warning(f"Unhandled event type: {list(event.keys())}")
         return False
 
 
-def process_message_event(db, event, sender_id, recipient_id, timestamp):
-    logger.debug("Processing message event.")
+def process_message_event(db, event, sender_id, timestamp):
+    logger.debug(f"Processing message event. sender_id={sender_id}, timestamp={timestamp}")
     try:
         message = event['message']
+        logger.debug(f"Message data from event: {message}")
+
+        # Check if this is an echo message from business account
+        is_echo = message.get('is_echo', False)
+        is_business_account = sender_id == Config.PAGE_ID
+        
+        # Get latest app settings
+        from ..services.instagram_service import APP_SETTINGS
+        is_assistant_enabled = APP_SETTINGS.get('assistant', True)
+        
+        # Ensure boolean conversion
+        if isinstance(is_assistant_enabled, str):
+            is_assistant_enabled = is_assistant_enabled.lower() == 'true'
+        
+        logger.debug(f"Message analysis: is_echo={is_echo}, is_business_account={is_business_account}, is_assistant_enabled={is_assistant_enabled}")
+
+        # For echo messages, extract the recipient (actual user we're talking to)
+        recipient_id = None
+        if is_echo and is_business_account:
+            recipient_id = event.get('recipient', {}).get('id')
+            logger.debug(f"Echo message with recipient_id: {recipient_id}")
+
+        # Determine the correct role
+        message_role = MessageRole.USER.value
+        if is_echo and is_business_account:
+            message_role = MessageRole.ADMIN.value if not is_assistant_enabled else MessageRole.ASSISTANT.value
+            logger.debug(f"Echo message from business account. Setting role to {message_role}")
 
         message_data = {
             'id': message['mid'],
             'from': {
-                'id': sender_id,
-                'username': f"ig_user_{sender_id}",
-                'full_name': '',
-                'profile_picture_url': ''
+                'id': sender_id
+                # Username is only needed for comment events, not for messages
             },
-            'recipient_id': recipient_id,
             'text': message.get('text'),
-            'timestamp': timestamp
+            'timestamp': timestamp,
+            'is_echo': is_echo,  # Make sure is_echo is passed through
+            'role': message_role
         }
+        
+        # Add recipient information for echo messages
+        if recipient_id:
+            message_data['recipient'] = {
+                'id': recipient_id
+            }
+            logger.debug(f"Added recipient ID {recipient_id} to message data for echo message")
 
         logger.debug(f"Message data initialized: {message_data}")
 
@@ -154,12 +221,12 @@ def process_message_event(db, event, sender_id, recipient_id, timestamp):
 
             elif attachments_type == "share":
                 logger.debug("Processing shared content.")
-                shared_content_type = check_content_type(message_data['media_url'])
+                shared_content_type = InstagramService.check_content_type(message_data['media_url'])
 
                 if shared_content_type == 'image':
                     logger.debug("Shared content is an image.")
                     message_data['media_type'] += '_image'
-                    image = download_image(message_data['media_url'])
+                    image = InstagramService.download_image(message_data['media_url'])
                     if image:
                         logger.debug("Image downloaded successfully.")
                         message_data['text'] = process_image(image)
@@ -169,7 +236,7 @@ def process_message_event(db, event, sender_id, recipient_id, timestamp):
 
             if message_data['media_type'] == 'image':
                 logger.debug("Processing standalone image attachment.")
-                image = download_image(message_data['media_url'])
+                image = InstagramService.download_image(message_data['media_url'])
                 if image:
                     logger.debug("Image downloaded successfully.")
                     message_data['text'] = process_image(image)
@@ -177,10 +244,13 @@ def process_message_event(db, event, sender_id, recipient_id, timestamp):
                 else:
                     logger.error("Failed to download image.")
 
+        logger.debug(f"Final message data: {message_data}")
         logger.debug("Message event processed successfully. Passing to handle_message.")
-        return handle_message(db, message_data)
+        result = InstagramService.handle_message(db, message_data)
+        logger.debug(f"InstagramService.handle_message result: {result}")
+        return result
     except Exception as e:
-        logger.error(f"Error processing message event: {str(e)}")
+        logger.error(f"Error processing message event: {str(e)}", exc_info=True)
         raise
 
 
@@ -193,13 +263,20 @@ def process_comment_event(db, change):
         comment_id = comment_data.get('id', '')
         parent_comment_id = comment_data.get('parent_id')
         created_time = comment_data.get('created_time', 0)
+        
+        # Check if this comment is from the business account (echo comment)
+        from_id = from_user.get('id')
+        if from_id == Config.PAGE_ID:
+            logger.debug(f"Skipping echo comment from business account (ID: {from_id})")
+            return True
+            
         try:
-            timestamp = datetime.fromtimestamp(created_time, UTC).replace(tzinfo=None)
+            timestamp = datetime.fromtimestamp(created_time, timezone.utc).replace(tzinfo=None)
         except Exception as e:
             logger.error(f"Failed to parse timestamp for comment {comment_id}: {str(e)}")
-            timestamp = datetime.now(UTC)
+            timestamp = datetime.now(timezone.utc)
 
-        if handle_comment(db, {
+        if InstagramService.handle_comment(db, {
             'comment_id': comment_id,
             'post_id': media.get('id'),
             'user_id': from_user.get('id'),
@@ -217,7 +294,7 @@ def process_comment_event(db, change):
         return False
 
 
-def process_reaction_event(db, event, sender_id, recipient_id, timestamp):
+def process_reaction_event(db, event, sender_id, timestamp):
     logger.debug("Processing reaction event")
     reaction = event['reaction']
 
@@ -225,7 +302,7 @@ def process_reaction_event(db, event, sender_id, recipient_id, timestamp):
         'id': reaction['mid'],
         'from': {
             'id': sender_id,
-            'username': f"ig_user_{sender_id}"
+            'username': f"{sender_id}"
         },
         'content_type': 'message',
         'content_id': reaction['mid'],

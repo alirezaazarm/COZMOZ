@@ -1,27 +1,18 @@
-from sqlalchemy.orm import Session
-from ..models.message import AssistantResponse
+from ..models.database import db
+from datetime import datetime, timezone
 
 class AssistantRepository:
-    def __init__(self, session: Session):
-        self.session = session
+    def __init__(self, db_instance=None):
+        self.db = db_instance or db
 
-    def save_response(self, message_ids, response_text, sender_id):
-        response = AssistantResponse(
-            message_ids=message_ids,
-            response_text=response_text,
-            assistant_status="PENDING",
-            instagram_status="PENDING",
-            sender_id=sender_id
+    def update_user_status(self, sender_id, status):
+        """Update a user's status."""
+        result = self.db.users.update_one(
+            {"user_id": sender_id},
+            {"$set": {
+                "status": status,
+                "updated_at": datetime.now(timezone.utc)
+            }}
         )
-        self.session.add(response)
-        self.session.commit()
-
-    def update_status(self, message_ids, assistant_status=None, instagram_status=None):
-        query = self.session.query(AssistantResponse).filter(
-            AssistantResponse.message_ids.contains(message_ids)
-        )
-        if assistant_status:
-            query.update({"assistant_status": assistant_status}, synchronize_session=False)
-        if instagram_status:
-            query.update({"instagram_status": instagram_status}, synchronize_session=False)
-        self.session.commit()
+        
+        return result.modified_count > 0
