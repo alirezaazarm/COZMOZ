@@ -8,6 +8,8 @@ from PIL import Image
 from io import BytesIO
 from ..models.user import User
 from ..models.enums import UserStatus, MessageRole
+from ..models.post import Post
+from ..models.story import Story
 
 logger = logging.getLogger(__name__)
 
@@ -17,14 +19,35 @@ DIRECT_FIXED_RESPONSES = {}
 # Global variable for app settings
 APP_SETTINGS = {}
 
+def parse_instagram_timestamp(ts):
+    if not ts:
+        return datetime.now(timezone.utc)
+
+    # If the timestamp is numeric, assume it's a Unix timestamp
+    if isinstance(ts, (int, float)):
+        try:
+            return datetime.fromtimestamp(ts, timezone.utc)
+        except Exception as e:
+            logger.warning(f"Error parsing numeric timestamp '{ts}': {str(e)}; using now()")
+            return datetime.now(timezone.utc)
+
+    try:
+        ts_str = str(ts)
+        cleaned_str = ts_str.replace('Z', '+00:00')
+        if '+0000' in cleaned_str:
+            cleaned_str = cleaned_str.replace('+0000', '+00:00')
+        if '+' not in cleaned_str and 'T' in cleaned_str:
+            cleaned_str += '+00:00'
+        return datetime.fromisoformat(cleaned_str)
+    except ValueError as ve:
+        logger.warning(f"Unable to parse timestamp '{ts}' - {str(ve)}; using now() instead")
+        return datetime.now(timezone.utc)
+
 class InstagramService:
     @staticmethod
     def send_message(recipient_id, text):
-        # Check if the text contains links
         link_pattern = re.compile(r'https?://\S+')
         links = link_pattern.findall(text)
-
-        # If links are found, use the split message function
         if links:
             logger.info(f"Found {len(links)} links in message, using split message function")
             return InstagramService.send_split_messages(recipient_id, text)
@@ -380,53 +403,38 @@ class InstagramService:
             return None
 
     @staticmethod
-    def process_user(db, user_data):
-        """Process a user from Instagram message/comment data"""
+    def process_user(user_data):
         try:
             user_id = user_data['id']
             logger.debug(f"[process_user] Processing user: {user_id}, data: {user_data}")
 
-            # For echo messages, the sender is the business account, but we want to store under the recipient
-            # Get or determine recipient ID from user_data or type
             recipient_type = user_data.get('type', '')
-
-            # If this is our own business account, we need special handling for echo messages
-            if user_id == Config.PAGE_ID:
-                logger.debug(f"[process_user] Detected business account ID: {user_id}")
-                # This is a special case for echo messages - find the actual user from the recipient field
-                # We'll check on parent caller (handle_message) level
-
-            # Skip creating object for the main Instagram account (the recipient)
             if 'recipient' in recipient_type:
-                logger.debug(f"[process_user] Skipping creation of main Instagram account object (ID: {user_id})")
+                logger.debug(f"[process_user] Skipping recipient user (ID: {user_id})")
                 return None
 
-            # Look up user in MongoDB
-            user = db.users.find_one({"user_id": user_id})
+            user = User.get_by_id(user_id)
             logger.debug(f"[process_user] User lookup result: {user is not None}")
 
             if not user:
-                # For comment events, username is provided. For message events, it's not.
                 username = user_data.get('username')
 
-                logger.info(f"[process_user] Creating user with username of {username} and id of ({user_id})")
-                user_doc = User.create_user_document(
-                    user_id=user_id,
-                    username=username
-                    # We don't need to store full_name and profile_picture_url as they're never populated
-                )
-                # Insert the new user
-                result = db.users.insert_one(user_doc)
-                logger.debug(f"[process_user] User creation result: {result.inserted_id}")
-                return user_doc
+                logger.info(f"[process_user] Creating user {user_id} with username: {username}")
 
-            logger.debug(f"[process_user] Returning existing user: {user_id}")
+                user_doc = User.create( user_id=user_id,  username=username, status=UserStatus.SCRAPED.value,  )
+
+                if user_doc:
+                    logger.debug(f"[process_user] Created user: {user_doc['user_id']}")
+                    return user_doc
+                logger.error(f"[process_user] Failed to create user {user_id}")
+                return None
+
+            logger.debug(f"[process_user] Found existing user: {user_id}")
             return user
 
         except KeyError as ke:
             logger.error(f"[process_user] Invalid user data: Missing {str(ke)}")
             raise
-
         except Exception as e:
             logger.error(f"[process_user] User processing error: {str(e)}", exc_info=True)
             raise
@@ -551,7 +559,7 @@ class InstagramService:
             # Process the sender user, this creates a document if needed
             if not is_echo or user_id != Config.PAGE_ID:
                 # Only process the sender user if it's not an echo from business account
-                user = InstagramService.process_user(db, sender_info)
+                user = InstagramService.process_user(sender_info)
                 if not user:
                     logger.error(f"[handle_message] Failed to process user: {user_id}")
                     return False
@@ -698,26 +706,23 @@ class InstagramService:
                 if field not in comment_data:
                     raise ValueError(f"Missing required field: {field}")
 
-            created_time = comment_data.get('created_time')
-            if created_time:
+            # Parse timestamp using helper function
+            timestamp = parse_instagram_timestamp(comment_data.get('timestamp'))
+
+            # For backward compatibility, also check created_time if timestamp parsing failed
+            if timestamp == datetime.now(timezone.utc) and comment_data.get('created_time'):
                 try:
-                    timestamp = datetime.fromtimestamp(created_time, timezone.utc)
+                    timestamp = datetime.fromtimestamp(comment_data.get('created_time'), timezone.utc)
                 except Exception as e:
-                    logger.error(f"Failed to parse timestamp for comment {comment_data['comment_id']}: {str(e)}")
-                    timestamp = datetime.now(timezone.utc)
-            else:
-                logger.warning(f"No 'created_time' found for comment {comment_data['comment_id']}. Using current time.")
-                timestamp = datetime.now(timezone.utc)
+                    logger.error(f"Failed to parse created_time for comment {comment_data['comment_id']}: {str(e)}")
 
             user_info = {
                 'id': comment_data['user_id'],
-                'username': comment_data.get('username'),
-                'full_name': comment_data.get('full_name', ''),
-                'profile_picture_url': comment_data.get('profile_picture_url', '')
+                'username': comment_data.get('username')
             }
 
             # Process the user who made the comment
-            user = InstagramService.process_user(db, user_info)
+            user = InstagramService.process_user(user_info)
             if not user:
                 logger.error(f"Failed to process user: {user_info['id']}")
                 return False
@@ -734,8 +739,9 @@ class InstagramService:
             # Create comment document
             comment_doc = User.create_comment_document(
                 post_id=comment_data['post_id'],
+                comment_id=comment_data['comment_id'],
                 text=comment_text,
-                parent_comment_id=comment_data.get('parent_comment_id'),
+                parent_id=comment_data.get('parent_id'),
                 timestamp=timestamp
             )
 
@@ -804,27 +810,130 @@ class InstagramService:
             return False
 
     @staticmethod
-    def get_posts(db):
+    def get_posts():
+        """
+        Retrieves posts from the IG endpoint and stores them in MongoDB using model classes.
+        Also extracts comments and their replies, storing them in each commenter's user document.
+        """
         try:
-            base_endpoint =  f"https://graph.facebook.com/v22.0/{Config.PAGE_ID}"
-            post_endpoint = "/media?fields=caption,media_url,media_type,id,like_count,username,timestamp,comments.limit(1000){id,text,from,like_count,replies.limit(1000){id,text,from,like_count}}&limit=1000"
-            params = {    "access_token": Config.FB_ACCESS_TOKEN    }
+            base_endpoint = f"https://graph.facebook.com/v22.0/{Config.PAGE_ID}"
+            post_endpoint = "/media?fields=caption,media_url,media_type,id,like_count,timestamp,comments.limit(1000){id,timestamp,text,from,like_count,replies.limit(1000){id,timestamp,text,from,like_count}}&limit=1000"
+            params = {"access_token": Config.FB_ACCESS_TOKEN}
             response = requests.get(base_endpoint + post_endpoint, params=params)
-            if response.status_code == 200:
-                data = response.json()
-                posts = data.get('data', [])
-                for post in posts:
-                    try:
+            response.raise_for_status()
 
+            data = response.json()
+            posts = data.get('data', [])
 
+            for post in posts:
+                # Create/update post using Post model
+                post_data = {
+                    "id": post.get('id'),
+                    "caption": post.get('caption', ''),
+                    "media_url": post.get('media_url', ''),
+                    "media_type": post.get('media_type', ''),
+                    "like_count": post.get('like_count', 0),
+                    "timestamp": post.get('timestamp')
+                }
+                Post.create_or_update_from_instagram(post_data)
+
+                # Process comments
+                comment_data = post.get('comments', {}).get('data', [])
+                for comment in comment_data:
+                    from_user = comment.get('from', {})
+                    from_user_id = from_user.get('id')
+                    from_username = from_user.get('username', '')
+
+                    if from_user_id:
+                        # Process commenter using User model
+                        commenter_info = {
+                            "id": from_user_id,
+                            "username": from_username
+                        }
+                        commented_user = InstagramService.process_user(commenter_info)
+
+                        if commented_user:
+                            # Create top-level comment using User model's method
+                            comment_doc = User.create_comment_document(
+                                post_id=post.get('id'),
+                                comment_id=comment.get('id'),
+                                text=comment.get('text', ''),
+                                parent_id=None,
+                                timestamp=parse_instagram_timestamp(comment.get('timestamp')),
+                                status="pending"
+                            )
+                            comment_doc["like_count"] = comment.get('like_count', 0)
+
+                            # Add comment to user's comments array
+                            User.add_comment_to_user(from_user_id, comment_doc)
+
+                            # Process replies
+                            replies_data = comment.get('replies', {}).get('data', [])
+                            for reply in replies_data:
+                                reply_from = reply.get('from', {})
+                                reply_user_id = reply_from.get('id')
+                                reply_username = reply_from.get('username', '')
+
+                                if reply_user_id:
+                                    # Process reply user
+                                    reply_user_info = {
+                                        "id": reply_user_id,
+                                        "username": reply_username
+                                    }
+                                    reply_user = InstagramService.process_user(reply_user_info)
+
+                                    if reply_user:
+                                        # Create reply comment using User model's method
+                                        reply_doc = User.create_comment_document(
+                                            post_id=post.get('id'),
+                                            comment_id=reply.get('id'),
+                                            text=reply.get('text', ''),
+                                            parent_id=comment.get('id'),
+                                            timestamp=parse_instagram_timestamp(reply.get('timestamp')),
+                                            status="pending"
+                                        )
+                                        reply_doc["like_count"] = reply.get('like_count', 0)
+
+                                        # Add reply to user's comments array
+                                        User.add_comment_to_user(reply_user_id, reply_doc)
+
+            return True
+
+        except requests.exceptions.RequestException as req_err:
+            logger.error(f"Error fetching posts: {str(req_err)}", exc_info=True)
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error in get_posts: {str(e)}", exc_info=True)
+            return False
 
     @staticmethod
-    def get_stories(db):
+    def get_stories():
+        """Retrieves stories from IG and stores them using the Story model"""
         try:
-            base_endpoint =  f"https://graph.facebook.com/v22.0/{Config.PAGE_ID}"
-            post_endpoint = "/stories?fields=media_type,caption,like_count,thumbnail_url,timestamp&limit=1000"
-            params = {  "access_token": Config.FB_ACCESS_TOKEN   }
-            response = requests.get(base_endpoint + post_endpoint, params=params)
-            if response.status_code == 200:
-                data = response.json()
+            base_endpoint = f"https://graph.facebook.com/v22.0/{Config.PAGE_ID}"
+            story_endpoint = "/stories?fields=media_type,caption,like_count,thumbnail_url,timestamp&limit=1000"
+            params = {"access_token": Config.FB_ACCESS_TOKEN}
+            response = requests.get(base_endpoint + story_endpoint, params=params)
+            response.raise_for_status()
 
+            stories = response.json().get('data', [])
+
+            for story in stories:
+                story_data = {
+                    "id": story.get('id'),
+                    "media_type": story.get('media_type', ''),
+                    "caption": story.get('caption', ''),
+                    "like_count": story.get('like_count', 0),
+                    "thumbnail_url": story.get('thumbnail_url'),
+                    "timestamp": story.get('timestamp')
+                }
+                Story.create_or_update_from_instagram(story_data)
+
+            return True
+
+        except requests.exceptions.RequestException as req_err:
+            logger.error(f"Error fetching stories: {str(req_err)}", exc_info=True)
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error in get_stories: {str(e)}", exc_info=True)
+            return False

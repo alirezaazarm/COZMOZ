@@ -143,28 +143,50 @@ class CozmozScraper:
     def update_products(self):
         product_links = self.extract_product_links()
         existing_products = Product.get_all()
-        existing_titles = {p['title'] for p in existing_products}
-        
-        for title, link in product_links.items():
-            if title in existing_titles:
-                continue
+        existing_titles = [p['title'] for p in existing_products]
 
+        for title in existing_titles:
+            if existing_titles.count(title) > 1:
+                Product.delete(title)
+                logger.info(f"Deleted product {title} from the database")
+
+
+
+        for title, link in product_links.items():
             product_info = self.scrape(link)
             if product_info:
-                result = Product.create(
-                    title=product_info['title'],
-                    category=product_info['category'],
-                    tags=product_info['tags'],
-                    price=product_info['price'],
-                    excerpt=product_info['excerpt'],
-                    sku=product_info['sku'],
-                    description=product_info['description'],
-                    stock_status=product_info['stock_status'],
-                    additional_info=product_info['additional_info'],
-                    link=product_info['link']
-                )
-                if result:
-                    logger.info(f"Added new product {title} to the database")
+
+                if title in existing_titles:
+                    Product.update(title, {
+                        'category': product_info['category'],
+                        'tags': product_info['tags'],
+                        'price': product_info['price'],
+                        'excerpt': product_info['excerpt'],
+                        'sku': product_info['sku'],
+                        'description': product_info['description'],
+                        'stock_status': product_info['stock_status'],
+                        'additional_info': product_info['additional_info'],
+                        'link': product_info['link']
+                    })
+
+
                 else:
-                    logger.error(f"Failed to add new product {title} to the database")
+                    Product.create(
+                        title=product_info['title'],
+                        category=product_info['category'],
+                        tags=product_info['tags'],
+                        price=product_info['price'],
+                        excerpt=product_info['excerpt'],
+                        sku=product_info['sku'],
+                        description=product_info['description'],
+                        stock_status=product_info['stock_status'],
+                        additional_info=product_info['additional_info'],
+                        link=product_info['link']
+                    )
+
+        for title in existing_titles:
+            if title not in product_links.keys():
+                Product.delete(title)
+                logger.info(f"Removed product {title} from the database as it no longer exists on the website")
+
 

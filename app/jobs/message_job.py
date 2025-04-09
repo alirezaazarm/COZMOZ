@@ -12,26 +12,23 @@ logger = logging.getLogger(__name__)
 def process_messages_job():
     logger.info("Starting message processing job")
     try:
-        # Get the current global state of the assistant setting
+
         from ..services.instagram_service import APP_SETTINGS
-        
+
         # Check if assistant is disabled in app settings
         if not APP_SETTINGS.get('assistant', True):
             logger.info("Assistant is disabled in app settings. Skipping message processing job.")
             return
-            
+
         logger.info("Assistant is enabled. Processing pending messages.")
-        
-        # Set cutoff time based on the BATCH_WINDOW_SECONDS config
-        # This ensures we only process messages that are at least BATCH_WINDOW_SECONDS old
-        # to give users time to complete their thoughts before the assistant responds
+
         cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=Config.BATCH_WINDOW_SECONDS)
         logger.info(f"Processing messages older than {cutoff_time} (BATCH_WINDOW={Config.BATCH_WINDOW_SECONDS}s)")
-        
+
         with get_db() as db:
             mediator = Mediator(db)
             mediator.process_pending_messages(cutoff_time)
-            
+
     except Exception as job_error:
         logger.critical(f"Job failed: {str(job_error)}", exc_info=True)
         raise
@@ -42,13 +39,13 @@ def cleanup_processed_messages():
     """Reset users back to WAITING status if they've been in REPLIED status for over 24 hours."""
     with get_db() as db:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-        
+
         # Find users who have been in REPLIED status for over 24 hours
         users = db.users.find({
             "status": UserStatus.REPLIED.value,
             "updated_at": {"$lt": cutoff}
         })
-        
+
         # Update each user's status back to WAITING
         count = 0
         for user in users:
@@ -62,7 +59,7 @@ def cleanup_processed_messages():
             )
             if result.modified_count > 0:
                 count += 1
-                
+
         if count > 0:
             logger.info(f"Reset {count} users from REPLIED to WAITING status")
         else:

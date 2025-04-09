@@ -2,6 +2,7 @@ from flask import Flask
 from apscheduler.triggers.interval import IntervalTrigger
 from app.jobs.scheduler import scheduler, start_scheduler, shutdown_hook
 from app.jobs.message_job import process_messages_job, cleanup_processed_messages
+from app.jobs.post_story_job import fetch_posts_job, fetch_stories_job
 from app.routes.webhook import webhook_bp
 from app.routes.update import update_bp
 import logging
@@ -23,6 +24,8 @@ if __name__ == '__main__':
     try:
         start_scheduler()
 
+        scheduler.remove_all_jobs()
+
         scheduler.add_job(
             process_messages_job,
             IntervalTrigger(seconds=30),
@@ -34,6 +37,25 @@ if __name__ == '__main__':
             cleanup_processed_messages,
             IntervalTrigger(hours=1),
             misfire_grace_time=300,
+            coalesce=True
+        )
+
+
+        scheduler.add_job(
+            fetch_posts_job,
+            IntervalTrigger(minutes=30),
+            id='fetch_posts_job',
+            max_instances=1,
+            misfire_grace_time=300,
+            coalesce=True
+        )
+
+        scheduler.add_job(
+            fetch_stories_job,
+            IntervalTrigger(minutes=6),
+            id='fetch_stories_job',
+            max_instances=1,
+            misfire_grace_time=120,
             coalesce=True
         )
 

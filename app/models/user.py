@@ -22,15 +22,16 @@ class User:
     STATUS_REPLIED = UserStatus.REPLIED.value
     STATUS_INSTAGRAM_FAILED = UserStatus.INSTAGRAM_FAILED.value
     STATUS_ASSISTANT_FAILED = UserStatus.ASSISTANT_FAILED.value
+    STATUS_SCRAPED = UserStatus.SCRAPED.value
 
     @staticmethod
-    def create_user_document(user_id, username, thread_id=None, full_name=None, profile_picture_url=None):
+    def create_user_document(user_id, username, thread_id=None, status=UserStatus.WAITING.value):
         """Create a new user document structure"""
         document = {
             "user_id": user_id,
             "username": username,
-            "status": UserStatus.WAITING.value,  # Default status
-            "thread_id": thread_id or str(ObjectId()),
+            "status": status,
+            "thread_id": thread_id,
             "created_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
             # Direct message history
@@ -40,14 +41,6 @@ class User:
             # Reaction history
             "reactions": [],
         }
-
-        # Only add these fields if they're actually provided
-        if full_name:
-            document["full_name"] = full_name
-
-        if profile_picture_url:
-            document["profile_picture_url"] = profile_picture_url
-
         return document
 
     @staticmethod
@@ -75,17 +68,39 @@ class User:
         return message
 
     @staticmethod
-    def create_comment_document(post_id, text, parent_comment_id=None, timestamp=None, status="pending"):
+    def create_comment_document(post_id, comment_id, text, parent_id=None, timestamp=None, status="pending"):
         """Create a comment document to be stored in user's comments array"""
         return {
-            "comment_id": str(ObjectId()),
+            "comment_id": comment_id,
             "post_id": post_id,
             "text": text,
-            "parent_comment_id": parent_comment_id,
+            "parent_id": parent_id,
             "timestamp": timestamp or datetime.now(timezone.utc),
             "status": status,
             "reactions": []
         }
+    @staticmethod
+    @with_db
+    def add_comment_to_user(user_id, comment_doc):
+        """Add a comment document to a user's comments array,
+        but only if a comment with the same comment_id does not already exist."""
+        try:
+            comment_id = comment_doc.get("comment_id")
+            if comment_id:
+                existing = db[USERS_COLLECTION].find_one(
+                    {"user_id": user_id, "comments.comment_id": comment_id},
+                    {"comments.$": 1}
+                )
+                if existing:
+                    return False
+            result = db[USERS_COLLECTION].update_one(
+                {"user_id": user_id},
+                {"$push": {"comments": comment_doc}}
+            )
+            return result.modified_count > 0
+        except PyMongoError as e:
+            logger.error(f"Failed to add comment to user: {str(e)}")
+            return False
 
     @staticmethod
     def create_reaction_document(content_id, content_type, reaction_type, timestamp=None, status="pending"):
@@ -119,14 +134,13 @@ class User:
 
     @staticmethod
     @with_db
-    def create(user_id, username, thread_id=None, full_name=None, profile_picture_url=None):
+    def create(user_id, username, status, thread_id=None):
         """Create a new user"""
         user_doc = User.create_user_document(
             user_id=user_id,
             username=username,
             thread_id=thread_id,
-            full_name=full_name,
-            profile_picture_url=profile_picture_url
+            status=status
         )
         db[USERS_COLLECTION].insert_one(user_doc)
         return user_doc

@@ -101,22 +101,22 @@ def process_event(db, event):
 
     # Check if this is an echo message (from business account)
     is_echo = event.get('message', {}).get('is_echo', False)
-    
+
     # Get app settings directly from the instagram_service module to ensure we have the latest
     from ..services.instagram_service import APP_SETTINGS
-    
+
     # Get the current assistant setting
     is_assistant_enabled = APP_SETTINGS.get('assistant', True)
-    
+
     # Explicitly check if the value is a string and convert accordingly
     if isinstance(is_assistant_enabled, str):
         is_assistant_enabled = is_assistant_enabled.lower() == 'true'
-    
+
     logger.info(f"Webhook - Processing event with assistant {'ENABLED' if is_assistant_enabled else 'DISABLED'}")
     logger.debug(f"Webhook - APP_SETTINGS: {APP_SETTINGS}")
     logger.debug(f"Processing event: sender_id={sender_id}, is_echo={is_echo}, is_assistant_enabled={is_assistant_enabled}, CONFIG.PAGE_ID={Config.PAGE_ID}")
     logger.debug(f"Is sender business account? {sender_id == Config.PAGE_ID}")
-    
+
     # Echo message handling:
     if is_echo:
         # When the echo is from our page ID
@@ -141,7 +141,7 @@ def process_event(db, event):
                 return False
             else:
                 logger.debug("Assistant is disabled - Processing admin echo message")
-    
+
     if 'message' in event:
         return process_message_event(db, event, sender_id, timestamp)
     elif 'reaction' in event:
@@ -160,15 +160,15 @@ def process_message_event(db, event, sender_id, timestamp):
         # Check if this is an echo message from business account
         is_echo = message.get('is_echo', False)
         is_business_account = sender_id == Config.PAGE_ID
-        
+
         # Get latest app settings
         from ..services.instagram_service import APP_SETTINGS
         is_assistant_enabled = APP_SETTINGS.get('assistant', True)
-        
+
         # Ensure boolean conversion
         if isinstance(is_assistant_enabled, str):
             is_assistant_enabled = is_assistant_enabled.lower() == 'true'
-        
+
         logger.debug(f"Message analysis: is_echo={is_echo}, is_business_account={is_business_account}, is_assistant_enabled={is_assistant_enabled}")
 
         # For echo messages, extract the recipient (actual user we're talking to)
@@ -194,7 +194,7 @@ def process_message_event(db, event, sender_id, timestamp):
             'is_echo': is_echo,  # Make sure is_echo is passed through
             'role': message_role
         }
-        
+
         # Add recipient information for echo messages
         if recipient_id:
             message_data['recipient'] = {
@@ -263,13 +263,13 @@ def process_comment_event(db, change):
         comment_id = comment_data.get('id', '')
         parent_comment_id = comment_data.get('parent_id')
         created_time = comment_data.get('created_time', 0)
-        
+
         # Check if this comment is from the business account (echo comment)
         from_id = from_user.get('id')
         if from_id == Config.PAGE_ID:
             logger.debug(f"Skipping echo comment from business account (ID: {from_id})")
             return True
-            
+
         try:
             timestamp = datetime.fromtimestamp(created_time, timezone.utc).replace(tzinfo=None)
         except Exception as e:
@@ -282,7 +282,7 @@ def process_comment_event(db, change):
             'user_id': from_user.get('id'),
             'username': from_user.get('username'),
             'comment_text': comment_text,
-            'parent_comment_id': parent_comment_id,
+            'parent_id': parent_comment_id,
             'timestamp': timestamp,
             'status': 'not_replied'
         }):

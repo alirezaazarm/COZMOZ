@@ -3,7 +3,7 @@ from ..models.product import Product
 from ..models.appsettings import AppSettings
 from ..models.database import db
 from ..config import Config
-from ..utils.helpers import get_db  # Import the proper context manager
+from ..utils.helpers import get_db
 import openai
 import time
 import re
@@ -69,16 +69,14 @@ class OpenAIService:
 
         for p in products_without_files:
             content = json.dumps({
-                    'title': p['title'],
-                    'price': p['price'],
-                    'description': p['description'],
-                    'additional_info': p['additional_info'],
-                    'category': p['category'],
-                    'tags': p['tags'],
-                    'excerpt': p['excerpt'],
-                    'sku': p['sku'],
-                    'stock_status': p['stock_status'],
-                    'product_link': p['link']
+                    'عنوان محصول': p['title'],
+                    'قیمت محصول': p['price'],
+                    'توضیحات محصول': p['description'],
+                    'توضیحات تکمیلی محصول': p['additional_info'],
+                    'دسته‌بندی محصول': p['category'],
+                    'تگ': p['tags'],
+                    'توضیح مختصر': p['excerpt'],
+                    'لینک خرید محصول': p['link']
                 }, ensure_ascii=False)
 
             max_retries = 5
@@ -136,12 +134,19 @@ class OpenAIService:
                     batch = file_ids[start:end]
 
                     if not vector_store_id:
-                        vector_store = self.client.vector_stores.create( name="Product Catalog", file_ids=batch)
+                        vector_store = self.client.vector_stores.create( name="Product Catalog",
+                                                                         file_ids=batch,
+                                                                         chunking_strategy={"type": "static",
+                                                                                             "static": { "max_chunk_size_tokens": 100, "chunk_overlap_tokens": 30}})
                         vector_store_id = vector_store.id
                         logger.info(f"Vector store {vector_store_id} created for batch {batch_number + 1}/{total_batches}")
                         time.sleep(5)
                     elif vector_store_id:
-                        vector_store = self.client.vector_stores.file_batches.create_and_poll(vector_store_id=vector_store_id,  file_ids=batch)
+                        vector_store = self.client.vector_stores.file_batches.create_and_poll(vector_store_id=vector_store_id,
+                                                                                              file_ids=batch,
+                                                                                              chunking_strategy={"type": "static",
+                                                                                             "static": { "max_chunk_size_tokens": 100, "chunk_overlap_tokens": 30}}
+                                                                                             )
                         logger.info(f"Added batch {batch_number + 1}/{total_batches} to vector store {vector_store_id}")
                         time.sleep(5)
 
@@ -165,29 +170,12 @@ class OpenAIService:
                 logger.error(f"Error creating vector store: {str(e)}")
                 continue
 
-    def update_files_and_vector_store(self):
-        files = self.upload_file()
-        while not files:
-            logger.error("Error uploading files")
-            files = self.upload_file()
-
-        vector_store_id = self.create_vector_store()
-        while not vector_store_id:
-            logger.error("Error creating vector store")
-            vector_store_id = self.create_vector_store()
-
-        if files and vector_store_id:
-            return True
-        else:
-            return False
-
     def rebuild_files_and_vector_store(self):
         files = None
         vector_store_id = None
         Product.update_many({}, {"$unset": {"file_id": 1}})
 
         while not files:
-            logger.error("Error uploading files")
             self.delete_all_files()
             files = self.upload_file()
 
@@ -201,7 +189,7 @@ class OpenAIService:
         else:
             return False
 
-# ============================
+# =================================================================================================
 
     def translate_titles(self):
         # Get products without translations
@@ -253,7 +241,7 @@ class OpenAIService:
         logger.info("All titles have been translated!")
         return True
 
-# ============================================
+# =================================================================================================
 
     def ensure_thread(self, user):
         try:
