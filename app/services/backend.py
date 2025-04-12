@@ -8,7 +8,7 @@ from ..config import Config
 import requests
 from .instagram_service import InstagramService
 from .scraper import CozmozScraper
-from ..services.openai_service import OpenAIService
+from .openai_service import OpenAIService
 from .img_search import process_image
 from PIL import Image
 import io
@@ -282,6 +282,36 @@ class Backend:
             logger.error(f"Error fetching assistant instructions: {str(e)}")
             return None
 
+    def get_assistant_temperature(self):
+        """Get the current temperature setting for the assistant."""
+        logger.info("Fetching assistant temperature.")
+        try:
+            openai_service = OpenAIService()
+            temperature = openai_service.get_assistant_temperature()
+            if temperature is not None:
+                logger.info("Assistant temperature retrieved successfully.")
+            else:
+                logger.warning("Failed to retrieve assistant temperature.")
+            return temperature
+        except Exception as e:
+            logger.error(f"Error fetching assistant temperature: {str(e)}")
+            return None
+
+    def get_assistant_top_p(self):
+        """Get the current top_p setting for the assistant."""
+        logger.info("Fetching assistant top_p.")
+        try:
+            openai_service = OpenAIService()
+            top_p = openai_service.get_assistant_top_p()
+            if top_p is not None:
+                logger.info("Assistant top_p retrieved successfully.")
+            else:
+                logger.warning("Failed to retrieve assistant top_p.")
+            return top_p
+        except Exception as e:
+            logger.error(f"Error fetching assistant top_p: {str(e)}")
+            return None
+
     def update_assistant_instructions(self, new_instructions):
         """Update the instructions for the assistant."""
         logger.info("Updating assistant instructions.")
@@ -297,6 +327,38 @@ class Backend:
                 return result
         except Exception as e:
             logger.error(f"Error updating assistant instructions: {str(e)}")
+            return {'success': False, 'message': str(e)}
+
+    def update_assistant_temperature(self, new_temperature):
+        """Update the temperature setting for the assistant."""
+        logger.info("Updating assistant temperature.")
+        try:
+            openai_service = OpenAIService()
+            result = openai_service.update_assistant_temperature(new_temperature)
+            if result['success']:
+                logger.info("Assistant temperature updated successfully.")
+                return result
+            else:
+                logger.warning(f"Failed to update assistant temperature: {result['message']}")
+                return result
+        except Exception as e:
+            logger.error(f"Error updating assistant temperature: {str(e)}")
+            return {'success': False, 'message': str(e)}
+
+    def update_assistant_top_p(self, new_top_p):
+        """Update the top_p setting for the assistant."""
+        logger.info("Updating assistant top_p.")
+        try:
+            openai_service = OpenAIService()
+            result = openai_service.update_assistant_top_p(new_top_p)
+            if result['success']:
+                logger.info("Assistant top_p updated successfully.")
+                return result
+            else:
+                logger.warning(f"Failed to update assistant top_p: {result['message']}")
+                return result
+        except Exception as e:
+            logger.error(f"Error updating assistant top_p: {str(e)}")
             return {'success': False, 'message': str(e)}
 
     def fetch_instagram_posts(self):
@@ -531,3 +593,29 @@ class Backend:
         except Exception as e:
             logger.error(f"Error in translate_titles: {str(e)}")
             return False
+    def process_uploaded_image(self, image_bytes, top_k=5):
+            """
+            Processes image bytes using PIL, calls img_search.process_image, and returns the result.
+            """
+            logger.info(f"Processing uploaded image ({len(image_bytes)} bytes).")
+            if not image_bytes:
+                logger.warning("Received empty image bytes.")
+                return "Error: No image data received."
+            try:
+                # Use io.BytesIO to treat bytes as a file
+                image_stream = io.BytesIO(image_bytes)
+                # Open the image using PIL
+                pil_image = Image.open(image_stream)
+
+                # Call the existing process_image function (already imported in backend.py)
+                analysis_result = process_image(pil_image, top_k=top_k)
+                logger.info(f"Image processing result: {analysis_result}")
+                return analysis_result
+
+            except Image.UnidentifiedImageError:
+                logger.error("Could not identify image file. It might be corrupted or not an image.")
+                return "Error: Could not read image file. Please upload a valid image."
+            except Exception as e:
+                logger.error(f"Error processing uploaded image in backend: {str(e)}", exc_info=True)
+                # Return a generic error message to the UI
+                return f"Error: An unexpected error occurred while processing the image."

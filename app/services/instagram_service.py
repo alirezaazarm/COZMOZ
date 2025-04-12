@@ -18,6 +18,8 @@ COMMENT_FIXED_RESPONSES = {}
 DIRECT_FIXED_RESPONSES = {}
 # Global variable for app settings
 APP_SETTINGS = {}
+INSTAGRAM_CONTENT = {}
+
 
 def parse_instagram_timestamp(ts):
     if not ts:
@@ -491,6 +493,18 @@ class InstagramService:
             DIRECT_FIXED_RESPONSES = responses
             logger.info(f"Direct fixed responses set in InstagramService with {len(responses)} entries")
         return True
+
+    @staticmethod
+    def set_instagram_posts_stories(content_type, content):
+        """Set instagram contents from external module"""
+        if content_type == "Story":
+            global STORY_CONTENTS
+            STORY_CONTENTS = content
+            logger.inf(f"InstagramService - Story contents set with {len(content)} entries")
+        elif content_type == "Post":
+            global POSTS_CONTENTS
+            POSTS_CONTENTS = content
+            logger.inf(f"InstagramService - Post contents set with {len(content)} entries")
 
     @staticmethod
     def handle_message(db, message_data):

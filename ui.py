@@ -50,7 +50,8 @@ class AppConstants:
         "next": ":arrow_right:",
         "label": ":label:",
         "save": ":floppy_disk:",
-        "model": ":brain:", # Added icon for model
+        "model": ":brain:",
+        "folder": ":open_file_folder:"
     }
 
     MESSAGES = {
@@ -163,14 +164,14 @@ class OpenAIManagementSection(BaseSection):
             st.warning("No vector store currently available. Please connect to a vector store before testing the assistant.")
 
         # Create tabs for instruction management and chat testing
-        instruction_tab, chat_tab = st.tabs([
-            f"{self.const.ICONS['brain']} Assistant Instructions",
+        settings_tab, chat_tab = st.tabs([
+            f"{self.const.ICONS['brain']} Assistant Settings",
             f"{self.const.ICONS['chat']} Test Assistant"
         ])
 
         # Instructions tab content
-        with instruction_tab:
-            self._render_instructions_section()
+        with settings_tab:
+            self._render_settings_section()
 
         # Chat testing tab content
         with chat_tab:
@@ -182,88 +183,183 @@ class OpenAIManagementSection(BaseSection):
         # Add separator line between OpenAI Management and Fixed Responses sections
         st.markdown("---")
 
-    def _render_instructions_section(self):
-        # Get current instructions
+    def _render_settings_section(self):
+        # Get current settings
         current_instructions = self.backend.get_assistant_instructions()
+        current_temperature = self.backend.get_assistant_temperature()
+        current_top_p = self.backend.get_assistant_top_p()
 
-        if current_instructions:
-            # Display the current instructions in a text area that can be edited
-            new_instructions = st.text_area(
-                "Edit Assistant Instructions",
-                value=current_instructions,
-                height=300,
-                help="Edit the instructions and click 'Update Instructions' to save changes."
-            )
-        else:
-            new_instructions = st.text_area(
-                "Set Assistant Instructions",
-                value="Enter instructions for the assistant...",
-                height=300,
-                help="Enter instructions and click 'Update Instructions' to save."
+        # Instruction area (full width)
+        new_instructions = st.text_area(
+            "Assistant Instructions",
+            value=current_instructions if current_instructions else "Enter instructions...",
+            height=600,
+            help="How the assistant should behave",
+            label_visibility="collapsed"  # Minimal: move label to placeholder
+        )
+
+        # Compact controls row
+        col1, col2, col3 = st.columns([4, 2, 4])
+
+        with col1:
+            new_temperature = st.slider(
+                "Temperature",
+                min_value=0.0,
+                max_value=2.0,
+                value=float(current_temperature),
+                step=0.01,
+                help="Randomness (0=strict, 2=creative)"
             )
 
-        # Button to update instructions
-        if st.button(f"{self.const.ICONS['update']} Update Instructions",
-                    help="Update the assistant's instructions with the text above."):
-            with st.spinner("Updating assistant instructions..."):
-                result = self.backend.update_assistant_instructions(new_instructions)
-                if result['success']:
-                    st.success(f"{self.const.ICONS['success']} {result['message']}")
+        with col2:
+            # Vertically centered update button
+            st.write("")  # spacer
+            update_btn = st.button(
+                f"{self.const.ICONS['update']} Update All",
+                use_container_width=True,
+                help="Save all settings"
+            )
+            st.write("")  # spacer
+
+        with col3:
+            new_top_p = st.slider(
+                "Top-P",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(current_top_p),
+                step=0.01,
+                help="Focus (1=broad, 0=narrow)"
+            )
+
+        if update_btn:
+            with st.spinner("Saving..."):
+                results = {
+                    'instructions': self.backend.update_assistant_instructions(new_instructions),
+                    'temperature': self.backend.update_assistant_temperature(new_temperature),
+                    'top_p': self.backend.update_assistant_top_p(new_top_p)
+                }
+
+                if all(r['success'] for r in results.values()):
+                    st.success(f"{self.const.ICONS['success']} All settings saved!")
                 else:
-                    st.error(f"{self.const.ICONS['error']} {result['message']}")
+                    errors = [
+                        f"{name}: {result['message']}"
+                        for name, result in results.items()
+                        if not result['success']
+                    ]
+                    st.error(f"{self.const.ICONS['error']} Issues: {', '.join(errors)}")
 
     def _render_chat_testing_section(self):
         st.subheader("Test your assistant")
 
-        # Create a new thread for each session if not already created
+        # --- Initialization ---
         if 'thread_id' not in st.session_state:
             try:
-                # Create a new thread and store its ID
                 thread_id = self.backend.create_chat_thread()
                 st.session_state['thread_id'] = thread_id
                 st.session_state['messages'] = []
+                # Flag to track if the current user message (text or image) has been sent
+                st.session_state['user_message_sent'] = True
+                # Set to store IDs of already processed file uploads
+                st.session_state['processed_file_ids'] = set()
             except Exception as e:
                 st.error(f"Failed to create thread: {str(e)}")
                 return
+        # Ensure processed_file_ids exists even if thread creation fails but session persists
+        if 'processed_file_ids' not in st.session_state:
+             st.session_state['processed_file_ids'] = set()
 
-        # Create a container for the chat messages
+
+        # --- UI Layout ---
         chat_container = st.container()
+        chat_container.height = 400 # Set a fixed height
 
-        # Create a container for the input field at the bottom
         input_container = st.container()
 
-        # Display existing messages in the chat container
-        with chat_container:
-            for message in st.session_state.get('messages', []):
-                with st.chat_message(message["role"]):
-                    st.write(message["content"])
+        # --- Input Handling ---
+        new_user_input = None
 
-        # Get user input at the bottom
+        # Image Uploader
         with input_container:
-            user_input = st.chat_input("Type your message here...")
+            uploaded_file = st.file_uploader(
+                "Upload an image (optional)",
+                type=['png', 'jpg', 'jpeg'],
+                key="chat_image_uploader" # Keep the key for widget identity
+            )
 
-        if user_input:
-            # Add user message to chat
-            st.session_state['messages'].append({"role": "user", "content": user_input})
-            with chat_container:
-                with st.chat_message("user"):
-                    st.write(user_input)
+            if uploaded_file is not None:
+                 # --- Check if this specific file upload has already been processed ---
+                 if uploaded_file.file_id not in st.session_state['processed_file_ids']:
+                    with st.spinner("Analyzing image..."):
+                        try:
+                            # Mark as processing attempt (even before success)
+                            # Add ID immediately to prevent race conditions across reruns
+                            st.session_state['processed_file_ids'].add(uploaded_file.file_id)
 
-            # Send to assistant and get response
-            with st.spinner("Assistant is thinking..."):
-                try:
-                    response = self.backend.send_message_to_thread(
-                        st.session_state['thread_id'],
-                        user_input
-                    )
+                            image_bytes = uploaded_file.getvalue()
+                            analysis_result = self.backend.process_uploaded_image(image_bytes, top_k=5)
+                            new_user_input = f"Analysis of uploaded image: {analysis_result}"
 
-                    # Add assistant response to chat
-                    st.session_state['messages'].append({"role": "assistant", "content": response})
-                    with chat_container:
-                        with st.chat_message("assistant"):
-                            st.write(response)
-                except Exception as e:
-                    st.error(f"Error getting response: {str(e)}")
+                            # Display the image and analysis temporarily
+                            with chat_container:
+                                 with st.chat_message("user"):
+                                     st.image(image_bytes, width=150)
+                                     st.write(new_user_input)
+
+                        except Exception as e:
+                            st.error(f"Error handling image upload: {str(e)}")
+                            new_user_input = None # Don't proceed if image processing failed
+                            # Optionally remove ID if processing failed catastrophically?
+                            # st.session_state['processed_file_ids'].remove(uploaded_file.file_id)
+
+
+            # Text Input (runs after image uploader logic)
+            user_text_input = st.chat_input("Type your message here...")
+
+            if user_text_input:
+                # Prioritize text input if both image and text happened
+                new_user_input = user_text_input
+                # Clear processed file IDs if new text is submitted? Optional.
+                # st.session_state['processed_file_ids'].clear()
+
+
+        # --- Update Message History and State ---
+        if new_user_input:
+            # Add the processed input (image analysis or text) to messages
+            st.session_state['messages'].append({"role": "user", "content": new_user_input})
+            st.session_state['user_message_sent'] = False # Mark that a new user message needs sending
+            # DO NOT RERUN HERE YET
+
+        # --- Display Chat History ---
+        with chat_container:
+            # Always display the full message history from session state
+            for message in st.session_state.get('messages', []):
+                 with st.chat_message(message["role"]):
+                     st.write(message["content"])
+
+
+        # --- Assistant Interaction ---
+        # Check if there's a new user message that hasn't been sent yet
+        if not st.session_state.get('user_message_sent', True):
+            last_message = st.session_state['messages'][-1] if st.session_state['messages'] else None
+
+            if last_message and last_message["role"] == "user":
+                with st.spinner("Assistant is thinking..."):
+                    try:
+                        response = self.backend.send_message_to_thread(
+                            st.session_state['thread_id'],
+                            last_message["content"]
+                        )
+                        st.session_state['messages'].append({"role": "assistant", "content": response})
+                        st.session_state['user_message_sent'] = True # Mark user message as processed
+
+                        # --- Single Rerun Point ---
+                        st.rerun()
+
+                    except Exception as e:
+                        st.error(f"Error getting response: {str(e)}")
+                        # Set flag back to True to avoid retrying the same failed message automatically
+                        st.session_state['user_message_sent'] = True
 #===============================================================================================================================
 class InstagramSection(BaseSection):
     """Handles Instagram-related functionality including posts, stories, and fixed responses."""

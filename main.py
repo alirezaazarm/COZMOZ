@@ -9,7 +9,7 @@ import logging
 
 logging.basicConfig(
     handlers=[logging.FileHandler('logs.txt', encoding='utf-8'), logging.StreamHandler()],
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 werkzeug_logger = logging.getLogger('werkzeug')

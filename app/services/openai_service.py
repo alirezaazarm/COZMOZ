@@ -137,7 +137,7 @@ class OpenAIService:
                         vector_store = self.client.vector_stores.create( name="Product Catalog",
                                                                          file_ids=batch,
                                                                          chunking_strategy={"type": "static",
-                                                                                             "static": { "max_chunk_size_tokens": 100, "chunk_overlap_tokens": 30}})
+                                                                                             "static": { "max_chunk_size_tokens": 4000, "chunk_overlap_tokens": 2000}})
                         vector_store_id = vector_store.id
                         logger.info(f"Vector store {vector_store_id} created for batch {batch_number + 1}/{total_batches}")
                         time.sleep(5)
@@ -145,7 +145,7 @@ class OpenAIService:
                         vector_store = self.client.vector_stores.file_batches.create_and_poll(vector_store_id=vector_store_id,
                                                                                               file_ids=batch,
                                                                                               chunking_strategy={"type": "static",
-                                                                                             "static": { "max_chunk_size_tokens": 100, "chunk_overlap_tokens": 30}}
+                                                                                             "static": { "max_chunk_size_tokens": 4000, "chunk_overlap_tokens": 2000}}
                                                                                              )
                         logger.info(f"Added batch {batch_number + 1}/{total_batches} to vector store {vector_store_id}")
                         time.sleep(5)
@@ -292,7 +292,7 @@ class OpenAIService:
             logger.critical(f"Thread creation failed: {str(e)}", exc_info=True)
             raise PermanentError("Thread creation permanently failed")
 
-    def process_messages(self, thread_id, message_texts, user=None):
+    def process_messages(self, thread_id, message_texts):
         logger.info(f"Processing {len(message_texts)} messages for thread_id: {thread_id}")
         try:
             # Join all messages into a single message with separators
@@ -397,6 +397,30 @@ class OpenAIService:
             logger.error(f"Failed to retrieve assistant instructions: {str(e)}")
             return None
 
+    def get_assistant_temperature(self):
+        if not self.client:
+            logger.error("OpenAI client is not initialized.")
+            return None
+        try:
+            assistant = self.client.beta.assistants.retrieve(Config.OPENAI_ASSISTANT_ID)
+            logger.info(f"Retrieved assistant temperature successfully.")
+            return assistant.temperature
+        except Exception as e:
+            logger.error(f"Failed to retrieve assistant temperature: {str(e)}")
+            return None
+
+    def get_assistant_top_p(self):
+        if not self.client:
+            logger.error("OpenAI client is not initialized.")
+            return None
+        try:
+            assistant = self.client.beta.assistants.retrieve(Config.OPENAI_ASSISTANT_ID)
+            logger.info(f"Retrieved assistant top_p successfully.")
+            return assistant.top_p
+        except Exception as e:
+            logger.error(f"Failed to retrieve assistant top_p: {str(e)}")
+            return None
+
     def update_assistant_instructions(self, new_instructions):
         if not self.client:
             logger.error("OpenAI client is not initialized.")
@@ -435,6 +459,42 @@ class OpenAIService:
             }
         except Exception as e:
             logger.error(f"Failed to update assistant instructions: {str(e)}")
+            return {'success': False, 'message': f"Failed to update: {str(e)}"}
+
+    def update_assistant_temperature(self, new_temperature):
+        if not self.client:
+            logger.error("OpenAI client is not initialized.")
+            return {'success': False, 'message': 'OpenAI client is not initialized.'}
+        try:
+            self.client.beta.assistants.update(
+                assistant_id=Config.OPENAI_ASSISTANT_ID,
+                temperature=new_temperature
+            )
+            logger.info("Updated assistant temperature successfully.")
+            return {
+                'success': True,
+                'message': 'Assistant temperature updated successfully.'
+            }
+        except Exception as e:
+            logger.error(f"Failed to update assistant temperature: {str(e)}")
+            return {'success': False, 'message': f"Failed to update: {str(e)}"}
+
+    def update_assistant_top_p(self, new_top_p):
+        if not self.client:
+            logger.error("OpenAI client is not initialized.")
+            return {'success': False, 'message': 'OpenAI client is not initialized.'}
+        try:
+            self.client.beta.assistants.update(
+                assistant_id=Config.OPENAI_ASSISTANT_ID,
+                top_p=new_top_p
+            )
+            logger.info("Updated assistant top_p successfully.")
+            return {
+                'success': True,
+                'message': 'Assistant top_p updated successfully.'
+            }
+        except Exception as e:
+            logger.error(f"Failed to update assistant top_p: {str(e)}")
             return {'success': False, 'message': f"Failed to update: {str(e)}"}
 
     def create_thread(self):

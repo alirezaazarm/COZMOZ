@@ -175,79 +175,84 @@ def process_message_event(db, event, sender_id, timestamp):
         recipient_id = None
         if is_echo and is_business_account:
             recipient_id = event.get('recipient', {}).get('id')
-            logger.debug(f"Echo message with recipient_id: {recipient_id}")
+            logger.info(f"Echo message with recipient_id: {recipient_id}")
 
         # Determine the correct role
         message_role = MessageRole.USER.value
         if is_echo and is_business_account:
             message_role = MessageRole.ADMIN.value if not is_assistant_enabled else MessageRole.ASSISTANT.value
-            logger.debug(f"Echo message from business account. Setting role to {message_role}")
+            logger.info(f"Echo message from business account. Setting role to {message_role}")
 
         message_data = {
             'id': message['mid'],
             'from': {
                 'id': sender_id
-                # Username is only needed for comment events, not for messages
             },
             'text': message.get('text'),
             'timestamp': timestamp,
-            'is_echo': is_echo,  # Make sure is_echo is passed through
+            'is_echo': is_echo,
             'role': message_role
         }
 
-        # Add recipient information for echo messages
         if recipient_id:
             message_data['recipient'] = {
                 'id': recipient_id
             }
-            logger.debug(f"Added recipient ID {recipient_id} to message data for echo message")
+            logger.info(f"Added recipient ID {recipient_id} to message data for echo message")
 
-        logger.debug(f"Message data initialized: {message_data}")
+        logger.info(f"Message data initialized: {message_data}")
 
         attachments = message.get('attachments', [])
         if attachments:
-            logger.debug(f"Found {len(attachments)} attachment(s) in the message.")
+            logger.info(f"Found {len(attachments)} attachment(s) in the message.")
             first_attachment = attachments[0]
             message_data['media_type'] = first_attachment.get('type')
             message_data['media_url'] = first_attachment.get('payload', {}).get('url')
             attachments_type = first_attachment.get('type')
 
-            logger.debug(f"Attachment type: {attachments_type}, Media URL: {message_data['media_url']}")
+            logger.info(f"Attachment type: {attachments_type}, Media URL: {message_data['media_url']}")
 
             if attachments_type in ['ig_reel', 'ig_post']:
                 title = first_attachment.get('payload', {}).get('title', 'No Title')
-                message_data['text'] = f"Instagram shared reel caption: {title}"
-                logger.debug(f"Updated message text with reel caption: {message_data['text']}")
+                cover_image = InstagramService.download_image(message_data['media_url'])
+                if cover_image:
+                    logger.info("Image downloaded successfully.")
+                    label = process_image(cover_image)
+                    message_data['text'] = f"Instagram shared reel caption: {title}\n" + "vision model similarity search results: " + label
+                    logger.info(f"Updated message text with reel caption: {message_data['text']}")
+                else:
+                    logger.error("Failed to download image.")
+                    message_data['text'] = f"Instagram shared reel caption: {title}\n"
 
             elif attachments_type == "share":
-                logger.debug("Processing shared content.")
+                logger.info("Processing shared content.")
                 shared_content_type = InstagramService.check_content_type(message_data['media_url'])
 
                 if shared_content_type == 'image':
-                    logger.debug("Shared content is an image.")
+                    logger.info("Shared content is an image.")
                     message_data['media_type'] += '_image'
                     image = InstagramService.download_image(message_data['media_url'])
                     if image:
-                        logger.debug("Image downloaded successfully.")
+                        logger.info("Image downloaded successfully.")
                         message_data['text'] = process_image(image)
-                        logger.debug(f"Updated message text with processed image: {message_data['text']}")
+                        logger.info(f"Updated message text with processed image: {message_data['text']}")
                     else:
                         logger.error("Failed to download image.")
 
             if message_data['media_type'] == 'image':
-                logger.debug("Processing standalone image attachment.")
+                logger.info("Processing standalone image attachment.")
                 image = InstagramService.download_image(message_data['media_url'])
                 if image:
-                    logger.debug("Image downloaded successfully.")
+                    logger.info("Image downloaded successfully.")
                     message_data['text'] = process_image(image)
-                    logger.debug(f"Updated message text with processed image: {message_data['text']}")
+                    logger.info(f"Updated message text with processed image: {message_data['text']}")
                 else:
                     logger.error("Failed to download image.")
 
-        logger.debug(f"Final message data: {message_data}")
-        logger.debug("Message event processed successfully. Passing to handle_message.")
+        logger.info(f"Final message data: {message_data}")
+        logger.info("Message event processed successfully. Passing to handle_message.")
         result = InstagramService.handle_message(db, message_data)
-        logger.debug(f"InstagramService.handle_message result: {result}")
+        logger.info(f"InstagramService.handle_message result: {result}")
         return result
     except Exception as e:
         logger.error(f"Error processing message event: {str(e)}", exc_info=True)
@@ -267,7 +272,7 @@ def process_comment_event(db, change):
         # Check if this comment is from the business account (echo comment)
         from_id = from_user.get('id')
         if from_id == Config.PAGE_ID:
-            logger.debug(f"Skipping echo comment from business account (ID: {from_id})")
+            logger.info(f"Skipping echo comment from business account (ID: {from_id})")
             return True
 
         try:

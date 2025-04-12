@@ -46,11 +46,14 @@ def search_by_image(image, model, processor, device, image_features, image_index
 
             similarities = torch.matmul(image_features_query, image_features.t())[0]
             top_indices = torch.topk(similarities, min(top_k, len(image_index))).indices
+            top_titles = [image_index[i.item()]['title'] for i in top_indices]
 
-            most_probable = Counter(top_indices).most_common(1)[0]
-            logger.info(f"Most probable match: {image_index[most_probable[0]]['title']} with {most_probable[1]} repeats in {top_k} top matches.")
+            most_probable_title = Counter(top_titles).most_common(1)[0][0]
+            repeat_count = Counter(top_titles).most_common(1)[0][1]
 
-            return {'title':image_index[most_probable[0]]['title'], 'repeat_count':most_probable[1]}
+            logger.info(f"Most probable match: {most_probable_title} with {repeat_count} repeats in {top_k} top matches.")
+
+            return {'title':most_probable_title, 'repeat_count':repeat_count}
     except Exception as e:
         logger.error(f"Error during image search: {str(e)}")
         raise
@@ -63,12 +66,12 @@ def process_image(image, top_k=5):
 
         diag = search_by_image( image, model, processor, device, image_features, image_index, top_k=top_k )
 
-        if diag['repeat_count'] < top_k/2:
+        if diag['repeat_count'] <= top_k/2:
             logger.info("No certain matches found, returning None.")
-            return None
+            return 'similarity search results by vision model for the shared contet : No certain Product detected!'
         else:
             logger.info(f"Most probable match: {diag['title']} with repeat count {diag['repeat_count']} in {top_k} top matches..")
-            return diag['title']
+            return "similarity search results by vision model for the shared contet : " + diag['title']
 
     except Exception as e:
         logger.error(f"Error in image processing pipeline: {str(e)}")
