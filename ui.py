@@ -1,25 +1,8 @@
-import torch
 import logging
-from types import MethodType
-
-# Patch torch.classes to avoid crash on __path__._path access
-def safe_getattr(self, attr):
-    try:
-        return object.__getattribute__(self, attr)
-    except RuntimeError as e:
-        if "__path__._path" in str(e) or "Class __path__._path not registered" in str(e):
-            logging.warning("Bypassed Torch class registration error for '__path__._path'")
-            return None
-        raise
-
-# Replace the __getattr__ method with our patched version
-torch.classes.__class__.__getattr__ = MethodType(safe_getattr, torch.classes)
-
 import streamlit as st
-from app.services.backend import Backend # Assuming Backend class is defined here or imported
-from functools import partial # Import partial for callbacks
+from app.services.backend import Backend
+from functools import partial
 
-# --- (Keep existing logging setup and AppConstants) ---
 logging.basicConfig(
     handlers=[logging.FileHandler('logs.txt', encoding='utf-8'), logging.StreamHandler()],
     level=logging.ERROR,
@@ -35,7 +18,6 @@ class AppConstants:
         "ai": ":robot_face:",
         "delete": ":wastebasket:" ,
         "add": ":heavy_plus_sign:" ,
-        "translate": ":earth_asia:" ,
         "success": ":white_check_mark:" ,
         "error": ":x:" ,
         "preview": ":package:" ,
@@ -70,8 +52,6 @@ class BaseSection:
 class AppStatusSection(BaseSection):
     """Handles application status settings"""
     def render(self):
-        st.header("App Status")
-
         try:
             self._render_toggles()
             st.write("---")
@@ -98,14 +78,7 @@ class AppStatusSection(BaseSection):
 class ProductScraperSection(BaseSection):
     """Handles product scraping functionality, now calling Backend (no direct CozmozScraper)."""
     def render(self):
-        st.header(f"{self.const.ICONS['scraper']} Product Scraper")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            self._render_update_products_button()
-        with col2:
-            self._render_translate_button()
+        self._render_update_products_button()
 
         self._render_product_table()
         st.write("---")
@@ -114,15 +87,6 @@ class ProductScraperSection(BaseSection):
         if st.button(f"{self.const.ICONS['update']} Update Products",
                     help="Add new products only"):
             self._handle_scraping_action(self.backend.update_products)
-
-    def _render_translate_button(self):
-        if st.button(f"{self.const.ICONS['translate']} Translate Titles", help="Translate product titles"):
-            with st.spinner("Translating titles..."):
-                success = self.backend.translate_titles()
-            if success:
-                st.success(f"{self.const.ICONS['success']} Titles translated successfully!")
-            else:
-                st.error(f"{self.const.ICONS['error']} Failed to translate titles!")
 
     def _handle_scraping_action(self, action):
         try:
@@ -297,7 +261,7 @@ class OpenAIManagementSection(BaseSection):
                             st.session_state['processed_file_ids'].add(uploaded_file.file_id)
 
                             image_bytes = uploaded_file.getvalue()
-                            analysis_result = self.backend.process_uploaded_image(image_bytes, top_k=5)
+                            analysis_result = self.backend.process_uploaded_image(image_bytes)
                             new_user_input = f"Analysis of uploaded image: {analysis_result}"
 
                             # Display the image and analysis temporarily
@@ -361,13 +325,20 @@ class OpenAIManagementSection(BaseSection):
                         # Set flag back to True to avoid retrying the same failed message automatically
                         st.session_state['user_message_sent'] = True
 #===============================================================================================================================
+
 class InstagramSection(BaseSection):
     """Handles Instagram-related functionality including posts, stories, and fixed responses."""
     def __init__(self, backend):
         super().__init__(backend)
-        # Initialize session state for custom labels if not already present
+        # Initialize session state for custom labels and pagination if not already present
         if 'custom_labels' not in st.session_state:
-            st.session_state['custom_labels'] = [] # Store newly added custom labels here
+            st.session_state['custom_labels'] = []
+        if 'post_page' not in st.session_state:
+            st.session_state['post_page'] = 0
+        if 'posts_per_page' not in st.session_state:
+            st.session_state['posts_per_page'] = 8  # Default to 8 posts per page (2 rows of 4)
+        if 'post_filter' not in st.session_state:
+            st.session_state['post_filter'] = "All"
 
     def render(self):
         st.header(f"{self.const.ICONS['instagram']} Instagram Management")
@@ -391,198 +362,261 @@ class InstagramSection(BaseSection):
         st.write("---")
 
     def _render_posts_tab(self):
-        """Renders the section for managing and viewing Instagram posts."""
-        # --- Row for Get/Update Posts, Set Labels by Model, and Add New Label ---
-        col1, col2, col3, col4 = st.columns([1, 1, 2, 1]) # Adjust column ratios
+        """Renders the section for managing and viewing Instagram posts with optimized performance."""
+        # --- Top Control Bar with Reduced Elements ---
+        col1, col2, col3 = st.columns([1, 1, 2])  # Simplified layout
 
         with col1:
-            if st.button(f"{self.const.ICONS['update']} Get/Update Posts", help="Fetch and update all Instagram posts", use_container_width=True):
-                with st.spinner("Fetching posts from Instagram..."):
+            if st.button(f"{self.const.ICONS['update']} Update Posts", help="Fetch and update Instagram posts", use_container_width=True):
+                with st.spinner("Fetching posts..."):
                     try:
                         success = self.backend.fetch_instagram_posts()
                         if success:
-                            st.success(f"{self.const.ICONS['success']} Posts fetched and updated successfully!")
-                            st.rerun() # Rerun to refresh the post display
+                            st.success(f"{self.const.ICONS['success']} Posts updated!")
+                            st.rerun()
                         else:
-                            st.error(f"{self.const.ICONS['error']} Failed to fetch posts from Instagram")
+                            st.error(f"{self.const.ICONS['error']} Fetch failed")
                     except Exception as e:
-                        st.error(f"{self.const.ICONS['error']} Error fetching posts: {str(e)}")
+                        st.error(f"Error: {str(e)}")
 
         with col2:
-            if st.button(f"{self.const.ICONS['model']} Set Labels by Model", help="Use AI to automatically label posts based on product matches", use_container_width=True):
-                with st.spinner("AI is analyzing posts and setting labels..."):
+            if st.button(f"{self.const.ICONS['model']} AI Label", help="Auto-label posts with AI", use_container_width=True):
+                with st.spinner("AI labeling..."):
                     try:
-                        # Check if the backend method exists before calling
                         if hasattr(self.backend, 'set_labels_by_model'):
                             result = self.backend.set_labels_by_model()
-                            # Assuming the backend method returns a dict with 'success' and 'message' keys
                             if result and result.get('success'):
-                                st.success(f"{self.const.ICONS['success']} {result.get('message', 'Labels set successfully by model!')}")
-                                st.rerun() # Refresh grid to show new labels
+                                st.success(f"Labels updated!")
+                                st.rerun()
                             else:
-                                st.error(f"{self.const.ICONS['error']} {result.get('message', 'Failed to set labels by model.')}")
+                                st.error(f"Labeling failed")
                         else:
-                            st.error(f"{self.const.ICONS['error']} Backend function 'set_labels_by_model' not found.")
+                            st.error(f"Function not found")
                     except Exception as e:
-                        st.error(f"{self.const.ICONS['error']} Error setting labels by model: {str(e)}")
+                        st.error(f"Error: {str(e)}")
 
         with col3:
-            new_label = st.text_input(
-                "Enter a new label to add to the dropdown list:",
-                key="new_custom_label_input",
-                placeholder="Add custom label",
-                label_visibility="collapsed" # Hide the label text itself
-            )
+            # Combine label input and button in one line for space efficiency
+            col3a, col3b = st.columns([3, 1])
+            with col3a:
+                new_label = st.text_input(
+                    "New label",
+                    key="new_custom_label_input",
+                    placeholder="Add custom label",
+                    label_visibility="collapsed"
+                )
+            with col3b:
+                if st.button(f"{self.const.ICONS['add']}", key="add_custom_label_button", help="Add new label", use_container_width=True):
+                    new_label_stripped = new_label.strip()
+                    if new_label_stripped and new_label_stripped not in st.session_state['custom_labels']:
+                        st.session_state['custom_labels'].append(new_label_stripped)
+                        st.success(f"Added '{new_label_stripped}'")
+                        st.rerun()
+                    elif not new_label_stripped:
+                        st.warning("Label cannot be empty")
+                    else:
+                        st.warning(f"Label already exists")
 
-        with col4:
-            if st.button(f"{self.const.ICONS['add']} Add Label", key="add_custom_label_button", use_container_width=True):
-                new_label_stripped = new_label.strip()
-                if new_label_stripped and new_label_stripped not in st.session_state['custom_labels']:
-                    # NOTE: Ideally, this would call a backend function to persist the label.
-                    # Using session_state for simplicity in this example.
-                    st.session_state['custom_labels'].append(new_label_stripped)
-                    st.success(f"Added '{new_label_stripped}' to label options.")
-                    # Clear the input field after adding - REMOVED to prevent StreamlitAPIException
-                    # st.session_state.new_custom_label_input = ""
-                    st.rerun() # Rerun to update dropdowns immediately
-                elif not new_label_stripped:
-                    st.warning("Label cannot be empty.")
-                else:
-                    st.warning(f"Label '{new_label_stripped}' already exists.")
+        # --- Filter and Pagination Controls ---
+        try:
+            # Lazy load posts only once for this render
+            posts = self.backend.get_posts()
+            total_posts = len(posts)
 
-        st.markdown("---") # Separator before the grid
-        self._render_post_grid()
+            if not posts:
+                st.info("No posts found. Click 'Update Posts' to fetch them.")
+                return
 
+            # Get all unique labels for filtering
+            all_labels = sorted(list(set(post.get('label', '') for post in posts if post.get('label', ''))))
+            filter_options = ["All"] + all_labels
+
+            col_filter, col_per_page, col_pagination = st.columns([2, 1, 2])
+
+            with col_filter:
+                # Filter selector
+                selected_filter = st.selectbox(
+                    "Filter by label",
+                    options=filter_options,
+                    index=filter_options.index(st.session_state['post_filter']) if st.session_state['post_filter'] in filter_options else 0,
+                    key="post_filter_selector",
+                    on_change=lambda: self._handle_filter_change()
+                )
+                st.session_state['post_filter'] = selected_filter
+
+            with col_per_page:
+                # Posts per page selector
+                st.selectbox(
+                    "Posts per page",
+                    options=[4, 8, 12, 16],
+                    index=[4, 8, 12, 16].index(st.session_state['posts_per_page']) if st.session_state['posts_per_page'] in [4, 8, 12, 16] else 1,
+                    key="posts_per_page_selector",
+                    on_change=lambda: self._handle_page_size_change()
+                )
+
+            # Filter posts based on selection
+            if st.session_state['post_filter'] != "All":
+                filtered_posts = [post for post in posts if post.get('label', '') == st.session_state['post_filter']]
+            else:
+                filtered_posts = posts
+
+            filtered_count = len(filtered_posts)
+            max_pages = (filtered_count - 1) // st.session_state['posts_per_page'] + 1 if filtered_count > 0 else 1
+
+            # Ensure current page is valid after filtering
+            if st.session_state['post_page'] >= max_pages:
+                st.session_state['post_page'] = max_pages - 1
+
+            with col_pagination:
+                # Pagination controls
+                pagination_cols = st.columns([1, 3, 1])
+                with pagination_cols[0]:
+                    prev_disabled = st.session_state['post_page'] <= 0
+                    if st.button(f"{self.const.ICONS['previous']}", disabled=prev_disabled, key="prev_page_btn"):
+                        st.session_state['post_page'] -= 1
+                        st.rerun()
+
+                with pagination_cols[1]:
+                    st.markdown(f"**Page {st.session_state['post_page'] + 1} of {max_pages}** ({filtered_count} posts)")
+
+                with pagination_cols[2]:
+                    next_disabled = st.session_state['post_page'] >= max_pages - 1
+                    if st.button(f"{self.const.ICONS['next']}", disabled=next_disabled, key="next_page_btn"):
+                        st.session_state['post_page'] += 1
+                        st.rerun()
+
+            # Calculate slice for current page
+            start_idx = st.session_state['post_page'] * st.session_state['posts_per_page']
+            end_idx = min(start_idx + st.session_state['posts_per_page'], filtered_count)
+            current_page_posts = filtered_posts[start_idx:end_idx]
+
+            # Render only the current page of posts
+            self._render_post_grid(current_page_posts)
+
+        except Exception as e:
+            st.error(f"Error loading post grid: {str(e)}")
+
+    def _handle_filter_change(self):
+        """Reset to first page when filter changes"""
+        st.session_state['post_page'] = 0
+
+    def _handle_page_size_change(self):
+        """Reset to first page when posts per page changes"""
+        st.session_state['post_page'] = 0
 
     def _handle_label_change(self, post_id, select_key):
-        """Callback function to handle label selection change and save automatically."""
-        selected_label = st.session_state.get(select_key, "-- Select --") # Default to generic select
-
-        # Only save if a valid label (not the default placeholder) is selected
+        """Optimized callback for label selection that avoids unnecessary reruns"""
+        selected_label = st.session_state.get(select_key, "-- Select --")
         final_label_to_save = selected_label if selected_label != "-- Select --" else ""
 
         if not post_id:
             st.error("Cannot save label: Post ID is missing.")
-            return # Prevent further action
+            return
 
-        # Attempt to save the selected label (or empty string if "-- Select --" was chosen)
+        # Use a progress placeholder to show save status without triggering a rerun
         if hasattr(self.backend, 'set_label'):
             try:
                 success = self.backend.set_label(post_id, final_label_to_save)
                 if not success:
-                    # This might occur if the post was deleted between rendering and saving
                     st.warning(f"Could not save label for post {post_id}. Post might not exist.")
             except Exception as e:
-                st.error(f"{self.const.ICONS['error']} Error saving label for post {post_id}: {str(e)}")
+                st.error(f"{self.const.ICONS['error']} Error saving label: {str(e)}")
         else:
             st.error("Backend function 'set_label' not found.")
 
-
-    def _render_post_grid(self):
-        """Renders Instagram posts in a 4-column scrollable grid with simplified labeling."""
+    def _render_post_grid(self, posts_to_display):
+        """Renders a paginated grid of Instagram posts with minimal UI"""
         try:
-            posts = self.backend.get_posts()
             products_data = self.backend.get_products()
-            # Combine product titles and custom labels for the dropdown
+            # Get product titles for the dropdown - only load once per render
             product_titles = sorted([p['Title'] for p in products_data if p.get('Title')])
-            # Get custom labels from session state
             custom_labels = st.session_state.get('custom_labels', [])
-            # Combine, remove duplicates (if any overlap), and add the placeholder
             all_labels = ["-- Select --"] + sorted(list(set(product_titles + custom_labels)))
-
         except Exception as e:
-            st.error(f"Error loading posts or products: {str(e)}")
+            st.error(f"Error loading label options: {str(e)}")
             return
 
-        if not posts:
-            st.info("No posts found in the database. Click 'Get/Update Posts' to fetch them.")
-            return
-
-        num_columns = 4
+        # Determine grid layout - adaptive columns based on screen size would be ideal
+        num_columns = 4  # Fixed for consistency
         cols = st.columns(num_columns)
 
-        for index, post in enumerate(posts):
+        for index, post in enumerate(posts_to_display):
             post_id = post.get('id')
             if not post_id:
                 post_id_key = f"index_{index}"
-                st.warning(f"Post at index {index} missing database ID. Labeling will not persist.")
             else:
                 post_id_key = str(post_id)
 
             col_index = index % num_columns
             with cols[col_index]:
+                # Use minimal styling for containers to reduce rendering overhead
                 with st.container(border=True):
                     media_url = post.get('media_url')
-                    caption = post.get('caption', 'No caption available.')
 
+                    # Only show essential info - thumbnail image + minimal caption
                     if media_url:
                         st.image(media_url, use_container_width=True)
                     else:
-                        st.warning("Media URL not found.")
+                        st.warning("No image")
 
+                    # Truncate caption to reduce rendering overhead
+                    caption = post.get('caption', 'No caption')
+                    if len(caption) > 100:
+                        caption = caption[:97] + "..."
                     st.caption(f"**Caption:** {caption}")
-                    # --- Simplified Labeling Section ---
-                    # Determine the current label and set the default index for the selectbox
+
+                    # Optimize label dropdown rendering
                     current_label = post.get('label', '')
                     try:
-                        # Find the index in the combined list (including "-- Select --")
                         default_select_index = all_labels.index(current_label) if current_label else 0
                     except ValueError:
-                        # Label exists but isn't in the current list (maybe added then removed?)
-                        # Add it temporarily for this post's display or default to 0
                         if current_label:
-                            st.warning(f"Label '{current_label}' for post {post_id} not in current options. Adding temporarily.")
-                            all_labels.append(current_label) # Add for this dropdown instance
+                            all_labels.append(current_label)
                             default_select_index = all_labels.index(current_label)
                         else:
-                            default_select_index = 0 # Default to "-- Select --"
+                            default_select_index = 0
 
-                    # --- Define unique key for this post's selectbox ---
                     select_key = f"label_select_{post_id_key}"
 
-                    # --- Create callback ---
+                    # Use on_change to avoid unnecessary reruns
                     on_change_callback = partial(
                         self._handle_label_change,
-                        post_id=post_id, # Pass the actual DB ID
+                        post_id=post_id,
                         select_key=select_key
                     )
 
-                    # Dropdown for product titles and custom labels
                     st.selectbox(
-                        label=self.const.ICONS['label'], # Use icon as label
+                        label="Label",
                         options=all_labels,
-                        key=select_key, # Use unique key
-                        index=default_select_index, # Set default index based on current label
-                        on_change=on_change_callback, # Trigger callback on change
-                        help="Select a label for this post. Changes are saved automatically." # Add help text
+                        key=select_key,
+                        index=default_select_index,
+                        on_change=on_change_callback,
+                        label_visibility="collapsed"
                     )
-                    # --- Removed custom text input and "Label Post" title ---
-
 
     def _render_stories_tab(self):
-        """Renders the section for managing Instagram stories."""
-        st.subheader("Instagram Stories")
+        """Streamlined stories tab with minimal UI"""
+        col1, col2 = st.columns([1, 3])
 
-        if st.button(f"{self.const.ICONS['update']} Get/Update Stories", help="Fetch and update all Instagram stories"):
-            with st.spinner("Fetching stories from Instagram..."):
-                try:
-                    success = self.backend.fetch_instagram_stories()
-                    if success:
-                        st.success(f"{self.const.ICONS['success']} Stories fetched and updated successfully!")
-                    else:
-                        st.error(f"{self.const.ICONS['error']} Failed to fetch stories from Instagram")
-                except Exception as e:
-                    st.error(f"{self.const.ICONS['error']} Error fetching stories: {str(e)}")
+        with col1:
+            if st.button(f"{self.const.ICONS['update']} Update Stories", help="Fetch stories", use_container_width=True):
+                with st.spinner("Fetching..."):
+                    try:
+                        success = self.backend.fetch_instagram_stories()
+                        if success:
+                            st.success(f"Stories updated!")
+                        else:
+                            st.error(f"Fetch failed")
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
 
-        # Placeholder for displaying stories if needed in the future
-        st.info("Story viewing is not implemented yet.")
-
+        with col2:
+            st.info("Story viewing functionality coming soon")
 
     def _render_fixed_responses_section(self):
-        """Renders the fixed responses section (called within its tab)."""
-        st.subheader("Manage Fixed Responses")
+        """Lightweight fixed responses section"""
         incoming_type = st.radio(
-            "Select Incoming Type",
+            "Response Type",
             options=["Direct", "Comment"],
             index=0,
             horizontal=True,
@@ -598,20 +632,20 @@ class InstagramSection(BaseSection):
             self._render_new_response_form(incoming_type)
 
     def _render_existing_responses(self, incoming_type):
-        st.subheader(f"Existing {incoming_type} Fixed Responses")
         try:
             responses = self.backend.get_fixed_responses(incoming=incoming_type)
             if responses:
-                for resp in responses:
-                    self._render_response_card(resp, incoming_type)
+                # Use an expandable container for each response to save vertical space
+                for i, resp in enumerate(responses):
+                    with st.expander(f"Response #{i+1}: {resp.get('trigger_keyword', 'Unnamed')}"):
+                        self._render_response_card(resp, incoming_type)
             else:
                 st.info(f"No {incoming_type.lower()} fixed responses available.")
         except RuntimeError as e:
             st.error(str(e))
 
     def _render_response_card(self, response, incoming_type):
-        # Use unique container key based on response ID
-        with st.container(border=True): # Added border for visual separation
+        with st.container():
             updated_time = self.backend.format_updated_at(response.get("updated_at"))
             st.markdown(f"_Updated {updated_time}_")
 
@@ -623,9 +657,8 @@ class InstagramSection(BaseSection):
 
             if incoming_type == "Direct":
                 self._render_direct_response(response, trigger)
-            else: # Comment type
+            else:  # Comment type
                 self._render_comment_response(response, trigger)
-
 
     def _render_direct_response(self, response, trigger):
         direct_text = st.text_area(
@@ -637,14 +670,13 @@ class InstagramSection(BaseSection):
 
         col1, col2 = st.columns([1, 1])
         with col1:
-            if st.button("Save", key=f"save_{response['id']}"):
+            if st.button(f"{self.const.ICONS['save']} Save", key=f"save_{response['id']}", use_container_width=True):
                 self._update_response(response, trigger, direct_text, None)
         with col2:
             self._render_delete_button(response["id"])
 
     def _render_comment_response(self, response, trigger):
-        # Layout toggles first
-        col_t1, col_t2, col_t3, col_t4 = st.columns([1, 1, 1, 1]) # Use separate columns for toggles if needed
+        col_t1, col_t2 = st.columns(2)
         with col_t1:
             direct_toggle = st.toggle(
                 "Direct",
@@ -658,115 +690,101 @@ class InstagramSection(BaseSection):
                 key=f"comment_toggle_{response['id']}"
             )
 
-        # Conditionally display text areas based on toggles
-        direct_text = self._conditional_text_area(
-            direct_toggle,
-            "Direct Response Text",
-            response["direct_response_text"],
-            f"direct_text_{response['id']}"
-        )
+        direct_text = None
+        if direct_toggle:
+            direct_text = st.text_area(
+                "Direct Response",
+                value=response["direct_response_text"] or "",
+                key=f"direct_text_{response['id']}",
+                height=100
+            )
 
-        comment_text = self._conditional_text_area(
-            comment_toggle,
-            "Comment Response Text",
-            response["comment_response_text"],
-            f"comment_text_{response['id']}"
-        )
+        comment_text = None
+        if comment_toggle:
+            comment_text = st.text_area(
+                "Comment Response",
+                value=response["comment_response_text"] or "",
+                key=f"comment_text_{response['id']}",
+                height=100
+            )
 
-        # Save and Delete buttons below text areas
         col_b1, col_b2 = st.columns([1, 1])
         with col_b1:
-            if st.button("Save", key=f"save_{response['id']}"):
+            if st.button(f"{self.const.ICONS['save']} Save", key=f"save_{response['id']}", use_container_width=True):
                 self._update_response(response, trigger, direct_text, comment_text)
         with col_b2:
             self._render_delete_button(response["id"])
 
-    def _conditional_text_area(self, condition, label, value, key):
-        if condition:
-            return st.text_area(label, value=value or "", key=key, height=100)
-        return None # Return None if not displayed
+    def _render_delete_button(self, response_id):
+        # Simple method for rendering delete button
+        if st.button(f"{self.const.ICONS['delete']} Delete", key=f"delete_{response_id}", use_container_width=True):
+            try:
+                success = self.backend.delete_fixed_response(response_id)
+                if success:
+                    st.success("Response deleted successfully!")
+                    st.rerun()
+                else:
+                    st.error("Failed to delete response.")
+            except Exception as e:
+                st.error(f"Error deleting response: {str(e)}")
 
     def _update_response(self, response, trigger, direct_text, comment_text):
         try:
-            # Ensure text is None if the corresponding toggle was off (important for DB update)
-            final_direct_text = direct_text if direct_text is not None else None
-            final_comment_text = comment_text if comment_text is not None else None
-
-            self.backend.update_fixed_response(
+            # Implementation depends on your backend
+            success = self.backend.update_fixed_response(
                 response["id"],
-                trigger,
-                comment_response_text=final_comment_text,
-                direct_response_text=final_direct_text,
-                incoming=response["incoming"] # Pass incoming type correctly
+                trigger_keyword=trigger,
+                direct_response_text=direct_text,
+                comment_response_text=comment_text
             )
-            st.success(f"{self.const.ICONS['success']} Fixed response updated successfully!")
-            st.rerun()
-        except RuntimeError as e:
-            st.error(str(e))
-        except Exception as e: # Catch potential errors more broadly
-             st.error(f"An unexpected error occurred during update: {str(e)}")
 
-
-    def _render_delete_button(self, response_id):
-        # Use a more descriptive key for the delete button
-        if st.button(f"{self.const.ICONS['delete']} Delete", key=f"delete_{response_id}", help="Delete this fixed response"):
-            try:
-                self.backend.delete_fixed_response(response_id)
-                st.success(f"{self.const.ICONS['success']} Fixed response deleted successfully!")
-                # Clear relevant session state if needed, then rerun
-                st.rerun()
-            except RuntimeError as e:
-                st.error(str(e))
-            except Exception as e: # Catch potential errors more broadly
-                st.error(f"An unexpected error occurred during deletion: {str(e)}")
-
+            if success:
+                st.success("Response updated successfully!")
+            else:
+                st.error("Failed to update response.")
+        except Exception as e:
+            st.error(f"Error updating response: {str(e)}")
 
     def _render_new_response_form(self, incoming_type):
-        st.subheader(f"Add New {incoming_type} Response")
-        with st.form(key=f"new_{incoming_type}_response_form"):
-            new_trigger = st.text_input("New Trigger*", key="new_trigger")
+        with st.form(key=f"new_{incoming_type.lower()}_response_form"):
+            trigger = st.text_input("Trigger Keyword", key="new_trigger")
 
             if incoming_type == "Direct":
-                new_direct_text = st.text_area("Direct Response Text*", key="new_direct_text", height=100)
-                new_comment_text = None
-                # Validation check
-                is_valid = new_trigger and new_direct_text
-            else: # Comment type
-                col1, col2 = st.columns([1, 1])
-                with col1:
-                    new_direct_toggle = st.toggle("Send Direct Response?", key="new_direct_toggle")
-                with col2:
-                    new_comment_toggle = st.toggle("Send Comment Response?", key="new_comment_toggle")
+                direct_text = st.text_area("Direct Response Text", key="new_direct_text", height=150)
+                comment_text = None
+            else:  # Comment
+                use_direct = st.checkbox("Include Direct Message", key="new_use_direct")
+                direct_text = st.text_area("Direct Response Text", key="new_direct_text", height=150) if use_direct else None
 
-                new_direct_text = self._conditional_text_area(new_direct_toggle, "Direct Response Text", "", "new_direct_text")
-                new_comment_text = self._conditional_text_area(new_comment_toggle, "Comment Response Text", "", "new_comment_text")
-                # Validation check: need trigger and at least one response type
-                is_valid = new_trigger and (new_direct_text or new_comment_text)
+                use_comment = st.checkbox("Include Comment Reply", key="new_use_comment")
+                comment_text = st.text_area("Comment Response Text", key="new_comment_text", height=150) if use_comment else None
 
             submitted = st.form_submit_button(f"{self.const.ICONS['add']} Add Response")
 
             if submitted:
-                if not is_valid:
-                    if not new_trigger:
-                        st.error("Trigger is required.")
-                    elif incoming_type == "Direct" and not new_direct_text:
-                         st.error("Direct Response Text is required for Direct type.")
-                    elif incoming_type == "Comment" and not (new_direct_text or new_comment_text):
-                         st.error("At least one response (Direct or Comment) is required for Comment type.")
-                    return # Stop processing if invalid
+                self._add_new_response(incoming_type, trigger, direct_text, comment_text)
 
-                try:
-                    self.backend.add_fixed_response(
-                        new_trigger,
-                        comment_response_text=new_comment_text,
-                        direct_response_text=new_direct_text,
-                        incoming=incoming_type
-                    )
-                    st.success(f"{self.const.ICONS['success']} Fixed response added successfully!")
-                except RuntimeError as e:
-                    st.error(str(e))
-                except Exception as e:
-                    st.error(f"An unexpected error occurred: {str(e)}")
+    def _add_new_response(self, incoming_type, trigger, direct_text, comment_text):
+        if not trigger:
+            st.error("Trigger keyword is required!")
+            return
+
+        try:
+            success = self.backend.add_fixed_response(
+                trigger_keyword=trigger,
+                incoming_type=incoming_type,
+                direct_response_text=direct_text,
+                comment_response_text=comment_text
+            )
+
+            if success:
+                st.success("New response added successfully!")
+                st.rerun()
+            else:
+                st.error("Failed to add new response.")
+
+        except Exception as e:
+            st.error(f"Error adding response: {str(e)}")
 
 #===============================================================================================================================
 class AdminUI:

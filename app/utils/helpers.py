@@ -19,7 +19,7 @@ def get_db():
 
 def allowed_file(filename):
     return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in {'csv', 'pkl','dill'}
+           filename.rsplit('.', 1)[1].lower() in {'pt'}
 
 
 def secure_filename_wrapper(filename):

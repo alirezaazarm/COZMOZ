@@ -191,58 +191,6 @@ class OpenAIService:
 
 # =================================================================================================
 
-    def translate_titles(self):
-        # Get products without translations
-        products = [p for p in Product.get_all() if not p.get('translated_title')]
-        if not products:
-            logger.info("No products need translation.")
-            return True
-
-        thread = self.client.beta.threads.create()
-        for product in products:
-            original_title = product['title']
-            logger.info(f"Translating title for product: {original_title}")
-            try:
-                # Send the single product title to be translated
-                self.client.beta.threads.messages.create(
-                    thread_id=thread.id,
-                    role="user",
-                    content=original_title
-                )
-                # Start the translation run
-                run = self.client.beta.threads.runs.create(
-                    thread_id=thread.id,
-                    assistant_id=Config.OPENAI_TRANSLATOR_ID
-                )
-                # Wait for completion with a timeout of 60 seconds
-                start_time = time.time()
-                while run.status != "completed":
-                    if time.time() - start_time > 60:
-                        logger.error(f"Translation timeout for product: {original_title}")
-                        raise TimeoutError("Translation run timed out")
-                    time.sleep(0.1)
-                    run = self.client.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
-                # Retrieve the translation response
-                messages = self.client.beta.threads.messages.list(thread_id=thread.id)
-                if not messages.data:
-                    logger.error(f"No translation response for product: {original_title}")
-                    raise ValueError("No translation response received")
-                translated_title = messages.data[0].content[0].text.value.strip()
-                if not translated_title:
-                    logger.error(f"Empty translation for product: {original_title}")
-                    raise ValueError("Empty translation received")
-                # Update product with translated title
-                Product.update(original_title, {"translated_title": translated_title})
-                logger.info(f"Translated title stored for product {original_title}: {translated_title}")
-            except Exception as e:
-                logger.error(f"Error translating product {original_title}: {str(e)}")
-                return False
-
-        logger.info("All titles have been translated!")
-        return True
-
-# =================================================================================================
-
     def ensure_thread(self, user):
         try:
             # In MongoDB, user is a dictionary, not an ORM object

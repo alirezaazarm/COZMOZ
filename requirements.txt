@@ -7,10 +7,10 @@ apscheduler
 tenacity
 python-dateutil
 pandas
-torch
-transformers
 pillow
+ultralytics
 gdown
 pathlib
 streamlit
 beautifulsoup4
+accelerate

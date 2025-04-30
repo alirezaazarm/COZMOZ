@@ -490,7 +490,7 @@ class Backend:
 
                     image_stream = io.BytesIO(image_bytes)
                     pil_image = Image.open(image_stream)
-                    predicted_label = process_image(pil_image, top_k=5)
+                    predicted_label = process_image(pil_image)
 
                     # 6. If a label was predicted, update the post
                     if predicted_label:
@@ -578,22 +578,7 @@ class Backend:
         except Exception as e:
             logger.error(f"Failed to send message to thread {thread_id}: {str(e)}", exc_info=True)
             raise
-    def translate_titles(self):
-        """Translate product titles using OpenAI"""
-        logger.info("Starting product title translation")
-        try:
-            openai_service = OpenAIService()
-            result = openai_service.translate_titles()
-            if result:
-                logger.info("Product titles translated successfully")
-                return True
-            else:
-                logger.error("Failed to translate product titles")
-                return False
-        except Exception as e:
-            logger.error(f"Error in translate_titles: {str(e)}")
-            return False
-    def process_uploaded_image(self, image_bytes, top_k=5):
+    def process_uploaded_image(self, image_bytes):
             """
             Processes image bytes using PIL, calls img_search.process_image, and returns the result.
             """
@@ -608,7 +593,7 @@ class Backend:
                 pil_image = Image.open(image_stream)
 
                 # Call the existing process_image function (already imported in backend.py)
-                analysis_result = process_image(pil_image, top_k=top_k)
+                analysis_result = process_image(pil_image)
                 logger.info(f"Image processing result: {analysis_result}")
                 return analysis_result
 

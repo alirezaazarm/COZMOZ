@@ -16,7 +16,6 @@ class Config:
     PAGE_ID = os.getenv('PAGE_ID')
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
     OPENAI_ASSISTANT_ID = os.getenv('OPENAI_ASSISTANT_ID')
-    OPENAI_TRANSLATOR_ID =  os.getenv('OPENAI_TRANSLATOR_ID')
     VECTOR_STORE_ID = os.getenv('VECTOR_STORE_ID')
     BATCH_WINDOW_SECONDS = 30
 
