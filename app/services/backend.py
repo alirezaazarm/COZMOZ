@@ -12,6 +12,7 @@ from .openai_service import OpenAIService
 from .img_search import process_image
 from PIL import Image
 import io
+from ..models.additional_info import Additionalinfo
 
 logger = logging.getLogger(__name__)
 
@@ -21,57 +22,39 @@ class Backend:
         self.app_setting_url = Config.BASE_URL + "/update/app-settings"
         self.headers = {"Content-Type": "application/json",  "Authorization": f"Bearer {Config.VERIFY_TOKEN}" }
         self.scraper = CozmozScraper()
+        self.openai_service = OpenAIService()
         logger.info("Backend initialized with configuration URLs and headers.")
 
-    # ------------------------------------------------------------------
-    # Product scraping
-    # ------------------------------------------------------------------
-    def update_products(self):
-        logger.info("Scraping the site is starting...")
-        try:
-            self.scraper.update_products()
-            logger.info("Update products completed.")
-        except Exception as e:
-            logger.error(f"Failed to update products: {str(e)}", exc_info=True)
-            raise
+    @staticmethod
+    def format_updated_at(updated_at):
+        logger.debug(f"Formatting updated_at timestamp: {updated_at}.")
+        if not updated_at:
+            logger.debug("Timestamp is empty or None.")
+            return "Never updated"
 
-        logger.info("Rebuilding files and vector store is starting...")
         try:
-            openai_service = OpenAIService()
-            result = openai_service.rebuild_files_and_vector_store()
-            if result:
-                logger.info("Files and vector store rebuilt successfully")
-                return True
+            # Handle timestamps without timezone info (assume UTC)
+            updated_time = datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=timezone.utc)
+
+            # Calculate time difference
+            time_diff = datetime.now(timezone.utc) - updated_time
+            days = time_diff.days
+            hours, remainder = divmod(time_diff.seconds, 3600)
+            minutes = remainder // 60
+
+            if days > 0:
+                return f"{days} day{'s' if days > 1 else ''}, {hours} hour{'s' if hours > 1 else ''} ago"
+            elif hours > 0:
+                return f"{hours} hour{'s' if hours > 1 else ''}, {minutes} minute{'s' if minutes > 1 else ''} ago"
             else:
-                logger.error("Failed to rebuild files and vector store")
-                return False
-        except Exception as e:
-            logger.error(f"Error in rebuild_files_and_vector_store: {str(e)}")
-            return False
-
-    def get_products(self):
-        logger.info("Fetching products from the database.")
-        try:
-            # Use the MongoDB Product model directly
-            products = Product.get_all()
-            products_data = [
-                {
-                    "Title": p['title'],
-                    "Price": p['price'] if isinstance(p['price'], dict) else p['price'],
-                    "Additional info": p['additional_info'] if isinstance(p['additional_info'], dict) else p['additional_info'],
-                    "Category": p['category'],
-                    "Stock status": p['stock_status'],
-                    "Translated Title": p['translated_title'],
-                    "Link": p['link']
-                }
-                for p in products
-            ]
-            logger.info(f"Successfully fetched {len(products_data)} products.")
-            return products_data
-        except Exception as e:
-            logger.error(f"Error fetching products: {e}")
-            return []
-
+                return f"{minutes} minute{'s' if minutes > 1 else ''} ago"
+        except ValueError as e:
+            logger.error(f"Invalid timestamp format: {updated_at}. Error: {str(e)}")
+            return "Invalid timestamp"
+    
+    # ------------------------------------------------------------------
+    # Appsetting to main app
+    # ------------------------------------------------------------------
     def app_settings_to_main(self):
         logger.info("Sending app settings to the main server.")
         try:
@@ -84,7 +67,11 @@ class Backend:
                 return False
 
             # Format settings as a list of dictionaries with key-value pairs
-            setting_list = [{s['key']: s['value']} for s in settings]
+            setting_list = []
+            for s in settings:
+                setting_list.append({s['key']: s['value']})
+                if s['key'] == 'vs_id':
+                    self.openai_service.set_vs_id({s['key']: s['value']})
 
             # Log the data being sent for debugging
             logger.info(f"Sending the following app settings: {setting_list}")
@@ -117,7 +104,7 @@ class Backend:
             logger.error(f"Request failed with status code: {response.status_code}")
             logger.error(f"Response text: {response.text}")
             return False
-
+    
     def get_app_setting(self, key):
         logger.info(f"Fetching app setting for key: {key}.")
         self.app_settings_to_main()
@@ -129,7 +116,7 @@ class Backend:
         except Exception as e:
             logger.error(f"Error in get_app_setting for key '{key}': {str(e)}")
             return {"error in get_app_setting calling": str(e)}
-
+        
     def update_is_active(self, key, value):
         logger.info(f"Updating app setting for key: {key} with value: {value}.")
         try:
@@ -143,6 +130,139 @@ class Backend:
         except Exception as e:
             logger.error(f"Error in update_is_active for key '{key}': {str(e)}")
             return {"error in update_is_active": str(e)}
+
+    # ------------------------------------------------------------------
+    # Data : Product + additional info
+    # ------------------------------------------------------------------
+
+    def update_products(self):
+        logger.info("Scraping the site is starting...")
+        try:
+            self.scraper.update_products()
+            logger.info("Update products completed.")
+        except Exception as e:
+            logger.error(f"Failed to update products: {str(e)}", exc_info=True)
+            return False
+
+        try:
+            self.app_settings_to_main()
+        except Exception as e:
+            logger.error(f"Failed to send app settings: {e}")
+            
+        return True
+
+    def get_products(self):
+        logger.info("Fetching products from the database.")
+        try:
+            # Use the MongoDB Product model directly
+            products = Product.get_all()
+            products_data = [
+                {
+                    "Title": p['title'],
+                    "Price": p['price'] if isinstance(p['price'], dict) else p['price'],
+                    "Additional info": p['additional_info'] if isinstance(p['additional_info'], dict) else p['additional_info'],
+                    "Category": p['category'],
+                    "Stock status": p['stock_status'],
+                    "Link": p['link']
+                }
+                for p in products
+            ]
+            logger.info(f"Successfully fetched {len(products_data)} products.")
+            return products_data
+        except Exception as e:
+            logger.error(f"Error fetching products: {e}")
+            return []
+
+    def get_additionalinfo(self):
+        """Return all additional text entries as a list of dicts with 'key' and 'value'."""
+        try:
+            entries = Additionalinfo.get_all()
+            return [
+                {"key": entry["title"], "value": entry["content"]}
+                for entry in entries
+            ]
+        except Exception as e:
+            logger.error(f"Error fetching all additional text entries: {str(e)}")
+            return []
+
+    def add_additionalinfo(self, key, value):
+        """Add or update a text entry in the additional_text collection with the given key and value."""
+        logger.info(f"Adding/updating additional text: {key}")
+        try:
+            # Check if an entry with this title already exists
+            existing = Additionalinfo.search(key)
+            if existing and len(existing) > 0:
+                # Update existing entry
+                result = Additionalinfo.update(str(existing[0]['_id']), {
+                    "title": key,
+                    "content": value
+                })
+            else:
+                # Create new entry
+                result = Additionalinfo.create(title=key, content=value)
+
+            if result:
+                logger.info(f"Additional text '{key}' created/updated successfully.")
+                return True
+            else:
+                logger.error(f"Failed to create/update additional text '{key}'.")
+                return False
+        except Exception as e:
+            logger.error(f"Error creating/updating additional text '{key}': {str(e)}")
+            return False
+
+    def delete_additionalinfo(self, key):
+        """Delete an additional text entry by title."""
+        try:
+            # Find the entry with the matching title
+            entries = Additionalinfo.search(key)
+            if not entries or len(entries) == 0:
+                logger.error(f"Additional text entry with title '{key}' not found.")
+                return False
+
+            # delete file from openai if it has file_id
+            if entries[0]['file_id']:
+                resp = self.openai_service.delete_single_file(entries[0]['file_id'])     
+                if resp:
+                    result = Additionalinfo.delete(str(entries[0]['_id']))
+                    if result:
+                        logger.info(f"Additional text title '{key}' deleted from DB successfully.")
+                        return True
+                    else:
+                        logger.error(f"Failed to delete additional text title '{key}' from DB.")
+                        return False
+                else:
+                    logger.error(f"Failed to delete file '{entries[0]['file_id']}' from openai.")
+                    return False
+            else:
+                result = Additionalinfo.delete(str(entries[0]['_id']))
+                if result:
+                    logger.info(f"Additional text title '{key}' deleted from DB successfully.")
+                    return True
+                else:
+                    logger.error(f"Failed to delete additional text title '{key}' from DB.")
+                    return False
+
+        except Exception as e:
+            logger.error(f"Error deleting additional text entry '{key}': {str(e)}")
+            return False
+        
+    def rebuild_files_and_vs(self):
+        try:
+            clear_success = self.openai_service.rebuild_all()
+            if clear_success:
+                logger.info("Additional info files and vector store rebuilt successfully")
+                return True
+            else:
+                logger.error("Failed to rebuild additional info files and vector store")
+                return False
+        except Exception as e:
+            logger.error(f"Error in update_additionalinfo_files_and_vs: {str(e)}")
+            return False
+            
+    # ------------------------------------------------------------------
+    # Instagram management
+    # ------------------------------------------------------------------
 
     def get_fixed_responses(self, incoming=None):
         logger.info(f"Fetching fixed responses for incoming type: {incoming}.")
@@ -223,143 +343,6 @@ class Backend:
         except Exception as e:
             logger.error(f"Failed to delete fixed response with ID {response_id}: {str(e)}")
             raise RuntimeError(f"Failed to delete fixed response: {str(e)}")
-
-    @staticmethod
-    def format_updated_at(updated_at):
-        logger.debug(f"Formatting updated_at timestamp: {updated_at}.")
-        if not updated_at:
-            logger.debug("Timestamp is empty or None.")
-            return "Never updated"
-
-        try:
-            # Handle timestamps without timezone info (assume UTC)
-            updated_time = datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=timezone.utc)
-
-            # Calculate time difference
-            time_diff = datetime.now(timezone.utc) - updated_time
-            days = time_diff.days
-            hours, remainder = divmod(time_diff.seconds, 3600)
-            minutes = remainder // 60
-
-            if days > 0:
-                return f"{days} day{'s' if days > 1 else ''}, {hours} hour{'s' if hours > 1 else ''} ago"
-            elif hours > 0:
-                return f"{hours} hour{'s' if hours > 1 else ''}, {minutes} minute{'s' if minutes > 1 else ''} ago"
-            else:
-                return f"{minutes} minute{'s' if minutes > 1 else ''} ago"
-        except ValueError as e:
-            logger.error(f"Invalid timestamp format: {updated_at}. Error: {str(e)}")
-            return "Invalid timestamp"
-
-    def get_current_vs_id(self):
-        """Get the current vector store ID from the database."""
-        logger.info("Fetching current vector store ID.")
-        try:
-            # Use the MongoDB AppSettings model directly
-            vs_setting = AppSettings.get_by_key('vs_id')
-            if vs_setting:
-                logger.info(f"Current vector store ID: {vs_setting['value']}")
-                return vs_setting['value']
-            else:
-                logger.info("No vector store ID found in database.")
-                return None
-        except Exception as e:
-            logger.error(f"Error fetching vector store ID: {str(e)}")
-            return None
-
-    def get_assistant_instructions(self):
-        """Get the current instructions for the assistant."""
-        logger.info("Fetching assistant instructions.")
-        try:
-            openai_service = OpenAIService()
-            instructions = openai_service.get_assistant_instructions()
-            if instructions:
-                logger.info("Assistant instructions retrieved successfully.")
-            else:
-                logger.warning("Failed to retrieve assistant instructions.")
-            return instructions
-        except Exception as e:
-            logger.error(f"Error fetching assistant instructions: {str(e)}")
-            return None
-
-    def get_assistant_temperature(self):
-        """Get the current temperature setting for the assistant."""
-        logger.info("Fetching assistant temperature.")
-        try:
-            openai_service = OpenAIService()
-            temperature = openai_service.get_assistant_temperature()
-            if temperature is not None:
-                logger.info("Assistant temperature retrieved successfully.")
-            else:
-                logger.warning("Failed to retrieve assistant temperature.")
-            return temperature
-        except Exception as e:
-            logger.error(f"Error fetching assistant temperature: {str(e)}")
-            return None
-
-    def get_assistant_top_p(self):
-        """Get the current top_p setting for the assistant."""
-        logger.info("Fetching assistant top_p.")
-        try:
-            openai_service = OpenAIService()
-            top_p = openai_service.get_assistant_top_p()
-            if top_p is not None:
-                logger.info("Assistant top_p retrieved successfully.")
-            else:
-                logger.warning("Failed to retrieve assistant top_p.")
-            return top_p
-        except Exception as e:
-            logger.error(f"Error fetching assistant top_p: {str(e)}")
-            return None
-
-    def update_assistant_instructions(self, new_instructions):
-        """Update the instructions for the assistant."""
-        logger.info("Updating assistant instructions.")
-        try:
-            openai_service = OpenAIService()
-            result = openai_service.update_assistant_instructions(new_instructions)
-            if result['success']:
-                logger.info("Assistant instructions updated successfully.")
-                # Return the assistant object for UI feedback
-                return result
-            else:
-                logger.warning(f"Failed to update assistant instructions: {result['message']}")
-                return result
-        except Exception as e:
-            logger.error(f"Error updating assistant instructions: {str(e)}")
-            return {'success': False, 'message': str(e)}
-
-    def update_assistant_temperature(self, new_temperature):
-        """Update the temperature setting for the assistant."""
-        logger.info("Updating assistant temperature.")
-        try:
-            openai_service = OpenAIService()
-            result = openai_service.update_assistant_temperature(new_temperature)
-            if result['success']:
-                logger.info("Assistant temperature updated successfully.")
-                return result
-            else:
-                logger.warning(f"Failed to update assistant temperature: {result['message']}")
-                return result
-        except Exception as e:
-            logger.error(f"Error updating assistant temperature: {str(e)}")
-            return {'success': False, 'message': str(e)}
-
-    def update_assistant_top_p(self, new_top_p):
-        """Update the top_p setting for the assistant."""
-        logger.info("Updating assistant top_p.")
-        try:
-            openai_service = OpenAIService()
-            result = openai_service.update_assistant_top_p(new_top_p)
-            if result['success']:
-                logger.info("Assistant top_p updated successfully.")
-                return result
-            else:
-                logger.warning(f"Failed to update assistant top_p: {result['message']}")
-                return result
-        except Exception as e:
-            logger.error(f"Error updating assistant top_p: {str(e)}")
-            return {'success': False, 'message': str(e)}
 
     def fetch_instagram_posts(self):
         """
@@ -549,6 +532,115 @@ class Backend:
             logger.error(f"Failed to fetch Instagram stories: {str(e)}", exc_info=True)
             return False
 
+
+    # ------------------------------------------------------------------
+    # Openai management
+    # ------------------------------------------------------------------
+
+    def get_vs_id(self):
+        """Get the store IDs from the database."""
+        logger.info("Fetching current vector store ID.")
+        try:
+            # Use the MongoDB AppSettings model directly
+            vs_id = AppSettings.get_by_key('vs_id')
+            if vs_id:
+                logger.info(f"Current vector store ID: {vs_id['value']}")
+                return [vs_id['value']]
+            else:
+                logger.info("No vector store ID found in database.")
+                return None
+        except Exception as e:
+            logger.error(f"Error fetching vector store ID: {str(e)}")
+            return None
+
+    def get_assistant_instructions(self):
+        """Get the current instructions for the assistant."""
+        logger.info("Fetching assistant instructions.")
+        try:
+            instructions = self.openai_service.get_assistant_instructions()
+            if instructions:
+                logger.info("Assistant instructions retrieved successfully.")
+            else:
+                logger.warning("Failed to retrieve assistant instructions.")
+            return instructions
+        except Exception as e:
+            logger.error(f"Error fetching assistant instructions: {str(e)}")
+            return None
+
+    def get_assistant_temperature(self):
+        """Get the current temperature setting for the assistant."""
+        logger.info("Fetching assistant temperature.")
+        try:
+            temperature = self.openai_service.get_assistant_temperature()
+            if temperature is not None:
+                logger.info("Assistant temperature retrieved successfully.")
+            else:
+                logger.warning("Failed to retrieve assistant temperature.")
+            return temperature
+        except Exception as e:
+            logger.error(f"Error fetching assistant temperature: {str(e)}")
+            return None
+
+    def get_assistant_top_p(self):
+        """Get the current top_p setting for the assistant."""
+        logger.info("Fetching assistant top_p.")
+        try:
+            top_p = self.openai_service.get_assistant_top_p()
+            if top_p is not None:
+                logger.info("Assistant top_p retrieved successfully.")
+            else:
+                logger.warning("Failed to retrieve assistant top_p.")
+            return top_p
+        except Exception as e:
+            logger.error(f"Error fetching assistant top_p: {str(e)}")
+            return None
+
+    def update_assistant_instructions(self, new_instructions):
+        """Update the instructions for the assistant."""
+        logger.info("Updating assistant instructions.")
+        try:
+            result = self.openai_service.update_assistant_instructions(new_instructions)
+            if result['success']:
+                logger.info("Assistant instructions updated successfully.")
+                # Return the assistant object for UI feedback
+                return result
+            else:
+                logger.warning(f"Failed to update assistant instructions: {result['message']}")
+                return result
+        except Exception as e:
+            logger.error(f"Error updating assistant instructions: {str(e)}")
+            return {'success': False, 'message': str(e)}
+
+    def update_assistant_temperature(self, new_temperature):
+        """Update the temperature setting for the assistant."""
+        logger.info("Updating assistant temperature.")
+        try:
+            result = self.openai_service.update_assistant_temperature(new_temperature)
+            if result['success']:
+                logger.info("Assistant temperature updated successfully.")
+                return result
+            else:
+                logger.warning(f"Failed to update assistant temperature: {result['message']}")
+                return result
+        except Exception as e:
+            logger.error(f"Error updating assistant temperature: {str(e)}")
+            return {'success': False, 'message': str(e)}
+
+    def update_assistant_top_p(self, new_top_p):
+        """Update the top_p setting for the assistant."""
+        logger.info("Updating assistant top_p.")
+        try:
+            result = self.openai_service.update_assistant_top_p(new_top_p)
+            if result['success']:
+                logger.info("Assistant top_p updated successfully.")
+                return result
+            else:
+                logger.warning(f"Failed to update assistant top_p: {result['message']}")
+                return result
+        except Exception as e:
+            logger.error(f"Error updating assistant top_p: {str(e)}")
+            return {'success': False, 'message': str(e)}
+
     def create_chat_thread(self):
         """
         Creates a new chat thread via OpenAIService.
@@ -556,8 +648,7 @@ class Backend:
         """
         logger.info("Creating new chat thread.")
         try:
-            openai_service = OpenAIService()
-            thread_id = openai_service.create_thread()
+            thread_id = self.openai_service.create_thread()
             logger.info(f"Chat thread created successfully with ID: {thread_id}")
             return thread_id
         except Exception as e:
@@ -571,13 +662,13 @@ class Backend:
         """
         logger.info(f"Sending message to thread {thread_id}.")
         try:
-            openai_service = OpenAIService()
-            response = openai_service.send_message_to_thread(thread_id, user_message)
+            response = self.openai_service.send_message_to_thread(thread_id, user_message)
             logger.info(f"Message sent to thread {thread_id} successfully.")
             return response
         except Exception as e:
             logger.error(f"Failed to send message to thread {thread_id}: {str(e)}", exc_info=True)
             raise
+    
     def process_uploaded_image(self, image_bytes):
             """
             Processes image bytes using PIL, calls img_search.process_image, and returns the result.
@@ -604,3 +695,5 @@ class Backend:
                 logger.error(f"Error processing uploaded image in backend: {str(e)}", exc_info=True)
                 # Return a generic error message to the UI
                 return f"Error: An unexpected error occurred while processing the image."
+
+

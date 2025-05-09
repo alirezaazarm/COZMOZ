@@ -1,5 +1,6 @@
 from ..utils.exceptions import  PermanentError, RetryableError
 from ..models.product import Product
+from ..models.additional_info import Additionalinfo
 from ..models.appsettings import AppSettings
 from ..models.database import db
 from ..config import Config
@@ -12,6 +13,8 @@ import json
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+VS_ID = None
 
 def clean_sources(response_text):
 
@@ -30,6 +33,10 @@ def clean_sources(response_text):
 
 
 class OpenAIService:
+    MAX_UPLOAD_RETRIES = 5
+    UPLOAD_RETRY_DELAY = 2
+    BATCH_SIZE = 30
+    
     def __init__(self):
         try:
             self.client = openai.OpenAI(api_key=Config.OPENAI_API_KEY)
@@ -39,157 +46,218 @@ class OpenAIService:
             logger.critical(f"Failed to initialize OpenAI client: {str(e)}")
             self.client = None
 
-    def delete_all_vector_stores(self):
-        has_more = True
-        while has_more:
-            vs_list = self.client.vector_stores.list()
-            has_more = vs_list.has_more
 
-            for vs in vs_list.data:
-                try:
-                    self.client.vector_stores.delete(vs.id)
-                    AppSettings.delete_by_key(vs.id)
-                    logger.info(f"Deleted vector store: {vs.id}")
-                except Exception as e:
-                    logger.info(f"Error deleting vector store {vs.id}: {e}")
+    @staticmethod
+    def set_vs_id(settings):
+        """Set VS_ID from update route"""
+        global VS_ID
 
-    def delete_all_files(self):
-        file_list = self.client.files.list()
-        products_with_files = [p for p in Product.get_all() if p.get('file_id')]
-        Product.update_many({"file_id": {"$in": products_with_files}}, {"$unset": {"file_id": "", "batch_number": ""}})
-        for file in file_list.data:
-            try:
-                self.client.files.delete(file.id)
-                logger.info(f"Deleted file: {file.id}")
-            except Exception as e:
-                logger.info(f"Error deleting file {file.id}: {e}")
-
-    def upload_file(self):
-        products_without_files = [p for p in Product.get_all() if not p.get('file_id')]
-
-        for p in products_without_files:
-            content = json.dumps({
-                    'عنوان محصول': p['title'],
-                    'قیمت محصول': p['price'],
-                    'توضیحات محصول': p['description'],
-                    'توضیحات تکمیلی محصول': p['additional_info'],
-                    'دسته‌بندی محصول': p['category'],
-                    'تگ': p['tags'],
-                    'توضیح مختصر': p['excerpt'],
-                    'لینک خرید محصول': p['link']
-                }, ensure_ascii=False)
-
-            max_retries = 5
-            retry_count = 0
-            file_id = None
-
-            while retry_count < max_retries and file_id is None:
-                try:
-                    file_response = self.client.files.create(
-                        file=(f"{p['title']}.json", content, "application/json"),
-                        purpose="assistants"
-                    )
-                    file_id = file_response.id
-                    logger.info(f"File {file_id} created for product: {p['title']}")
-
-                    while file_response.status != "processed":
-                        time.sleep(1)
-                        file_response = self.client.files.retrieve(file_id)
-
-                        if file_response.status == "error":
-                            self.client.files.delete(file_id)
-                            raise Exception(f"File creation for product {p['title']}  failed: {file_response.error}")
-
-                except Exception as e:
-                    retry_count += 1
-                    logger.info(f"Error creating file for product {p['title']} (attempt {retry_count}/{max_retries}): {str(e)}")
-
-
-            if file_response.status == "processed":
-                Product.update(p['title'], {"file_id": file_id})
-                logger.info(f"File {file_id} for product {p['title']} stored for product: {p['title']}")
-
-            elif file_response.status == "error":
-                logger.error(f"File creation for product {p['title']}  failed: {file_response.error}")
-                self.client.files.delete(file_id)
-                return False
-
-        return True
-
-
-
-    def create_vector_store(self):
-        while True:
-            try:
-                batch_size = 50
-                products = Product.get_all()
-                total_products = len(products)
-                total_batches = total_products // batch_size + 1
-                vector_store_id = None
-                file_ids = [p['file_id'] for p in products]
-
-                for batch_number in range(total_batches):
-                    start = batch_number * batch_size
-                    end = start + batch_size
-                    batch = file_ids[start:end]
-
-                    if not vector_store_id:
-                        vector_store = self.client.vector_stores.create( name="Product Catalog",
-                                                                         file_ids=batch,
-                                                                         chunking_strategy={"type": "static",
-                                                                                             "static": { "max_chunk_size_tokens": 4000, "chunk_overlap_tokens": 2000}})
-                        vector_store_id = vector_store.id
-                        logger.info(f"Vector store {vector_store_id} created for batch {batch_number + 1}/{total_batches}")
-                        time.sleep(5)
-                    elif vector_store_id:
-                        vector_store = self.client.vector_stores.file_batches.create_and_poll(vector_store_id=vector_store_id,
-                                                                                              file_ids=batch,
-                                                                                              chunking_strategy={"type": "static",
-                                                                                             "static": { "max_chunk_size_tokens": 4000, "chunk_overlap_tokens": 2000}}
-                                                                                             )
-                        logger.info(f"Added batch {batch_number + 1}/{total_batches} to vector store {vector_store_id}")
-                        time.sleep(5)
-
-                vector_store = self.client.vector_stores.retrieve(vector_store_id)
-                while vector_store.file_counts.completed != total_products:
-                    if vector_store.file_counts.failed > 0 or vector_store.file_counts.cancelled > 0:
-                        self.client.vector_stores.delete(vector_store_id)
-                        logger.error(f"Vector store creation failed: {vector_store.file_counts} files failed and {vector_store.file_counts.cancelled} files cancelled")
-                        raise Exception(f"Vector store creation failed: {vector_store.file_counts}")
-                    else:
-                        time.sleep(5)
-                        vector_store = self.client.vector_stores.retrieve(vector_store_id)
-
-                if vector_store.file_counts.completed == total_products:
-                    AppSettings.update('vs_id', vector_store_id)
-                    logger.info(f"Vector store {vector_store_id} created for all products")
-                    return vector_store_id
-                else:
-                    logger.error(f"Vector store creation failed: {vector_store.file_counts.failed} files failed and {vector_store.file_counts.cancelled} files cancelled")
-            except Exception as e:
-                logger.error(f"Error creating vector store: {str(e)}")
-                continue
-
-    def rebuild_files_and_vector_store(self):
-        files = None
-        vector_store_id = None
-        Product.update_many({}, {"$unset": {"file_id": 1}})
-
-        while not files:
-            self.delete_all_files()
-            files = self.upload_file()
-
-        while not vector_store_id:
-            logger.error("Error creating vector store")
-            self.delete_all_vector_stores()
-            vector_store_id = self.create_vector_store()
-
-        if files and vector_store_id:
+        if settings.get('vs_id'):
+            VS_ID = settings.get('vs_id')
+            logger.info(f"openai_service - VS_ID set to {VS_ID}")
             return True
         else:
+            logger.info(f"appsetting to main doesnt have vs_id!")
+            return False
+    
+    # ------------------------------------------------------------------
+    # Files and Vector Store
+    # ------------------------------------------------------------------
+    
+    def delete_single_file(self, file_id) -> bool:
+        try:
+            resp = self.client.files.delete(file_id)
+            if resp.deleted:
+                logger.info(f"File with the ID {file_id} has deleted successfully")
+                return True
+            else:
+                logger.error(f"Failed to delete file '{file_id}': {resp.error}")
+                return False
+        except Exception as e:
+            logger.error(f"Error deleting file '{file_id}': {e}")
             return False
 
-# =================================================================================================
+    def clear_vs(self) -> bool:
+        setting = AppSettings.get_by_key('vs_id')
+        if not setting:
+            logger.info("No vector store setting found in database")
+            return True
+        # Extract the raw ID string
+        raw_value = setting.get('value')
+        if isinstance(raw_value, dict):
+            vs_id = raw_value.get('value')
+        else:
+            vs_id = raw_value
+        if not vs_id or not isinstance(vs_id, str):
+            logger.error(f"Invalid vs_id in setting: {raw_value}")
+            return False
+        try:
+            response = self.client.vector_stores.delete(vs_id)
+            if response.deleted:
+                # Store raw string ID only
+                AppSettings.update('vs_id', '')
+                logger.info(f"Deleted vector store '{vs_id}' and unset vs_id in database")
+                return True
+            logger.error(f"Vector store deletion returned deleted=False for '{vs_id}'")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to delete vector store '{vs_id}': {e}")
+            return False
+
+    def clear_files(self, model_cls) -> bool:
+        entries = model_cls.get_all()
+        success = True
+        for entry in entries:
+            file_id = entry.get('file_id')
+            if not file_id:
+                continue
+            try:
+                resp = self.client.files.delete(file_id)
+                if resp.deleted:
+                    # Use correct identifier: title for Product, id for Additionalinfo
+                    identifier = entry.get('title') if model_cls is Product else str(entry.get('_id'))
+                    model_cls.update(identifier, {"file_id": None})
+                    logger.info(f"Deleted file '{file_id}' and reset file_id for '{identifier}'")
+                else:
+                    logger.error(f"Failed to delete file '{file_id}': {resp.error}")
+                    success = False
+            except Exception as e:
+                logger.error(f"Error deleting file '{file_id}': {e}")
+                success = False
+        return success
+
+    def upload_files(self, model_cls, folder_name: str) -> bool:
+        entries = model_cls.get_all()
+        all_success = True
+        for entry in entries:
+            content_data = self._prepare_content(entry, folder_name)
+            content = json.dumps(content_data, ensure_ascii=False)
+            file_id = self._retry_upload(entry, content)
+            if not file_id:
+                all_success = False
+                continue
+            identifier = entry.get('title') if model_cls is Product else str(entry.get('_id'))
+            updated = model_cls.update(identifier, {"file_id": file_id})
+            if not updated:
+                logger.error(f"Failed to update database for '{identifier}' with file_id '{file_id}'")
+                all_success = False
+        return all_success
+
+    def _prepare_content(self, entry, folder_name: str) -> dict:
+        if folder_name == 'products':
+            return {
+                'title': entry['title'],
+                'price': entry['price'],
+                'description': entry['description'],
+                'additional_info': entry.get('additional_info'),
+                'category': entry['category'],
+                'tags': entry.get('tags'),
+                'excerpt': entry.get('excerpt'),
+                'link': entry.get('link')
+            }
+        else:
+            return {
+                'title': entry['title'],
+                'category': folder_name,
+                'content': entry['content']
+            }
+
+    def _retry_upload(self, entry, content: str) -> str | None:
+        retry = 0
+        file_id = None
+        while retry < self.MAX_UPLOAD_RETRIES:
+            try:
+                resp = self.client.files.create(
+                    file=(f"{entry['title']}.json", content, 'application/json'),
+                    purpose='assistants'
+                )
+                file_id = resp.id
+                logger.info(f"Uploaded file id={file_id} for '{entry['title']}'")
+                self._wait_for_processing(file_id)
+                return file_id
+            except Exception as e:
+                retry += 1
+                logger.warning(f"Upload error for '{entry['title']}' (attempt {retry}): {e}")
+                time.sleep(self.UPLOAD_RETRY_DELAY)
+        logger.error(f"Exceeded retries uploading '{entry['title']}'")
+        return None
+
+    def _wait_for_processing(self, file_id: str):
+        timeout = 60
+        interval = 2
+        waited = 0
+        while waited < timeout:
+            resp = self.client.files.retrieve(file_id)
+            if resp.status == 'processed':
+                return
+            if resp.status == 'error':
+                raise Exception(f"File {file_id} processing error: {resp.error}")
+            time.sleep(interval)
+            waited += interval
+        raise TimeoutError(f"Timeout waiting for file {file_id} to process")
+
+    def create_vs(self) -> str | None:
+        try:
+            products = Product.get_all()
+            additional = Additionalinfo.get_all()
+            prod_ids = [p['file_id'] for p in products if p.get('file_id')]
+            add_ids = [a['file_id'] for a in additional if a.get('file_id')]
+            missing = [p['title'] for p in products if not p.get('file_id')]
+            if missing:
+                logger.error(f"Cannot create VS: missing product file_ids for {missing}")
+                return None
+            file_ids = prod_ids + add_ids
+
+            self.clear_vs()
+            vs = self.client.vector_stores.create(
+                name='Vector Store',
+                file_ids=file_ids[:self.BATCH_SIZE],
+                chunking_strategy={
+                    'type': 'static',
+                    'static': {'max_chunk_size_tokens': 4000, 'chunk_overlap_tokens': 2000}
+                }
+            )
+            vs_id = vs.id
+            logger.info(f"Created vector store {vs_id} for first batch")
+
+            for i in range(self.BATCH_SIZE, len(file_ids), self.BATCH_SIZE):
+                batch = file_ids[i:i + self.BATCH_SIZE]
+                self.client.vector_stores.file_batches.create_and_poll(
+                    vector_store_id=vs_id,
+                    file_ids=batch,
+                    chunking_strategy={
+                        'type': 'static',
+                        'static': {'max_chunk_size_tokens': 4000, 'chunk_overlap_tokens': 2000}
+                    }
+                )
+                logger.info(f"Appended batch files {i}-{i + len(batch)} to vector store {vs_id}")
+
+            final_vs = self.client.vector_stores.retrieve(vs_id)
+            if final_vs.file_counts.completed == len(file_ids):
+                AppSettings.update('vs_id', f"{vs_id}")
+                logger.info(f"Stored vs_id '{vs_id}' in database")
+                return vs_id
+            logger.error(f"Vector store incomplete: {final_vs.file_counts}")
+            return None
+        except Exception as e:
+            logger.error(f"Error in create_vs: {e}")
+            return None
+
+    def rebuild_all(self) -> bool:
+        ok1 = self.clear_files(Product)
+        ok2 = self.clear_files(Additionalinfo)
+        ok3 = self.upload_files(Product, 'products')
+        ok4 = self.upload_files(Additionalinfo, 'info')
+        if not (ok1 and ok2 and ok3 and ok4):
+            logger.warning("Some clear or upload steps failed")
+        vs_id = self.create_vs()
+        if not vs_id:
+            logger.error("Failed to create/update vector store")
+            return False
+        return True
+    # ------------------------------------------------------------------
+    # Chat/Assistant config
+    # ------------------------------------------------------------------
 
     def ensure_thread(self, user):
         try:
@@ -203,15 +271,12 @@ class OpenAIService:
                 except openai.APIError:
                     logger.error("Existing thread invalid, creating new one")
 
-            # Get vector store ID from settings
-            vs_setting = AppSettings.get_by_key('vs_id')
-            if not vs_setting:
-                raise ValueError("No valid vector store ID found in AppSettings.")
-
-            vector_store_id = vs_setting['value']
+            # Get vector store ID from global variable
+            if "VS_ID" not in globals():
+                logger.error("No valid vector store ID found in AppSettings.")
 
             thread = self.client.beta.threads.create(
-                tool_resources={"file_search": {"vector_store_ids": [vector_store_id]}}
+                tool_resources={"file_search": {"vector_store_ids": [VS_ID]}}
             )
             logger.debug(f"Created thread {thread.id}")
 
@@ -451,12 +516,8 @@ class OpenAIService:
                 logger.error("OpenAI client is not initialized.")
                 raise PermanentError("OpenAI client is not initialized.")
 
-            # Check that a vector store ID exists in the database
-            with get_db() as db:
-                vs_setting = AppSettings.get_by_key('vs_id')
-                if not vs_setting:
-                    logger.error("No vector store ID found in database")
-                    raise PermanentError("No vector store is configured. Please connect to a vector store first.")
+            # Check that a VS_ID exists memory
+            if "VS_ID" in globals():
 
                 # Verify the assistant is connected to this vector store
                 assistant = self.client.beta.assistants.retrieve(Config.OPENAI_ASSISTANT_ID)
@@ -474,22 +535,26 @@ class OpenAIService:
 
                 # Check if assistant has the vector store connected
                 if hasattr(assistant, 'tool_resources') and hasattr(assistant.tool_resources, 'file_search'):
-                    if vs_setting['value'] in assistant.tool_resources.file_search.vector_store_ids:
+                    if VS_ID in assistant.tool_resources.file_search.vector_store_ids:
                         has_vector_store = True
 
                 # If the assistant doesn't have file_search tool or vector store, update it
                 if not has_file_search or not has_vector_store:
-                    logger.info(f"Updating assistant to connect with vector store {vs_setting['value']}")
+                    logger.info(f"Updating assistant to connect with vector store {VS_ID}")
                     self.client.beta.assistants.update(
                         assistant_id=Config.OPENAI_ASSISTANT_ID,
                         tools=[{"type": "file_search"}],
                         tool_resources={
                             "file_search": {
-                                "vector_store_ids": [vs_setting['value']]
+                                "vector_store_ids": [VS_ID]
                             }
                         }
                     )
-                    logger.info(f"Successfully connected assistant to vector store {vs_setting['value']}")
+                    logger.info(f"Successfully connected assistant to vector store {VS_ID}")
+
+            else:
+                logger.error("No vector store ID found in memory")
+                raise PermanentError("No vector store is configured. Please connect to a vector store first.")
 
             # Create the thread
             thread = self.client.beta.threads.create()

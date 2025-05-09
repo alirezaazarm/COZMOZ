@@ -27,6 +27,7 @@ PRODUCTS_COLLECTION = 'products'
 SCHEDULER_JOBS_COLLECTION = 'scheduler_jobs'
 POSTS_COLLECTION = 'posts'
 STORIES_COLLECTION = 'stories'
+ADDITIONAL_TEXT_COLLECTION = 'additional_text'
 
 # Context manager for database operations
 def with_db(func):
