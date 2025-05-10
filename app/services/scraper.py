@@ -4,6 +4,7 @@ from urllib.parse import unquote
 import logging
 from ..models.product import Product
 import json
+from .openai_service import OpenAIService
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +13,7 @@ class CozmozScraper:
     def __init__(self):
         self.base_url = 'https://cozmoz.ir'
         self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        self.openai_service = OpenAIService()
 
     def extract_product_links(self, max_pages=100):
         product_links = {}
@@ -147,6 +149,17 @@ class CozmozScraper:
 
         for title in existing_titles:
             if existing_titles.count(title) > 1:
+                # first remove file from openai if exists file_id
+                file_id = Product.get_file_id(title)
+                if file_id:
+                    resp = self.openai_service.delete_single_file(file_id)
+                    if resp:
+                        logger.info(f"{title} file with the id:{file_id} has removed from openai")
+                    else:
+                        logger.error(f"failed to remove {title} file with the id {file_id} from openai")
+                else:
+                    logger.info(f"product {title} doesnt have file_id")
+
                 Product.delete(title)
                 logger.info(f"Deleted product {title} from the database")
 
@@ -186,6 +199,15 @@ class CozmozScraper:
 
         for title in existing_titles:
             if title not in product_links.keys():
+                file_id = Product.get_file_id(title)
+                if file_id:
+                    resp = self.openai_service.delete_single_file(file_id)
+                    if resp:
+                        logger.info(f"{title} file with the id:{file_id} has removed from openai")
+                    else:
+                        logger.error(f"failed to remove {title} file with the id {file_id} from openai")
+                else:
+                    logger.info(f"product {title} doesnt have file_id")
                 Product.delete(title)
                 logger.info(f"Removed product {title} from the database as it no longer exists on the website")
 

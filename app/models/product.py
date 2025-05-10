@@ -125,3 +125,11 @@ class Product:
             },
             limit=limit
         ))
+    
+    @staticmethod
+    @with_db
+    def get_file_id(title):
+        """Get the file ID for a product"""
+        return db[PRODUCTS_COLLECTION].find_one({"title": title})["file_id"]
+
+
