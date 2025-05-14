@@ -28,6 +28,7 @@ SCHEDULER_JOBS_COLLECTION = 'scheduler_jobs'
 POSTS_COLLECTION = 'posts'
 STORIES_COLLECTION = 'stories'
 ADDITIONAL_TEXT_COLLECTION = 'additional_text'
+ADMIN_USERS_COLLECTION = 'admin_users'
 
 # Context manager for database operations
 def with_db(func):

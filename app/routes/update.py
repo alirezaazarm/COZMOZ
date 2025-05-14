@@ -1,57 +1,18 @@
 from flask import Blueprint, request, jsonify
 from ..config import Config
-from ..utils.helpers import allowed_file, secure_filename_wrapper, en_to_fa_number, en_to_ar_number
+from ..utils.helpers import allowed_file, secure_filename_wrapper
 from ..services.instagram_service import InstagramService
 from ..services.openai_service import OpenAIService
+from ..models.post import Post
+from ..models.story import Story
 import os
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Global variables to hold in-memory settings and responses
-COMMENT_FIXED_RESPONSES = {}
-DIRECT_FIXED_RESPONSES = {}
 APP_SETTINGS = {}
 
 update_bp = Blueprint('update', __name__, url_prefix='/update')
-
-# Function to reload fixed responses in memory
-def reload_fixed_responses(fixed_responses, incoming):
-    """Load fixed responses into memory for quick access"""
-    try:
-        comment = {}
-        direct = {}
-
-        for resp in fixed_responses:
-            trigger_keyword = str(resp['trigger_keyword'])
-
-            if incoming == 'Comment':
-                comment[trigger_keyword] = {'comment': resp['comment_response_text'], 'DM': resp['direct_response_text']}
-                comment[en_to_fa_number(trigger_keyword)] = {'comment': resp['comment_response_text'], 'DM': resp['direct_response_text']}
-                comment[en_to_ar_number(trigger_keyword)] = {'comment': resp['comment_response_text'], 'DM': resp['direct_response_text']}
-
-            if incoming == "Direct":
-                direct[trigger_keyword] = {'DM': resp['direct_response_text']}
-                direct[en_to_fa_number(trigger_keyword)] = {'DM': resp['direct_response_text']}
-                direct[en_to_ar_number(trigger_keyword)] = {'DM': resp['direct_response_text']}
-
-        if incoming == 'Comment':
-            global COMMENT_FIXED_RESPONSES
-            COMMENT_FIXED_RESPONSES = comment
-            # Update the service's global variable
-            InstagramService.set_fixed_responses('Comment', comment)
-
-        if incoming == "Direct":
-            global DIRECT_FIXED_RESPONSES
-            DIRECT_FIXED_RESPONSES = direct
-            # Update the service's global variable
-            InstagramService.set_fixed_responses('Direct', direct)
-
-        logger.info(f"Fixed responses for {incoming} reloaded successfully")
-        return True
-    except Exception as e:
-        logger.error(f"Error occurred when reloading fixed responses: {str(e)}")
-        return False
 
 # Function to reload app settings in memory
 def reload_app_settings(app_settings):
@@ -216,25 +177,14 @@ def update_app_settings():
 @update_bp.route('/fixed-responses', methods=['POST'])
 def update_fixed_responses():
     """Handle fixed responses update."""
-    logger.info("Received request to update fixed responses.")
+    logger.info("Received request to update fixed responses and keep in the main app memory.")
     auth_error = authenticate()
     if auth_error:
         return auth_error
 
     if request.method == 'POST':
         data = request.json
-        incoming = data.get("incoming")
-        if incoming:
+        if data:
             try:
-                reload_fixed_responses(data["fixed_responses"], incoming)
-                logger.info("Fixed responses updated successfully.")
-                return jsonify({'message': 'fixed responses updated successfully'}), 200
-            except Exception as e:
-                logger.error(f"Error updating fixed responses: {str(e)}")
-                return jsonify({'error': 'Failed to update fixed responses'}), 500
-        else:
-            logger.error("Missing 'incoming' field in request.")
-            return jsonify({'message': 'the <incoming> is missing!'}), 400
-    else:
-        logger.error("Invalid request method for updating fixed responses.")
-        return jsonify({'message': 'request method is wrong!'}), 405
+                # Load the responses for content IDs into memory and save to appropriate model                
+                

@@ -13,9 +13,6 @@ from ..models.story import Story
 
 logger = logging.getLogger(__name__)
 
-# Global variables for fixed responses
-COMMENT_FIXED_RESPONSES = {}
-DIRECT_FIXED_RESPONSES = {}
 # Global variable for app settings
 APP_SETTINGS = {}
 INSTAGRAM_CONTENT = {}
@@ -482,19 +479,6 @@ class InstagramService:
         return True
 
     @staticmethod
-    def set_fixed_responses(response_type, responses):
-        """Set fixed responses from external module"""
-        if response_type == 'Comment':
-            global COMMENT_FIXED_RESPONSES
-            COMMENT_FIXED_RESPONSES = responses
-            logger.info(f"Comment fixed responses set in InstagramService with {len(responses)} entries")
-        elif response_type == 'Direct':
-            global DIRECT_FIXED_RESPONSES
-            DIRECT_FIXED_RESPONSES = responses
-            logger.info(f"Direct fixed responses set in InstagramService with {len(responses)} entries")
-        return True
-
-    @staticmethod
     def set_instagram_posts_stories(content_type, content):
         """Set instagram contents from external module"""
         if content_type == "Story":
@@ -831,7 +815,8 @@ class InstagramService:
         """
         try:
             base_endpoint = f"https://graph.facebook.com/v22.0/{Config.PAGE_ID}"
-            post_endpoint = "/media?fields=caption,media_url,media_type,id,like_count,timestamp,comments.limit(1000){id,timestamp,text,from,like_count,replies.limit(1000){id,timestamp,text,from,like_count}}&limit=1000"
+            # /media?fields=caption,media_url,media_type,id,like_count,timestamp,comments.limit(1000){id,timestamp,text,from,like_count,replies.limit(1000){id,timestamp,text,from,like_count}}&limit=1000
+            post_endpoint = "/media?fields=caption,media_url,thumbnail_url,media_type,id,like_count,timestamp&limit=1000"
             params = {"access_token": Config.FB_ACCESS_TOKEN}
             response = requests.get(base_endpoint + post_endpoint, params=params)
             response.raise_for_status()
@@ -847,7 +832,8 @@ class InstagramService:
                     "media_url": post.get('media_url', ''),
                     "media_type": post.get('media_type', ''),
                     "like_count": post.get('like_count', 0),
-                    "timestamp": post.get('timestamp')
+                    "timestamp": post.get('timestamp'),
+                    "thumbnail_url" : post.get('thumbnail_url')
                 }
                 Post.create_or_update_from_instagram(post_data)
 
@@ -925,7 +911,7 @@ class InstagramService:
         """Retrieves stories from IG and stores them using the Story model"""
         try:
             base_endpoint = f"https://graph.facebook.com/v22.0/{Config.PAGE_ID}"
-            story_endpoint = "/stories?fields=media_type,caption,like_count,thumbnail_url,timestamp&limit=1000"
+            story_endpoint = "/stories?fields=media_type,caption,like_count,thumbnail_url,media_url,timestamp&limit=1000"
             params = {"access_token": Config.FB_ACCESS_TOKEN}
             response = requests.get(base_endpoint + story_endpoint, params=params)
             response.raise_for_status()
@@ -939,6 +925,7 @@ class InstagramService:
                     "caption": story.get('caption', ''),
                     "like_count": story.get('like_count', 0),
                     "thumbnail_url": story.get('thumbnail_url'),
+                    "media_url": story.get('media_url'),
                     "timestamp": story.get('timestamp')
                 }
                 Story.create_or_update_from_instagram(story_data)

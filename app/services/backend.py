@@ -1,7 +1,6 @@
 import logging
 from datetime import datetime, timezone
 from ..models.appsettings import AppSettings
-from ..models.fixedresponse import FixedResponse
 from ..models.product import Product
 from ..models.post import Post
 from ..config import Config
@@ -13,6 +12,8 @@ from .img_search import process_image
 from PIL import Image
 import io
 from ..models.additional_info import Additionalinfo
+from ..models.admin_user import AdminUser
+from ..models.story import Story
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,230 @@ class Backend:
         self.scraper = CozmozScraper()
         self.openai_service = OpenAIService()
         logger.info("Backend initialized with configuration URLs and headers.")
+
+    # ------------------------------------------------------------------
+    # Admin Authentication Methods
+    # ------------------------------------------------------------------
+    
+    def authenticate_admin(self, username, password):
+        """Authenticate an admin user by username and password"""
+        logger.info(f"Authenticating admin user: {username}")
+        try:
+            user = AdminUser.authenticate(username, password)
+            if user:
+                logger.info(f"Admin user '{username}' authenticated successfully")
+                return True
+            else:
+                logger.warning(f"Authentication failed for admin user '{username}'")
+                return False
+        except Exception as e:
+            logger.error(f"Error authenticating admin user: {str(e)}")
+            return False
+    
+    def create_auth_token(self, username):
+        """Create a secure authentication token containing the username and expiration time"""
+        logger.info(f"Creating auth token for user: {username}")
+        try:
+            import json
+            import hmac
+            import hashlib
+            import base64
+            import time
+            
+            # Secret key for signing - in production this should be a proper secret
+            secret = Config.VERIFY_TOKEN or "streamlit_admin_secret_key"
+            
+            # Create token payload with username and expiration (7 days)
+            expire_time = int(time.time()) + (7 * 24 * 60 * 60)
+            token_data = {"username": username, "exp": expire_time}
+            
+            # Serialize and sign the token
+            token_string = json.dumps(token_data)
+            token_bytes = token_string.encode('utf-8')
+            token_b64 = base64.b64encode(token_bytes).decode('utf-8')
+            
+            # Create signature
+            signature = hmac.new(
+                secret.encode('utf-8'),
+                token_b64.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            
+            # Return the complete token
+            return f"{token_b64}.{signature}"
+        except Exception as e:
+            logger.error(f"Error creating auth token: {str(e)}")
+            return None
+    
+    def verify_auth_token(self, token):
+        """Verify the authentication token and extract the username if valid"""
+        logger.info("Verifying auth token")
+        try:
+            import json
+            import hmac
+            import hashlib
+            import base64
+            import time
+            
+            # Secret key for verification
+            secret = Config.VERIFY_TOKEN or "streamlit_admin_secret_key"
+            
+            # Split token into data and signature
+            token_b64, signature = token.split('.')
+            
+            # Verify signature
+            expected_signature = hmac.new(
+                secret.encode('utf-8'),
+                token_b64.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            
+            if signature != expected_signature:
+                logger.warning("Token signature verification failed")
+                return None
+            
+            # Decode and parse token data
+            token_bytes = base64.b64decode(token_b64)
+            token_data = json.loads(token_bytes.decode('utf-8'))
+            
+            # Check expiration
+            if token_data.get('exp', 0) < int(time.time()):
+                logger.warning("Token has expired")
+                return None
+            
+            username = token_data.get('username')
+            
+            # Verify that the user exists in the database
+            user = AdminUser.get_by_username(username)
+            if not user:
+                logger.warning(f"Token contains invalid username: {username}")
+                return None
+                
+            if not user.get('is_active', False):
+                logger.warning(f"Token contains inactive user: {username}")
+                return None
+                
+            logger.info(f"Token verified successfully for user: {username}")
+            return username
+            
+        except Exception as e:
+            logger.error(f"Token verification error: {str(e)}")
+            return None
+    
+    def get_admin_users(self):
+        """Get all admin users"""
+        logger.info("Fetching all admin users")
+        try:
+            users = AdminUser.get_all()
+            
+            # Format user data for display
+            user_data = []
+            for user in users:
+                username = user.get('username', 'Unknown')
+                is_active = user.get('is_active', False)
+                created_at = user.get('created_at', 'Unknown')
+                last_login = user.get('last_login', 'Never')
+                
+                # Format dates
+                if hasattr(created_at, 'strftime'):
+                    created_at = created_at.strftime("%Y-%m-%d %H:%M")
+                if hasattr(last_login, 'strftime'):
+                    last_login = last_login.strftime("%Y-%m-%d %H:%M")
+                
+                status = "Active" if is_active else "Inactive"
+                user_data.append({
+                    "Username": username,
+                    "Status": status,
+                    "Created": created_at,
+                    "Last Login": last_login
+                })
+            
+            logger.info(f"Successfully fetched {len(user_data)} admin users")
+            return user_data
+        except Exception as e:
+            logger.error(f"Error fetching admin users: {str(e)}")
+            return []
+    
+    def create_admin_user(self, username, password, is_active=True):
+        """Create a new admin user"""
+        logger.info(f"Creating admin user: {username}")
+        try:
+            result = AdminUser.create(username, password, is_active)
+            if result:
+                logger.info(f"Admin user '{username}' created successfully")
+                return True
+            else:
+                logger.warning(f"Failed to create admin user '{username}'. May already exist.")
+                return False
+        except Exception as e:
+            logger.error(f"Error creating admin user: {str(e)}")
+            return False
+    
+    def update_admin_password(self, username, current_password, new_password):
+        """Update an admin user's password"""
+        logger.info(f"Updating password for admin user: {username}")
+        try:
+            # First verify the current password
+            user = AdminUser.authenticate(username, current_password)
+            if not user:
+                logger.warning(f"Password update failed: Current password is incorrect for user '{username}'")
+                return False
+            
+            # Update password
+            result = AdminUser.update_password(username, new_password)
+            if result:
+                logger.info(f"Password updated successfully for admin user '{username}'")
+                return True
+            else:
+                logger.warning(f"Failed to update password for admin user '{username}'")
+                return False
+        except Exception as e:
+            logger.error(f"Error updating admin user password: {str(e)}")
+            return False
+    
+    def update_admin_status(self, username, is_active):
+        """Update an admin user's active status"""
+        logger.info(f"Updating status for admin user: {username} to {'active' if is_active else 'inactive'}")
+        try:
+            result = AdminUser.update_status(username, is_active)
+            if result:
+                logger.info(f"Status updated successfully for admin user '{username}'")
+                return True
+            else:
+                logger.warning(f"Failed to update status for admin user '{username}'")
+                return False
+        except Exception as e:
+            logger.error(f"Error updating admin user status: {str(e)}")
+            return False
+    
+    def delete_admin_user(self, username):
+        """Delete an admin user"""
+        logger.info(f"Deleting admin user: {username}")
+        try:
+            result = AdminUser.delete(username)
+            if result:
+                logger.info(f"Admin user '{username}' deleted successfully")
+                return True
+            else:
+                logger.warning(f"Failed to delete admin user '{username}'")
+                return False
+        except Exception as e:
+            logger.error(f"Error deleting admin user: {str(e)}")
+            return False
+    
+    def ensure_default_admin(self):
+        """Ensure there is at least one active admin user"""
+        logger.info("Checking for default admin user")
+        try:
+            result = AdminUser.ensure_default_admin()
+            if result:
+                logger.info("Default admin user created")
+            else:
+                logger.info("Default admin user already exists")
+            return True
+        except Exception as e:
+            logger.error(f"Error ensuring default admin: {str(e)}")
+            return False
 
     @staticmethod
     def format_updated_at(updated_at):
@@ -91,19 +316,6 @@ class Backend:
         except Exception as e:
             logger.error(f"Error in app_settings_to_main: {str(e)}")
             return {"error in app_settings_to_main calling": str(e)}
-
-    def fixedresponses_to_main(self, fixedresponses, incoming):
-        logger.info(f"Sending fixed responses to the main server for incoming type: {incoming}.")
-        data = {"fixed_responses":fixedresponses, "incoming":incoming}
-        response = requests.post(self.fixed_responses_url, headers=self.headers, json=data)
-
-        if response.status_code == 200:
-            logger.info("Fixed responses successfully sent to the main server.")
-            return True
-        else:
-            logger.error(f"Request failed with status code: {response.status_code}")
-            logger.error(f"Response text: {response.text}")
-            return False
     
     def get_app_setting(self, key):
         logger.info(f"Fetching app setting for key: {key}.")
@@ -261,131 +473,9 @@ class Backend:
             return False
             
     # ------------------------------------------------------------------
-    # Instagram management
+    # Instagram management : Posts + Stories
     # ------------------------------------------------------------------
-
-    def get_fixed_responses(self, incoming=None):
-        logger.info(f"Fetching fixed responses for incoming type: {incoming}.")
-        try:
-            # Use the MongoDB FixedResponse model directly
-            # Find all responses with matching incoming type
-            responses = []
-            all_responses = FixedResponse.get_all()
-            for r in all_responses:
-                if r['incoming'] == incoming:
-                    responses.append({
-                        "id": str(r['_id']),
-                        "trigger_keyword": r['trigger_keyword'],
-                        "comment_response_text": r['comment_response_text'],
-                        "direct_response_text": r['direct_response_text'],
-                        "updated_at": r['updated_at'].strftime("%Y-%m-%d %H:%M:%S.%f") if r['updated_at'] else None
-                    })
-
-            logger.info(f"Successfully fetched {len(responses)} fixed responses.")
-            self.fixedresponses_to_main(responses, incoming)
-            return responses
-        except Exception as e:
-            logger.error(f"Failed to fetch fixed responses for incoming type '{incoming}': {str(e)}")
-            raise RuntimeError(f"Failed to fetch fixed responses: {str(e)}")
-
-    def add_fixed_response(self, trigger, comment_response_text, direct_response_text, incoming):
-        logger.info(f"Adding new fixed response for trigger: {trigger} and incoming type: {incoming}.")
-        try:
-            # Use the MongoDB FixedResponse model directly
-            new_response = FixedResponse.create(
-                incoming=incoming,
-                trigger_keyword=trigger,
-                comment_response_text=comment_response_text if incoming == "Comment" else None,
-                direct_response_text=direct_response_text
-            )
-
-            if new_response:
-                logger.info(f"Fixed response added successfully with ID: {new_response['_id']}.")
-                return str(new_response['_id'])
-            else:
-                logger.error("Failed to add fixed response.")
-                return None
-        except Exception as e:
-            logger.error(f"Failed to add fixed response: {str(e)}")
-            raise RuntimeError(f"Failed to add fixed response: {str(e)}")
-
-    def update_fixed_response(self, response_id, trigger, comment_response_text, direct_response_text, incoming):
-        logger.info(f"Updating fixed response with ID: {response_id}.")
-        try:
-            # Use the MongoDB FixedResponse model directly
-            update_data = {
-                "trigger_keyword": trigger,
-                "comment_response_text": comment_response_text if incoming == "Comment" else None,
-                "direct_response_text": direct_response_text,
-                "incoming": incoming
-            }
-
-            result = FixedResponse.update(response_id, update_data)
-            if result:
-                logger.info(f"Fixed response with ID {response_id} updated successfully.")
-            else:
-                logger.warning(f"No changes made to fixed response with ID {response_id}.")
-            return result
-        except Exception as e:
-            logger.error(f"Failed to update fixed response with ID {response_id}: {str(e)}")
-            raise RuntimeError(f"Failed to update fixed response: {str(e)}")
-
-    def delete_fixed_response(self, response_id):
-        logger.info(f"Deleting fixed response with ID: {response_id}.")
-        try:
-            # Use the MongoDB FixedResponse model directly
-            result = FixedResponse.delete(response_id)
-            if result:
-                logger.info(f"Fixed response with ID {response_id} deleted successfully.")
-            else:
-                logger.warning(f"Fixed response with ID {response_id} not found or could not be deleted.")
-            return result
-        except Exception as e:
-            logger.error(f"Failed to delete fixed response with ID {response_id}: {str(e)}")
-            raise RuntimeError(f"Failed to delete fixed response: {str(e)}")
-
-    def fetch_instagram_posts(self):
-        """
-        Fetch Instagram posts via InstagramService and store them in the DB.
-        Returns True if successful, False otherwise.
-        """
-        logger.info("Fetching Instagram posts.")
-        try:
-            result = InstagramService.get_posts()
-            if result:
-                logger.info("Instagram posts fetched successfully.")
-            else:
-                logger.warning("Failed to fetch Instagram posts.")
-            return result
-        except Exception as e:
-            logger.error(f"Failed to fetch Instagram posts: {str(e)}", exc_info=True)
-            return False
-
-    def get_posts(self):
-        """
-        Retrieves stored Instagram posts, returning their media_url and caption.
-        """
-        logger.info("Fetching stored Instagram posts.")
-        try:
-            # Use the MongoDB InstagramPost model directly
-            posts = Post.get_all()
-
-            # Extract required fields
-            post_data = [
-                {
-                    "id": post.get('id'),  # Include the Instagram ID for labeling
-                    "media_url": post.get('media_url'),
-                    "caption": post.get('caption'),
-                    "label": post.get('label', ''),
-                }
-                for post in posts if post.get('media_url')  # Ensure media_url exists
-            ]
-
-            logger.info(f"Successfully fetched {len(post_data)} Instagram posts.")
-            return post_data
-        except Exception as e:
-            logger.error(f"Error fetching stored Instagram posts: {str(e)}", exc_info=True)
-            return []  # Return empty list on error
+    #                     ---- vision ----
 
     def set_label(self, post_id, label):
         """
@@ -442,6 +532,7 @@ class Backend:
             # 3. Iterate through unlabeled posts
             for post in unlabeled_posts:
                 post_id = post.get('id') # Instagram's post ID
+                thumbnail_url = post.get('thumbnail_url')
                 media_url = post.get('media_url')
                 processed_count += 1
 
@@ -458,8 +549,13 @@ class Backend:
                 try:
                     # 4. Download the image content
                     logger.debug(f"Downloading image for post ID {post_id} from {media_url}")
-                    response = requests.get(media_url, stream=True, timeout=20) # Increased timeout
-                    response.raise_for_status() # Check for HTTP errors
+
+                    if thumbnail_url:
+                        response = requests.get(thumbnail_url, stream=True, timeout=20) # Increased timeout
+                        response.raise_for_status()
+                    else:
+                        response = requests.get(media_url, stream=True, timeout=20) # Increased timeout
+                        response.raise_for_status() # Check for HTTP errors
 
                     image_bytes = response.content
                     if not image_bytes:
@@ -515,6 +611,196 @@ class Backend:
             logger.error(f"An unexpected error occurred during set_labels_by_model: {e}", exc_info=True)
             return {'success': False, 'processed': processed_count, 'labeled': labeled_count, 'message': f"An unexpected error occurred: {e}"}
 
+    def download_posts_label(self):
+        """
+        Creates a JSON object with post labels as keys and lists of image URLs as values.
+        For each label, the value is a list of thumbnail_urls (or media_urls if thumbnail is None).
+        Returns a dictionary in the format: {"label1": ["url1", "url2"], "label2": ["url3", "url4"], ...}
+        """
+        logger.info("Preparing posts organized by labels")
+        try:
+            # Get all posts
+            posts = Post.get_all()
+            
+            if not posts:
+                logger.info("No posts found in database")
+                return {}
+                
+            # Initialize the result dictionary
+            labeled_posts = {}
+            
+            # Process each post
+            for post in posts:
+                # Get the label (or use "Unlabeled" if none exists)
+                label = post.get('label', '')
+                if not label:
+                    continue
+                    
+                # Get the image URL (preferring thumbnail if it exists)
+                image_url = post.get('thumbnail_url') or post.get('media_url')
+                
+                # Skip if no image URL
+                if not image_url:
+                    continue
+                    
+                # Add to the appropriate label list
+                if label not in labeled_posts:
+                    labeled_posts[label] = []
+                    
+                labeled_posts[label].append(image_url)
+            
+            logger.info(f"Successfully prepared posts by label, found {len(labeled_posts)} unique labels")
+            
+            # Log some stats about the data
+            for label, urls in labeled_posts.items():
+                logger.debug(f"Label '{label}' has {len(urls)} images")
+                
+            return labeled_posts
+            
+        except Exception as e:
+            logger.error(f"Error preparing posts by label: {str(e)}", exc_info=True)
+            return {"error": str(e)}
+
+    #                      ---- Post ----
+
+    def fetch_instagram_posts(self):
+        """
+        Fetch Instagram posts via InstagramService and store them in the DB.
+        Returns True if successful, False otherwise.
+        """
+        logger.info("Fetching Instagram posts.")
+        try:
+            result = InstagramService.get_posts()
+            if result:
+                logger.info("Instagram posts fetched successfully.")
+            else:
+                logger.warning("Failed to fetch Instagram posts.")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to fetch Instagram posts: {str(e)}", exc_info=True)
+            return False
+
+    def get_posts(self):
+        """
+        Retrieves stored Instagram posts, returning their media_url and caption.
+        """
+        logger.info("Fetching stored Instagram posts.")
+        try:
+            # Use the MongoDB InstagramPost model directly
+            posts = Post.get_all()
+
+            # Extract required fields
+            post_data = [
+                {
+                    "id": post.get('id'),  # Include the Instagram ID for labeling
+                    "media_url": post.get('media_url'),
+                    "thumbnail_url": post.get('thumbnail_url'),
+                    "caption": post.get('caption'),
+                    "label": post.get('label', ''),
+                }
+                for post in posts if post.get('media_url')  # Ensure media_url exists
+            ]
+
+            logger.info(f"Successfully fetched {len(post_data)} Instagram posts.")
+            return post_data
+        except Exception as e:
+            logger.error(f"Error fetching stored Instagram posts: {str(e)}", exc_info=True)
+            return []  # Return empty list on error
+
+    def get_posts_fixed_response(self, post_id):
+        """
+        Get fixed response for a post by its ID.
+        Returns the fixed response object if found, None otherwise.
+        """
+        logger.info(f"Fetching fixed response for post ID: {post_id}")
+        try:
+            post = Post.get_by_instagram_id(post_id)
+            if post and post.get('fixed_response'):
+                logger.info(f"Fixed response found for post ID: {post_id}")
+                return post['fixed_response']
+            else:
+                logger.info(f"No fixed response found for post ID: {post_id}")
+                return None
+        except Exception as e:
+            logger.error(f"Error fetching fixed response for post ID {post_id}: {str(e)}")
+            return None
+    
+    def create_or_update_post_fixed_response(self, post_id, trigger_keyword, comment_response_text=None, direct_response_text=None):
+        """
+        Create or update a fixed response for a post.
+        Returns True if successful, False otherwise.
+        """
+        logger.info(f"Creating/updating fixed response for post ID: {post_id}")
+        try:
+            result = Post.set_fixed_response(
+                post_id=post_id,
+                trigger_keyword=trigger_keyword,
+                comment_response_text=comment_response_text,
+                direct_response_text=direct_response_text
+            )
+            if result:
+                logger.info(f"Fixed response created/updated successfully for post ID: {post_id}")
+                return True
+            else:
+                logger.warning(f"Failed to create/update fixed response for post ID: {post_id}")
+                return False
+        except Exception as e:
+            logger.error(f"Error creating/updating fixed response for post ID {post_id}: {str(e)}")
+            return False
+    
+    def delete_post_fixed_response(self, post_id):
+        """
+        Delete a fixed response for a post by its ID.
+        Returns True if successful, False otherwise.
+        """
+        logger.info(f"Deleting fixed response for post ID: {post_id}")
+        try:
+            result = Post.remove_fixed_response(post_id)
+            if result:
+                logger.info(f"Fixed response deleted successfully for post ID: {post_id}")
+                return True
+            else:
+                logger.warning(f"Failed to delete fixed response for post ID: {post_id}")
+                return False
+        except Exception as e:
+            logger.error(f"Error deleting fixed response for post ID {post_id}: {str(e)}")
+            return False
+
+    def get_post_metadata(self, post_id):
+        """
+        Get metadata for a specific post.
+        Returns a dictionary with media_type, like_count, and timestamp.
+        """
+        logger.info(f"Fetching metadata for post ID: {post_id}")
+        try:
+            # Use the specialized method to get post by Instagram ID
+            post = Post.get_by_instagram_id(post_id)
+            
+            if post:
+                metadata = {
+                    "media_type": post.get('media_type', 'Unknown'),
+                    "like_count": post.get('like_count', 0),
+                    "timestamp": post.get('timestamp', 'Unknown date')
+                }
+                logger.info(f"Metadata retrieved for post ID: {post_id}")
+                return metadata
+            else:
+                logger.warning(f"Post with ID {post_id} not found for metadata retrieval")
+                return {
+                    "media_type": 'Unknown',
+                    "like_count": 0,
+                    "timestamp": 'Unknown date'
+                }
+        except Exception as e:
+            logger.error(f"Error retrieving metadata for post ID {post_id}: {str(e)}")
+            return {
+                "media_type": 'Error',
+                "like_count": 0,
+                "timestamp": 'Error retrieving data'
+            }
+
+    #                       ---- Story ----
+   
     def fetch_instagram_stories(self):
         """
         Fetch Instagram stories via InstagramService and store them in the DB.
@@ -532,6 +818,123 @@ class Backend:
             logger.error(f"Failed to fetch Instagram stories: {str(e)}", exc_info=True)
             return False
 
+    def get_stories(self):
+        """
+        Retrieves stored Instagram stories, returning their media_url and caption.
+        """
+        logger.info("Fetching stored Instagram stories.")
+        try:
+            # Use the MongoDB Story model directly
+            stories = Story.get_all()
+
+            # Extract required fields
+            story_data = [
+                {
+                    "id": story.get('id'),  # Include the Instagram ID for labeling
+                    "media_url": story.get('media_url'),
+                    "thumbnail_url": story.get('thumbnail_url'),
+                    "caption": story.get('caption'),
+                }
+                for story in stories if story.get('media_url')  # Ensure media_url exists
+            ]
+
+            logger.info(f"Successfully fetched {len(story_data)} Instagram stories.")
+            return story_data
+        except Exception as e:
+            logger.error(f"Error fetching stored Instagram stories: {str(e)}", exc_info=True)
+            return []  # Return empty list on error
+
+    def get_story_fixed_response(self, story_id):
+        """
+        Get fixed response for a story by its ID.
+        Returns the fixed response object if found, None otherwise.
+        """
+        logger.info(f"Fetching fixed response for story ID: {story_id}")
+        try:
+            # Use the Story model's method to get fixed response by story ID
+            fixed_response = Story.get_fixed_response_by_story(story_id)
+            if fixed_response:
+                logger.info(f"Fixed response found for story ID: {story_id}")
+                return fixed_response
+            else:
+                logger.info(f"No fixed response found for story ID: {story_id}")
+                return None
+        except Exception as e:
+            logger.error(f"Error fetching fixed response for story ID {story_id}: {str(e)}")
+            return None
+    
+    def create_or_update_story_fixed_response(self, story_id, trigger_keyword, direct_response_text=None):
+        """
+        Create or update a fixed response for a story.
+        Returns True if successful, False otherwise.
+        """
+        logger.info(f"Creating/updating fixed response for story ID: {story_id}")
+        try:
+            result = Story.create_or_update_fixed_response(
+                story_id=story_id,
+                trigger_keyword=trigger_keyword,
+                direct_response_text=direct_response_text
+            )
+            if result:
+                logger.info(f"Fixed response created/updated successfully for story ID: {story_id}")
+                return True
+            else:
+                logger.warning(f"Failed to create/update fixed response for story ID: {story_id}")
+                return False
+        except Exception as e:
+            logger.error(f"Error creating/updating fixed response for story ID {story_id}: {str(e)}")
+            return False
+    
+    def delete_story_fixed_response(self, story_id):
+        """
+        Delete a fixed response for a story by its ID.
+        Returns True if successful, False otherwise.
+        """
+        logger.info(f"Deleting fixed response for story ID: {story_id}")
+        try:
+            result = Story.delete_fixed_response_by_story(story_id)
+            if result:
+                logger.info(f"Fixed response deleted successfully for story ID: {story_id}")
+                return True
+            else:
+                logger.warning(f"Failed to delete fixed response for story ID: {story_id}")
+                return False
+        except Exception as e:
+            logger.error(f"Error deleting fixed response for story ID {story_id}: {str(e)}")
+            return False
+
+    def get_story_metadata(self, story_id):
+        """
+        Get metadata for a specific story.
+        Returns a dictionary with media_type, like_count, and timestamp.
+        """
+        logger.info(f"Fetching metadata for story ID: {story_id}")
+        try:
+            stories = Story.get_all()
+            story = next((s for s in stories if s.get('id') == story_id), None)
+            
+            if story:
+                metadata = {
+                    "media_type": story.get('media_type', 'Unknown'),
+                    "like_count": story.get('like_count', 0),
+                    "timestamp": story.get('timestamp', 'Unknown date')
+                }
+                logger.info(f"Metadata retrieved for story ID: {story_id}")
+                return metadata
+            else:
+                logger.warning(f"Story with ID {story_id} not found for metadata retrieval")
+                return {
+                    "media_type": 'Unknown',
+                    "like_count": 0,
+                    "timestamp": 'Unknown date'
+                }
+        except Exception as e:
+            logger.error(f"Error retrieving metadata for story ID {story_id}: {str(e)}")
+            return {
+                "media_type": 'Error',
+                "like_count": 0,
+                "timestamp": 'Error retrieving data'
+            }
 
     # ------------------------------------------------------------------
     # Openai management
@@ -695,5 +1098,76 @@ class Backend:
                 logger.error(f"Error processing uploaded image in backend: {str(e)}", exc_info=True)
                 # Return a generic error message to the UI
                 return f"Error: An unexpected error occurred while processing the image."
+
+    # ------------------------------------------------------------------
+    # Fixed response methods for post detail view
+    # ------------------------------------------------------------------
+    
+
+    def set_single_label(self, post_id):
+        """
+        Processes a single post image using the vision model and sets its label.
+        Returns the predicted label if successful, or an error message.
+        """
+        logger.info(f"Processing post ID {post_id} for automatic labeling.")
+        try:
+            # Get the post by its ID
+            post = Post.get_by_instagram_id(post_id)
+            if not post:
+                logger.warning(f"Post with ID {post_id} not found.")
+                return {"success": False, "message": "Post not found"}
+            
+            # Check if media URL exists
+            media_url = post.get('media_url')
+            thumbnail_url = post.get('thumbnail_url')
+            
+            if not media_url and not thumbnail_url:
+                logger.warning(f"Post ID {post_id} has no media URL or thumbnail URL.")
+                return {"success": False, "message": "No image URL available"}
+            
+            # Try to download the image (prefer thumbnail if available)
+            try:
+                url_to_use = thumbnail_url if thumbnail_url else media_url
+                logger.info(f"Downloading image for post ID {post_id} from {url_to_use}")
+                
+                response = requests.get(url_to_use, stream=True, timeout=20)
+                response.raise_for_status()
+                
+                image_bytes = response.content
+                if not image_bytes:
+                    return {"success": False, "message": "Downloaded image is empty"}
+                
+                # Process the image
+                image_stream = io.BytesIO(image_bytes)
+                pil_image = Image.open(image_stream)
+                predicted_label = process_image(pil_image)
+                
+                if not predicted_label or predicted_label == "Not certain":
+                    logger.info(f"Model couldn't find a confident label for post ID {post_id}")
+                    return {"success": False, "message": "Model couldn't determine a label with confidence"}
+                
+                # Extract just the label part after the confidence score (format is "0.8==>Label")
+                if "==>" in predicted_label:
+                    confidence, label = predicted_label.split("==>")
+                    predicted_label = label
+                
+                # Set the label
+                label_set_success = self.set_label(post_id, predicted_label)
+                
+                if label_set_success:
+                    logger.info(f"Post ID {post_id} automatically labeled as '{predicted_label}'")
+                    return {"success": True, "label": predicted_label}
+                else:
+                    return {"success": False, "message": "Failed to set label in database"}
+                
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Failed to download image: {str(e)}")
+                return {"success": False, "message": f"Failed to download image: {str(e)}"}
+            
+        except Exception as e:
+            logger.error(f"Error in set_single_label for post ID {post_id}: {str(e)}", exc_info=True)
+            return {"success": False, "message": f"Error: {str(e)}"}
+
+
 
 

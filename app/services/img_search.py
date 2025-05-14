@@ -11,13 +11,13 @@ def process_image(image):
   results = model.predict(source=image, device='cpu')
 
   top_prediction = results[0].probs.top1
-  confidence = results[0].probs.top1conf.item()
+  confidence = round(results[0].probs.top1conf.item(), 1)
   predicted_label = results[0].names[top_prediction]
 
   if confidence >  0.5:
-    res = f"similarity search result by vision model for the shared content is {predicted_label} with the certainty of {confidence}"
+    res = predicted_label
   else:
-    res = "Not certain about the content, please try again with a different image."
+    res = "Not certain"
   logger.info(res)
 
   return  res
