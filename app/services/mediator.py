@@ -117,8 +117,7 @@ class Mediator:
             thread_id = self.openai_service.ensure_thread(user)
             response_text = self.openai_service.process_messages(
                 thread_id, 
-                message_texts, 
-                user
+                message_texts
             )
             
             if not response_text:

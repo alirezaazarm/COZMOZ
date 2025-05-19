@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 # Global variable for app settings
 APP_SETTINGS = {}
-INSTAGRAM_CONTENT = {}
+COMMENT_FIXED_RESPONSES = {}
+STORY_FIXED_RESPONSES = {}
 
 
 def parse_instagram_timestamp(ts):
@@ -479,16 +480,16 @@ class InstagramService:
         return True
 
     @staticmethod
-    def set_instagram_posts_stories(content_type, content):
-        """Set instagram contents from external module"""
-        if content_type == "Story":
-            global STORY_CONTENTS
-            STORY_CONTENTS = content
-            logger.inf(f"InstagramService - Story contents set with {len(content)} entries")
-        elif content_type == "Post":
-            global POSTS_CONTENTS
-            POSTS_CONTENTS = content
-            logger.inf(f"InstagramService - Post contents set with {len(content)} entries")
+    def set_comment_fixed_responses(responses):
+        global COMMENT_FIXED_RESPONSES
+        COMMENT_FIXED_RESPONSES = responses
+        return True
+
+    @staticmethod
+    def set_story_fixed_responses(responses):
+        global STORY_FIXED_RESPONSES
+        STORY_FIXED_RESPONSES = responses
+        return True
 
     @staticmethod
     def handle_message(db, message_data):
@@ -696,7 +697,11 @@ class InstagramService:
 
     @staticmethod
     def handle_comment(db, comment_data):
-        """Process and handle an Instagram comment"""
+        """Process and handle an Instagram comment, using in-memory fixed responses if available."""
+        # Check global fixed_responses setting
+        if not APP_SETTINGS.get('fixed_responses', True):
+            logger.info("Fixed responses are globally disabled by app settings.")
+            return False
         try:
             logger.info(f"Processing comment ID: {comment_data.get('comment_id')}")
             required_fields = ['comment_id', 'post_id', 'user_id', 'comment_text', 'timestamp']
@@ -704,15 +709,11 @@ class InstagramService:
                 if field not in comment_data:
                     raise ValueError(f"Missing required field: {field}")
 
-            # Parse timestamp using helper function
-            timestamp = parse_instagram_timestamp(comment_data.get('timestamp'))
-
-            # For backward compatibility, also check created_time if timestamp parsing failed
-            if timestamp == datetime.now(timezone.utc) and comment_data.get('created_time'):
-                try:
-                    timestamp = datetime.fromtimestamp(comment_data.get('created_time'), timezone.utc)
-                except Exception as e:
-                    logger.error(f"Failed to parse created_time for comment {comment_data['comment_id']}: {str(e)}")
+            # Parse timestamp using helper function, fallback to now if invalid
+            raw_timestamp = comment_data.get('timestamp')
+            timestamp = parse_instagram_timestamp(raw_timestamp)
+            if not timestamp or timestamp.year == 1970:
+                timestamp = datetime.now(timezone.utc)
 
             user_info = {
                 'id': comment_data['user_id'],
@@ -733,6 +734,7 @@ class InstagramService:
 
             # Get the comment text for fixed response matching
             comment_text = comment_data['comment_text']
+            post_id = comment_data['post_id']
 
             # Create comment document
             comment_doc = User.create_comment_document(
@@ -762,11 +764,19 @@ class InstagramService:
             replied_in_comment = False
             replied_in_direct = False
 
-            # Check if the comment triggers a fixed response
-            if "COMMENT_FIXED_RESPONSES" in globals() and COMMENT_FIXED_RESPONSES.get(comment_text):
-                fixed_response = COMMENT_FIXED_RESPONSES.get(comment_text)
-                logger.info(f"Found fixed response for comment: {comment_text}")
+            # Check for in-memory fixed response for this post_id
+            fixed_response = None
+            if post_id in COMMENT_FIXED_RESPONSES:
+                fixed_response = COMMENT_FIXED_RESPONSES[post_id].get(comment_text)
+                if fixed_response:
+                    logger.info(f"Found in-memory fixed response for post_id {post_id} and comment: {comment_text}")
 
+            # Fallback to global if not found in memory (legacy)
+            if not fixed_response and "COMMENT_FIXED_RESPONSES" in globals() and COMMENT_FIXED_RESPONSES.get(comment_text):
+                fixed_response = COMMENT_FIXED_RESPONSES.get(comment_text)
+                logger.info(f"Found global fixed response for comment: {comment_text}")
+
+            if fixed_response:
                 # Send reply as a comment if available
                 if fixed_response.get('comment'):
                     comment_reply = fixed_response['comment']
@@ -908,7 +918,7 @@ class InstagramService:
 
     @staticmethod
     def get_stories():
-        """Retrieves stories from IG and stores them using the Story model"""
+        """Retrieves stories from IG and stores them using the Story model, and returns the list of current stories."""
         try:
             base_endpoint = f"https://graph.facebook.com/v22.0/{Config.PAGE_ID}"
             story_endpoint = "/stories?fields=media_type,caption,like_count,thumbnail_url,media_url,timestamp&limit=1000"
@@ -918,6 +928,7 @@ class InstagramService:
 
             stories = response.json().get('data', [])
 
+            result_stories = []
             for story in stories:
                 story_data = {
                     "id": story.get('id'),
@@ -929,12 +940,39 @@ class InstagramService:
                     "timestamp": story.get('timestamp')
                 }
                 Story.create_or_update_from_instagram(story_data)
+                result_stories.append(story_data)
 
-            return True
+            return result_stories
 
         except requests.exceptions.RequestException as req_err:
             logger.error(f"Error fetching stories: {str(req_err)}", exc_info=True)
-            return False
+            return []
         except Exception as e:
             logger.error(f"Unexpected error in get_stories: {str(e)}", exc_info=True)
+            return []
+
+    @staticmethod
+    def handle_story_reply(db, story_id, trigger_keyword, user_id):
+        """Send a direct message in response to a story, using in-memory STORY_FIXED_RESPONSES."""
+        # Check global fixed_responses setting
+        if not APP_SETTINGS.get('fixed_responses', True):
+            logger.info("Fixed responses are globally disabled by app settings.")
             return False
+        logger.info(f"Checking in-memory STORY_FIXED_RESPONSES for story_id={story_id}, trigger_keyword={trigger_keyword}")
+        if not story_id or not trigger_keyword:
+            logger.warning("Missing story_id or trigger_keyword for story fixed response.")
+            return False
+        if story_id in STORY_FIXED_RESPONSES:
+            response_obj = STORY_FIXED_RESPONSES[story_id]
+            if response_obj and response_obj.get('trigger_keyword') == trigger_keyword:
+                direct_response = response_obj.get('direct_response_text')
+                if direct_response:
+                    logger.info(f"Found fixed response for story_id={story_id}, sending DM to user_id={user_id}")
+                    return InstagramService.send_message(user_id, direct_response)
+                else:
+                    logger.warning(f"No direct_response_text found for story_id={story_id}")
+            else:
+                logger.info(f"No matching trigger_keyword in fixed response for story_id={story_id}")
+        else:
+            logger.info(f"No fixed response configured in memory for story_id={story_id}")
+        return False

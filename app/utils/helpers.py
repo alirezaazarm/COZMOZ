@@ -43,3 +43,19 @@ def safe_db_operation(func):
             logger.warning(f"Database connection error: {str(e)}")
             raise
     return wrapper
+
+def expand_triggers(triggers_dict):
+    """
+    Expand each trigger in the dict to include its Persian and Arabic numeral variants.
+    For each trigger, adds the original, Persian, and Arabic numeral forms as keys (if different), all mapping to the same response.
+    """
+    expanded = {}
+    for trigger, response in triggers_dict.items():
+        expanded[trigger] = response
+        fa = en_to_fa_number(trigger)
+        ar = en_to_ar_number(trigger)
+        if fa != trigger:
+            expanded[fa] = response
+        if ar != trigger and ar != fa:
+            expanded[ar] = response
+    return expanded

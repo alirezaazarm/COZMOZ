@@ -64,10 +64,11 @@ def handle_webhook_post():
                         failure_count += 1
 
                 comment_events = entry.get('changes', [])
+                entry_time = entry.get('time')
                 logger.info(f"Processing {len(comment_events)} changes")
                 for change in comment_events:
                     try:
-                        if process_comment_event(db, change):
+                        if process_comment_event(db, change, entry_time):
                             success_count += 1
                         else:
                             failure_count += 1
@@ -212,7 +213,16 @@ def process_message_event(db, event, sender_id, timestamp):
 
             logger.info(f"Attachment type: {attachments_type}, Media URL: {message_data['media_url']}")
 
-            if attachments_type in ['ig_reel', 'ig_post']:
+            # If this is a story reply, check for fixed response
+            if attachments_type == 'story':
+                story_id = first_attachment.get('payload', {}).get('story_id') or first_attachment.get('payload', {}).get('id')
+                trigger_keyword = message.get('text')
+                user_id = sender_id
+                logger.info(f"Checking for story fixed response: story_id={story_id}, trigger_keyword={trigger_keyword}, user_id={user_id}")
+                handled = InstagramService.handle_story_reply(db, story_id, trigger_keyword, user_id)
+                logger.info(f"Story fixed response handled: {handled}")
+                return handled
+            elif attachments_type in ['ig_reel', 'ig_post']:
                 title = first_attachment.get('payload', {}).get('title', 'No Title')
                 cover_image = InstagramService.download_image(message_data['media_url'])
                 if cover_image:
@@ -259,7 +269,7 @@ def process_message_event(db, event, sender_id, timestamp):
         raise
 
 
-def process_comment_event(db, change):
+def process_comment_event(db, change, entry_time=None):
     if change.get('field') == 'comments':
         comment_data = change.get('value', {})
         from_user = comment_data.get('from', {})
@@ -267,7 +277,21 @@ def process_comment_event(db, change):
         comment_text = comment_data.get('text', '')
         comment_id = comment_data.get('id', '')
         parent_comment_id = comment_data.get('parent_id')
-        created_time = comment_data.get('created_time', 0)
+        created_time = comment_data.get('created_time')
+        if created_time:
+            try:
+                timestamp = datetime.fromtimestamp(created_time, timezone.utc)
+            except Exception as e:
+                logger.error(f"Failed to parse timestamp for comment {comment_id}: {str(e)}")
+                timestamp = datetime.now(timezone.utc)
+        elif entry_time:
+            try:
+                timestamp = datetime.fromtimestamp(entry_time, timezone.utc)
+            except Exception as e:
+                logger.error(f"Failed to parse entry_time for comment {comment_id}: {str(e)}")
+                timestamp = datetime.now(timezone.utc)
+        else:
+            timestamp = datetime.now(timezone.utc)
 
         # Check if this comment is from the business account (echo comment)
         from_id = from_user.get('id')
@@ -276,23 +300,21 @@ def process_comment_event(db, change):
             return True
 
         try:
-            timestamp = datetime.fromtimestamp(created_time, timezone.utc).replace(tzinfo=None)
+            if InstagramService.handle_comment(db, {
+                'comment_id': comment_id,
+                'post_id': media.get('id'),
+                'user_id': from_user.get('id'),
+                'username': from_user.get('username'),
+                'comment_text': comment_text,
+                'parent_id': parent_comment_id,
+                'timestamp': timestamp,
+                'status': 'not_replied'
+            }):
+                return True
+            else:
+                return False
         except Exception as e:
-            logger.error(f"Failed to parse timestamp for comment {comment_id}: {str(e)}")
-            timestamp = datetime.now(timezone.utc)
-
-        if InstagramService.handle_comment(db, {
-            'comment_id': comment_id,
-            'post_id': media.get('id'),
-            'user_id': from_user.get('id'),
-            'username': from_user.get('username'),
-            'comment_text': comment_text,
-            'parent_id': parent_comment_id,
-            'timestamp': timestamp,
-            'status': 'not_replied'
-        }):
-            return True
-        else:
+            logger.error(f"Error processing comment event: {str(e)}", exc_info=True)
             return False
     else:
         logger.warning(f"Unhandled change event type: {change.get('field')}")

@@ -61,7 +61,7 @@ class BaseSection:
 
 class AppStatusSection(BaseSection): #
     """Handles application status settings""" #
-    def render(self): 
+    def render(self):
         try:
             self._render_toggles() #
             st.write("---") #
@@ -177,7 +177,7 @@ class ProductScraperSection(BaseSection):
                             # Consider st.rerun() if the list on the edit tab should update immediately
                         else:
                             st.error(f"Failed to save '{title.strip()}'.")
-        
+
         with edit_tab:
             app_settings = self.backend.get_additionalinfo()
             if not app_settings:
@@ -185,11 +185,11 @@ class ProductScraperSection(BaseSection):
             else:
                 if 'editing_app_setting_key' not in st.session_state:
                     st.session_state['editing_app_setting_key'] = None
-                
+
                 for setting in app_settings:
                     key = setting["key"]
                     value = setting["value"]
-                    
+
                     if st.session_state.get('editing_app_setting_key') == key:
                         # Editing mode for this item
                         with st.container(border=True):
@@ -197,7 +197,7 @@ class ProductScraperSection(BaseSection):
                                 st.subheader(f"Editing: {key}")
                                 new_value = st.text_area("Content", value=value, key=f"edit_value_{key}",
                                                           height=200, label_visibility="collapsed")
-                                
+
                                 form_cols = st.columns(2)
                                 with form_cols[0]:
                                     update_btn = st.form_submit_button(f"{self.const.ICONS['save']} Update",
@@ -205,7 +205,7 @@ class ProductScraperSection(BaseSection):
                                 with form_cols[1]:
                                     cancel_btn = st.form_submit_button("Cancel", type="secondary",
                                                                      use_container_width=True)
-                            
+
                             if update_btn:
                                 if not new_value.strip():
                                     st.error("Text content cannot be empty.")
@@ -296,13 +296,13 @@ class OpenAIManagementSection(BaseSection): #
             ) #
 
         with col2: #
-            st.write("") # 
+            st.write("") #
             update_btn = st.button( #
                 f"{self.const.ICONS['update']} Update All", #
                 use_container_width=True, #
                 help="Save all settings" #
             ) #
-            st.write("") # 
+            st.write("") #
 
         with col3: #
             new_top_p = st.slider( #
@@ -441,8 +441,10 @@ class InstagramSection(BaseSection): #
             st.session_state['stories_per_page'] = 6
         if 'selected_story_id' not in st.session_state:
             st.session_state['selected_story_id'] = None
+        if 'story_filter' not in st.session_state:
+            st.session_state['story_filter'] = "All"
 
-    def render(self): 
+    def render(self):
 
         posts_tab, stories_tab = st.tabs([ #
             f"{self.const.ICONS['post']} Posts", #
@@ -459,14 +461,14 @@ class InstagramSection(BaseSection): #
 
     def _render_posts_tab(self): #
         """Renders the section for managing and viewing Instagram posts with optimized performance.""" #
-        
+
         # Check if we have a selected post and show the detail view directly
         if 'selected_post_id' in st.session_state and st.session_state['selected_post_id']:
             self._render_post_detail(st.session_state['selected_post_id'])
             return
-        
+
         # Only show action buttons in the grid view
-        col1, col2, col3, col4 = st.columns([1, 1, 1, 1]) #
+        col1, col2, col3, col4, col5 = st.columns(5) #
 
         with col1: #
             if st.button(f"{self.const.ICONS['update']} Update Posts", help="Fetch and update Instagram posts", use_container_width=True): #
@@ -485,8 +487,8 @@ class InstagramSection(BaseSection): #
             if st.button(f"{self.const.ICONS['model']} AI Label", help="Auto-label posts with AI", use_container_width=True): #
                 with st.spinner("AI labeling..."): #
                     try: #
-                        if hasattr(self.backend, 'set_labels_by_model'): #
-                            result = self.backend.set_labels_by_model() #
+                        if hasattr(self.backend, 'set_post_labels_by_model'): #
+                            result = self.backend.set_post_labels_by_model() #
                             if result and result.get('success'): #
                                 st.success(f"Labels updated!") #
                                 st.rerun() #
@@ -496,25 +498,25 @@ class InstagramSection(BaseSection): #
                             st.error(f"Function not found") #
                     except Exception as e: #
                         st.error(f"Error: {str(e)}") #
-        
+
         with col3:
             if st.button(f"{self.const.ICONS['folder']} Download", help="Download post labels as JSON", use_container_width=True):
                 try:
                     # Get labeled posts data from backend
-                    labeled_data = self.backend.download_posts_label()
-                    
+                    labeled_data = self.backend.download_post_labels()
+
                     # Check if we got valid data
                     if isinstance(labeled_data, dict) and not labeled_data.get("error"):
                         # Convert dict to JSON string with ensure_ascii=False to properly handle Farsi/Persian characters
                         import json
                         json_data = json.dumps(labeled_data, indent=2, ensure_ascii=False)
-                        
+
                         # Create download link
                         import base64
                         json_bytes = json_data.encode('utf-8')
                         b64 = base64.b64encode(json_bytes).decode()
                         href = f'<a href="data:application/json;charset=utf-8;base64,{b64}" download="post_labels.json">Download JSON file</a>'
-                        
+
                         # Display download link
                         st.markdown(href, unsafe_allow_html=True)
                         st.success("JSON file ready for download!")
@@ -524,11 +526,24 @@ class InstagramSection(BaseSection): #
                     st.error(f"Error preparing download: {str(e)}")
 
         with col4:
+            if st.button(f"{self.const.ICONS['delete']} Remove Labels", help="Remove all labels from posts", use_container_width=True):
+                try:
+                    with st.spinner("Removing all labels..."):
+                        updated_count = self.backend.unset_all_post_labels()
+                        if updated_count > 0:
+                            st.success(f"Successfully removed labels from {updated_count} posts!")
+                            st.rerun()
+                        else:
+                            st.info("No labels were removed.")
+                except Exception as e:
+                    st.error(f"Error removing labels: {str(e)}")
+
+        with col5:
             try:
                 posts = self.backend.get_posts()
                 all_labels = sorted(list(set(post.get('label', '') for post in posts if post.get('label', ''))))
                 filter_options = ["All"] + all_labels
-                
+
                 selected_filter = st.selectbox(
                     f"{self.const.ICONS['label']} Filter",
                     options=filter_options,
@@ -536,7 +551,7 @@ class InstagramSection(BaseSection): #
                     key="post_filter_selector",
                     label_visibility="collapsed"
                 )
-            
+
                 # Apply filter change immediately instead of using on_change
                 if selected_filter != st.session_state['post_filter']:
                     st.session_state['post_filter'] = selected_filter
@@ -602,21 +617,21 @@ class InstagramSection(BaseSection): #
                 }
                 </style>
                 """, unsafe_allow_html=True)
-                
+
                 # Display pagination in a single row with minimal styling
                 st.markdown('<div class="minimal-pagination">', unsafe_allow_html=True)
-                cols = st.columns([1, 6, 1]) 
-                
+                cols = st.columns([1, 6, 1])
+
                 with cols[0]:
                     prev_disabled = st.session_state['post_page'] <= 0
-                    if st.button(f"{self.const.ICONS['previous']}", 
-                                disabled=prev_disabled, 
+                    if st.button(f"{self.const.ICONS['previous']}",
+                                disabled=prev_disabled,
                                 key="prev_page_btn",
                                 help="Previous page",
                                 use_container_width=True):
                         st.session_state['post_page'] -= 1
                         st.rerun()
-                
+
                 with cols[1]:
                     # Create a multi-column layout for page numbers
                     if max_pages <= 10:
@@ -625,8 +640,8 @@ class InstagramSection(BaseSection): #
                         for i in range(max_pages):
                             with page_cols[i]:
                                 current = i == st.session_state['post_page']
-                                if st.button(f"{i+1}", 
-                                           key=f"page_btn_{i}", 
+                                if st.button(f"{i+1}",
+                                           key=f"page_btn_{i}",
                                            disabled=current,
                                            type="primary" if current else "secondary"):
                                     st.session_state['post_page'] = i
@@ -636,136 +651,157 @@ class InstagramSection(BaseSection): #
                         # Always show: first page, current page, last page, and pages around current
                         current_page = st.session_state['post_page']
                         pages_to_show = {0, current_page, max_pages - 1}  # First, current, last
-                    
+
                     # Add pages around current page
                         for i in range(max(0, current_page - 2), min(max_pages, current_page + 3)):
                             pages_to_show.add(i)
-                    
+
                     # Convert to sorted list
                         pages_to_show = sorted(list(pages_to_show))
-                        
-                        # Calculate where to add "..." 
+
+                        # Calculate where to add "..."
                         gaps = []
                         for i in range(len(pages_to_show) - 1):
                             if pages_to_show[i+1] - pages_to_show[i] > 1:
                                 gaps.append(i)
-                        
+
                         # Add the gaps to the display sequence
                         display_sequence = []
                         for i, page in enumerate(pages_to_show):
                             display_sequence.append(page)
                             if i in gaps:
                                 display_sequence.append("...")
-                        
+
                         # Create columns for each page number or ellipsis
                         page_cols = st.columns(len(display_sequence))
-                        
+
                         for i, item in enumerate(display_sequence):
                             with page_cols[i]:
                                 if item == "...":
                                     st.markdown("...")
                                 else:
                                     current = item == current_page
-                                    if st.button(f"{item+1}", 
-                                              key=f"page_btn_{item}", 
+                                    if st.button(f"{item+1}",
+                                              key=f"page_btn_{item}",
                                               disabled=current,
                                               type="primary" if current else "secondary"):
                                         st.session_state['post_page'] = item
                                         st.rerun()
-                
+
                 with cols[2]:
                     next_disabled = st.session_state['post_page'] >= max_pages - 1
-                    if st.button(f"{self.const.ICONS['next']}", 
-                                disabled=next_disabled, 
+                    if st.button(f"{self.const.ICONS['next']}",
+                                disabled=next_disabled,
                                 key="next_page_btn",
                                 help="Next page",
                                 use_container_width=True):
                         st.session_state['post_page'] += 1
                         st.rerun()
-                
+
                 st.markdown('</div>', unsafe_allow_html=True)
-                
+
                 # Display post count information as a small caption
                 st.caption(f"Showing {start_idx+1}-{end_idx} of {filtered_count} posts")
 
         except Exception as e: #
             st.error(f"Error loading post grid: {str(e)}") #
 
-    def _render_stories_tab(self): #
-        """Renders the section for managing and viewing Instagram stories with a carousel""" #
-        
-        # Check if we have a selected story and show the detail view
-        if st.session_state['selected_story_id'] is not None:
+    def _render_stories_tab(self):
+        """Renders the stories tab with consistent grid layout and functionality as posts"""
+        # Check if we have a selected story and show detail view
+        if st.session_state['selected_story_id']:
             self._render_story_detail(st.session_state['selected_story_id'])
             return
-        
-        # Add CSS for the stories carousel
-        st.markdown("""
-        <style>
-        .story-carousel {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 15px;
-            justify-content: flex-start;
-            padding: 20px 0;
-        }
-        .story-item {
-            width: 200px;
-            border-radius: 10px;
-            overflow: hidden;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
-            transition: transform 0.3s ease;
-            cursor: pointer;
-            background-color: white;
-        }
-        .story-item:hover {
-            transform: translateY(-5px);
-        }
-        .story-image {
-            width: 100%;
-            height: 200px;
-            object-fit: cover;
-            display: block;
-        }
-        .story-caption {
-            padding: 10px;
-            font-size: 14px;
-            color: #333;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .story-pagination {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 5px;
-            margin: 15px 0;
-        }
-        .story-nav-btn {
-            min-width: 40px !important;
-            height: 40px !important;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-        
-        # Layout for action buttons
-        col1, col2 = st.columns([1, 3]) #
 
-        with col1: #
-            if st.button(f"{self.const.ICONS['update']} Update Stories", help="Fetch stories", use_container_width=True): #
-                with st.spinner("Fetching..."): #
-                    try: #
-                        success = self.backend.fetch_instagram_stories() #
-                        if success: #
-                            st.success(f"{self.const.ICONS['success']} Stories updated!") #
-                            st.rerun() #
-                        else: #
-                            st.error(f"{self.const.ICONS['error']} Fetch failed") #
-                    except Exception as e: #
-                        st.error(f"Error: {str(e)}") #
+        # Action buttons row (same structure as posts)
+        col1, col2, col3, col4, col5 = st.columns(5)
 
-        # Get all stories
+        with col1:
+            if st.button(f"{self.const.ICONS['update']} Update Stories",
+                        help="Fetch and update Instagram stories",
+                        use_container_width=True):
+                with st.spinner("Fetching stories..."):
+                    try:
+                        success = self.backend.fetch_instagram_stories()
+                        if success:
+                            st.success(f"{self.const.ICONS['success']} Stories updated!")
+                            st.rerun()
+                        else:
+                            st.error(f"{self.const.ICONS['error']} Fetch failed")
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+
+        with col2:
+            if st.button(f"{self.const.ICONS['model']} AI Label",
+                        help="Auto-label stories with AI",
+                        use_container_width=True):
+                with st.spinner("AI labeling..."):
+                    try:
+                        result = self.backend.set_story_labels_by_model()
+                        if result and result.get('success'):
+                            st.success(f"Labels updated!")
+                            st.rerun()
+                        else:
+                            st.error(f"Labeling failed")
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+
+        with col3:
+            if st.button(f"{self.const.ICONS['folder']} Download",
+                        help="Download story labels as JSON",
+                        use_container_width=True):
+                try:
+                    labeled_data = self.backend.download_story_labels()
+                    if isinstance(labeled_data, dict) and not labeled_data.get("error"):
+                        import json
+                        json_data = json.dumps(labeled_data, indent=2, ensure_ascii=False)
+                        import base64
+                        json_bytes = json_data.encode('utf-8')
+                        b64 = base64.b64encode(json_bytes).decode()
+                        href = f'<a href="data:application/json;charset=utf-8;base64,{b64}" download="story_labels.json">Download JSON file</a>'
+                        st.markdown(href, unsafe_allow_html=True)
+                        st.success("JSON file ready for download!")
+                    else:
+                        st.error("Failed to prepare data for download")
+                except Exception as e:
+                    st.error(f"Error preparing download: {str(e)}")
+
+        with col4:
+            if st.button(f"{self.const.ICONS['delete']} Remove Labels",
+                        help="Remove all labels from stories",
+                        use_container_width=True):
+                try:
+                    with st.spinner("Removing all labels..."):
+                        updated_count = self.backend.unset_all_story_labels()
+                        if updated_count > 0:
+                            st.success(f"Successfully removed labels from {updated_count} stories!")
+                            st.rerun()
+                        else:
+                            st.info("No labels were removed.")
+                except Exception as e:
+                    st.error(f"Error removing labels: {str(e)}")
+
+        with col5:
+            try:
+                stories = self.backend.get_stories()
+                all_labels = sorted(list(set(story.get('label', '') for story in stories if story.get('label', ''))))
+                filter_options = ["All"] + all_labels
+
+                selected_filter = st.selectbox(
+                    f"{self.const.ICONS['label']} Filter",
+                    options=filter_options,
+                    index=filter_options.index(st.session_state['story_filter']) if st.session_state['story_filter'] in filter_options else 0,
+                    key="story_filter_selector",
+                    label_visibility="collapsed"
+                )
+
+                if selected_filter != st.session_state['story_filter']:
+                    st.session_state['story_filter'] = selected_filter
+                    st.session_state['story_page'] = 0
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Error loading labels: {str(e)}")
+
         try:
             stories = self.backend.get_stories()
             total_stories = len(stories)
@@ -773,269 +809,614 @@ class InstagramSection(BaseSection): #
             if not stories:
                 st.info("No stories found. Click 'Update Stories' to fetch them.")
                 return
-                
-            # Pagination
-            stories_per_page = st.session_state['stories_per_page']
-            max_pages = (total_stories - 1) // stories_per_page + 1
-            
+
+            st.session_state['stories_per_page'] = 12
+
+            if st.session_state['story_filter'] != "All":
+                filtered_stories = [story for story in stories if story.get('label', '') == st.session_state['story_filter']]
+            else:
+                filtered_stories = stories
+
+            filtered_count = len(filtered_stories)
+            max_pages = (filtered_count - 1) // st.session_state['stories_per_page'] + 1 if filtered_count > 0 else 1
+
             if st.session_state['story_page'] >= max_pages:
                 st.session_state['story_page'] = max_pages - 1
-                
-            start_idx = st.session_state['story_page'] * stories_per_page
-            end_idx = min(start_idx + stories_per_page, total_stories)
-            current_page_stories = stories[start_idx:end_idx]
-            
-            # Display stories in a carousel
-            st.subheader("Story Carousel")
-            
-            # Stories grid
-            cols = st.columns(3)  # 3 columns for stories
-            
-            for i, story in enumerate(current_page_stories):
-                col_idx = i % 3
-                with cols[col_idx]:
-                    story_id = story.get('id')
-                    media_url = story.get('media_url')
-                    thumbnail_url = story.get('thumbnail_url')
-                    caption = story.get('caption', 'No caption')
-                    
-                    # Create a responsive story card
-                    with st.container():
-                        # Use the thumbnail or media URL
-                        image_url = thumbnail_url if thumbnail_url else media_url
-                        
-                        # Show the story image
-                        st.image(image_url, use_column_width=True)
-                        
-                        # Display a trimmed caption
-                        short_caption = caption[:50] + "..." if len(caption) > 50 else caption
-                        st.caption(short_caption)
-                        
-                        # Button to view details
-                        if st.button("View Details", key=f"view_story_{story_id}", use_container_width=True):
-                            st.session_state['selected_story_id'] = story_id
-                            st.rerun()
-            
-            # Pagination controls
-            if total_stories > stories_per_page:
-                st.markdown("---")
-                pagination_cols = st.columns([1, 3, 1])
-                
-                with pagination_cols[0]:
+
+            start_idx = st.session_state['story_page'] * st.session_state['stories_per_page']
+            end_idx = min(start_idx + st.session_state['stories_per_page'], filtered_count)
+            current_page_stories = filtered_stories[start_idx:end_idx]
+
+            self._render_story_grid(current_page_stories)
+
+            if filtered_count > 0:
+                # Pagination controls (same as posts)
+                st.markdown("""
+                <style>
+                .minimal-pagination {
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    gap: 5px;
+                    margin: 15px 0;
+                }
+                .page-btn {
+                    min-width: 30px !important;
+                    height: 30px !important;
+                    padding: 0 !important;
+                    font-size: 12px !important;
+                    display: inline-flex !important;
+                    align-items: center;
+                    justify-content: center;
+                    border-radius: 4px !important;
+                }
+                .page-nav-btn {
+                    min-width: 35px !important;
+                    height: 30px !important;
+                    padding: 0 8px !important;
+                    font-size: 12px !important;
+                }
+                </style>
+                """, unsafe_allow_html=True)
+
+                st.markdown('<div class="minimal-pagination">', unsafe_allow_html=True)
+                cols = st.columns([1, 6, 1])
+
+                with cols[0]:
                     prev_disabled = st.session_state['story_page'] <= 0
-                    if st.button(f"{self.const.ICONS['previous']} Previous", 
+                    if st.button(f"{self.const.ICONS['previous']}",
                                 disabled=prev_disabled,
-                                key="prev_story_page",
+                                key="prev_story_page_btn",
+                                help="Previous page",
                                 use_container_width=True):
                         st.session_state['story_page'] -= 1
                         st.rerun()
-                
-                with pagination_cols[1]:
-                    st.markdown(f"<div style='text-align: center;'>Page {st.session_state['story_page'] + 1} of {max_pages}</div>", unsafe_allow_html=True)
-                
-                with pagination_cols[2]:
+
+                with cols[1]:
+                    if filtered_count <= 10:
+                        page_cols = st.columns(filtered_count)
+                        for i in range(filtered_count):
+                            with page_cols[i]:
+                                current = i == st.session_state['story_page']
+                                if st.button(f"{i+1}",
+                                           key=f"story_page_btn_{i}",
+                                           disabled=current,
+                                           type="primary" if current else "secondary"):
+                                    st.session_state['story_page'] = i
+                                    st.rerun()
+                    else:
+                        current_page = st.session_state['story_page']
+                        pages_to_show = {0, current_page, filtered_count - 1}
+                        for i in range(max(0, current_page - 2), min(filtered_count, current_page + 3)):
+                            pages_to_show.add(i)
+                        pages_to_show = sorted(list(pages_to_show))
+
+                        gaps = []
+                        for i in range(len(pages_to_show) - 1):
+                            if pages_to_show[i+1] - pages_to_show[i] > 1:
+                                gaps.append(i)
+
+                        display_sequence = []
+                        for i, page in enumerate(pages_to_show):
+                            display_sequence.append(page)
+                            if i in gaps:
+                                display_sequence.append("...")
+
+                        page_cols = st.columns(len(display_sequence))
+
+                        for i, item in enumerate(display_sequence):
+                            with page_cols[i]:
+                                if item == "...":
+                                    st.markdown("...")
+                                else:
+                                    current = item == current_page
+                                    if st.button(f"{item+1}",
+                                              key=f"story_page_btn_{item}",
+                                              disabled=current,
+                                              type="primary" if current else "secondary"):
+                                        st.session_state['story_page'] = item
+                                        st.rerun()
+
+                with cols[2]:
                     next_disabled = st.session_state['story_page'] >= max_pages - 1
-                    if st.button(f"Next {self.const.ICONS['next']}", 
+                    if st.button(f"{self.const.ICONS['next']}",
                                 disabled=next_disabled,
-                                key="next_story_page",
+                                key="next_story_page_btn",
+                                help="Next page",
                                 use_container_width=True):
                         st.session_state['story_page'] += 1
                         st.rerun()
-                
-                st.caption(f"Showing stories {start_idx+1}-{end_idx} of {total_stories}")
-            
+
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                st.caption(f"Showing {start_idx+1}-{end_idx} of {filtered_count} stories")
+
         except Exception as e:
-            st.error(f"Error loading stories: {str(e)}")
-            
+            st.error(f"Error loading story grid: {str(e)}")
+
+    def _render_story_grid(self, stories_to_display):
+        """Renders a paginated grid of Instagram stories matching post grid style"""
+        if 'selected_story_id' not in st.session_state:
+            st.session_state['selected_story_id'] = None
+
+        num_columns = 4
+        cols = st.columns(num_columns)
+
+        # Custom CSS for the grid (same as posts)
+        st.markdown("""
+        <style>
+        .story-grid {
+            margin-bottom: 20px;
+        }
+        .story-image-container {
+            position: relative;
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease;
+        }
+        .story-image-container:hover {
+            transform: translateY(-5px);
+        }
+        .story-image-container img {
+            width: 100%;
+            aspect-ratio: 1;
+            object-fit: cover;
+            display: block;
+        }
+        .story-label {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background-color: rgba(0,0,0,0.7);
+            color: white;
+            font-size: 11px;
+            padding: 4px 8px;
+            border-radius: 12px;
+            max-width: 80%;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .story-view-btn {
+            width: 100% !important;
+            margin-top: 0 !important;
+            padding: 4px 0 !important;
+            font-size: 13px !important;
+            border-radius: 6px !important;
+            background-color: #0095f6 !important;
+            color: white !important;
+            border: none !important;
+            font-weight: 500 !important;
+            cursor: pointer;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        for index, story in enumerate(stories_to_display):
+            story_id = story.get('id')
+            if not story_id:
+                story_id_key = f"index_{index}"
+            else:
+                story_id_key = str(story_id)
+
+            col_index = index % num_columns
+            with cols[col_index]:
+                with st.container():
+                    media_url = story.get('media_url')
+                    thumbnail_url = story.get('thumbnail_url')
+                    label = story.get('label', '')
+
+                    st.markdown(f"""
+                    <div class="story-image-container">
+                        <img src="{thumbnail_url or media_url}" alt="Instagram story">
+                        {f'<div class="story-label">{label}</div>' if label else ''}
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    view_btn = st.button("View Details", key=f"view_story_btn_{story_id_key}", use_container_width=True)
+
+                    if view_btn:
+                        st.session_state['selected_story_id'] = story_id
+                        st.rerun()
+
     def _render_story_detail(self, story_id):
-        """Renders the detailed view for a single Instagram story"""
+        """Renders the detail view for a single Instagram story matching post detail style"""
         try:
-            # Get all stories
             stories = self.backend.get_stories()
-            
+
+            # Get all stories with the same label if filtered view is active
+            if st.session_state['story_filter'] != "All":
+                filtered_stories = [story for story in stories if story.get('label', '') == st.session_state['story_filter']]
+            else:
+                filtered_stories = stories
+
             # Find the current story
-            story = next((s for s in stories if s.get('id') == story_id), None)
-            
+            story = next((s for s in filtered_stories if s.get('id') == story_id), None)
+
+            # Get the index of the current story in the filtered list
+            if story:
+                current_index = filtered_stories.index(story)
+                total_stories = len(filtered_stories)
+                prev_index = (current_index - 1) % total_stories if total_stories > 1 else None
+                next_index = (current_index + 1) % total_stories if total_stories > 1 else None
+
+                prev_story_id = filtered_stories[prev_index]['id'] if prev_index is not None else None
+                next_story_id = filtered_stories[next_index]['id'] if next_index is not None else None
+            else:
+                current_index = None
+                total_stories = len(filtered_stories)
+                prev_story_id = None
+                next_story_id = None
+
             if not story:
                 st.error(f"Story not found with ID: {story_id}")
-                if st.button("Back to stories", use_container_width=True):
+                if st.button("Back to grid", use_container_width=True):
                     st.session_state['selected_story_id'] = None
                     st.rerun()
                 return
-            
-            # Get the index of the current story
-            current_index = stories.index(story)
-            total_stories = len(stories)
-            prev_index = (current_index - 1) % total_stories if total_stories > 1 else None
-            next_index = (current_index + 1) % total_stories if total_stories > 1 else None
-            
-            prev_story_id = stories[prev_index]['id'] if prev_index is not None else None
-            next_story_id = stories[next_index]['id'] if next_index is not None else None
-            
-            # Apply styling for the detail view
+
+            # Apply styling for the details page (same as posts)
             st.markdown("""
             <style>
-            .story-detail-container {
-                background-color: white;
-                border-radius: 12px;
-                padding: 20px;
-                box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-            }
             .story-detail-image {
                 border-radius: 8px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.1);
                 overflow: hidden;
-                margin-bottom: 15px;
-                box-shadow: 0 4px 8px rgba(0,0,0,0.1);
             }
-            .story-metadata {
+            .story-detail-section {
                 background-color: #f8f9fa;
                 border-radius: 8px;
-                padding: 15px;
-                margin-top: 15px;
+                padding: 16px;
+                margin-bottom: 16px;
+                box-shadow: 0 2px 6px rgba(0,0,0,0.05);
             }
             .story-caption {
-                background-color: white;
-                border-radius: 8px;
-                border: 1px solid #eee;
-                padding: 15px;
-                margin: 15px 0;
                 max-height: 200px;
                 overflow-y: auto;
+                padding: 10px;
+                background-color: white;
+                border-radius: 6px;
+                border: 1px solid #eee;
+                margin-top: 5px;
             }
-            .nav-container {
+            .story-fixed-response-field {
+                background-color: white;
+                border-radius: 6px;
+                border: 1px solid #eee;
+                padding: 10px;
+                margin-top: 5px;
+            }
+            .story-detail-navigation {
                 display: flex;
+                align-items: center;
                 justify-content: space-between;
                 margin-bottom: 15px;
             }
+            .story-pagination-counter {
+                text-align: center;
+                font-size: 14px;
+                color: #666;
+            }
+            .story-mini-header {
+                font-size: 16px;
+                font-weight: 600;
+                margin-bottom: 8px;
+            }
             </style>
             """, unsafe_allow_html=True)
-            
-            # Navigation bar
-            nav_cols = st.columns([1, 2, 1])
-            
-            with nav_cols[0]:
-                if st.button(f"{self.const.ICONS['previous']} Previous", use_container_width=True, key="prev_story_btn"):
-                    if prev_story_id:
-                        st.session_state['selected_story_id'] = prev_story_id
-                        st.rerun()
-            
-            with nav_cols[1]:
-                if st.button("Back to Stories", use_container_width=True, key="back_to_stories"):
+
+            # Navigation header with back, prev, next buttons
+            cols = st.columns([1, 3, 1])
+
+            with cols[0]:
+                if st.button("Back", key="back_to_story_grid_btn", help="Back to grid", use_container_width=True):
                     st.session_state['selected_story_id'] = None
                     st.rerun()
-            
-            with nav_cols[2]:
-                if st.button(f"Next {self.const.ICONS['next']}", use_container_width=True, key="next_story_btn"):
-                    if next_story_id:
-                        st.session_state['selected_story_id'] = next_story_id
-                        st.rerun()
-            
-            # Display the story content
-            media_url = story.get('media_url')
-            thumbnail_url = story.get('thumbnail_url')
-            caption = story.get('caption', 'No caption')
-            
-            # Main image
-            image_url = media_url if media_url else thumbnail_url
-            st.image(image_url, use_column_width=True, caption=f"Story {current_index + 1} of {total_stories}")
-            
-            # Caption
-            st.subheader("Caption")
-            st.markdown(f"<div class='story-caption'>{caption}</div>", unsafe_allow_html=True)
-            
-            # Get and display metadata
-            try:
-                metadata = self.backend.get_story_metadata(story_id)
-                
-                st.subheader("Metadata")
-                metadata_cols = st.columns(3)
-                
-                with metadata_cols[0]:
-                    st.metric("Media Type", metadata.get('media_type', 'Unknown'))
-                
-                with metadata_cols[1]:
-                    st.metric("Likes", metadata.get('like_count', 0))
-                
-                with metadata_cols[2]:
-                    st.metric("Date", metadata.get('timestamp', 'Unknown'))
-                
-            except Exception as e:
-                st.error(f"Error loading metadata: {str(e)}")
-            
-            # Fixed response section
-            st.markdown("---")
-            st.subheader("Fixed Response")
-            
-            try:
-                fixed_response = self.backend.get_story_fixed_response(story_id)
-                
-                if fixed_response:
-                    # Show existing fixed response
-                    st.info("This story has a configured fixed response")
-                    
-                    with st.expander("View/Edit Fixed Response", expanded=True):
-                        trigger_keyword = fixed_response.get('trigger_keyword', '')
-                        direct_response = fixed_response.get('direct_response_text', '')
-                        
-                        with st.form(key=f"edit_response_form_{story_id}"):
-                            new_trigger = st.text_input("Trigger Keyword", value=trigger_keyword)
-                            new_direct_response = st.text_area("Direct Message Response", value=direct_response, height=150)
-                            
-                            update_col, delete_col = st.columns(2)
-                            
-                            with update_col:
-                                if st.form_submit_button("Update Response", use_container_width=True):
-                                    success = self.backend.create_or_update_story_fixed_response(
-                                        story_id=story_id,
-                                        trigger_keyword=new_trigger,
-                                        direct_response_text=new_direct_response
-                                    )
-                                    
-                                    if success:
-                                        st.success("Fixed response updated!")
-                                        st.rerun()
-                                    else:
-                                        st.error("Failed to update fixed response")
-                            
-                            with delete_col:
-                                if st.form_submit_button("Delete Response", use_container_width=True):
-                                    success = self.backend.delete_story_fixed_response(story_id)
-                                    
-                                    if success:
-                                        st.success("Fixed response deleted!")
-                                        st.rerun()
-                                    else:
-                                        st.error("Failed to delete fixed response")
+
+            with cols[2]:
+                nav_cols = st.columns(2)
+                with nav_cols[0]:
+                    prev_disabled = prev_story_id is None
+                    if st.button(f"{self.const.ICONS['previous']}",
+                               key="detail_prev_story_btn",
+                               disabled=prev_disabled,
+                               help="Previous story",
+                               use_container_width=True):
+                        if prev_story_id:
+                            st.session_state['selected_story_id'] = prev_story_id
+                            st.rerun()
+
+                with nav_cols[1]:
+                    next_disabled = next_story_id is None
+                    if st.button(f"{self.const.ICONS['next']}",
+                               key="detail_next_story_btn",
+                               disabled=next_disabled,
+                               help="Next story",
+                               use_container_width=True):
+                        if next_story_id:
+                            st.session_state['selected_story_id'] = next_story_id
+                            st.rerun()
+
+                if current_index is not None:
+                    st.markdown(
+                        f'<div style="text-align: center; font-size: 0.9em; color: #666; margin-top: 10px;">'
+                        f'Story <span style="font-size: 1.2em; font-weight: bold;">{current_index + 1}</span> of {total_stories}'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+
+            # Layout for story details
+            col1, col2 = st.columns([2, 3])
+
+            with col1:
+                # Media display
+                st.markdown('<div class="story-detail-image">', unsafe_allow_html=True)
+                media_url = story.get('media_url')
+                thumbnail_url = story.get('thumbnail_url')
+                media_type = story.get('media_type', '').lower()
+
+                if media_type == "video":
+                    try:
+                        st.video(media_url)
+                    except Exception as e:
+                        st.error(f"Unable to play video: {str(e)}")
+                        if thumbnail_url:
+                            st.image(thumbnail_url, use_container_width=True)
+                            st.caption("Video thumbnail (video playback unavailable)")
+                        else:
+                            st.warning("Video playback unavailable")
+                elif media_url:
+                    st.image(media_url, use_container_width=True)
                 else:
-                    # Create new fixed response
-                    st.info("No fixed response configured for this story")
-                    
-                    with st.form(key=f"new_response_form_{story_id}"):
-                        trigger_keyword = st.text_input("Trigger Keyword")
-                        direct_response = st.text_area("Direct Message Response", height=150)
-                        
-                        if st.form_submit_button("Create Response", use_container_width=True):
-                            if not trigger_keyword:
-                                st.error("Trigger keyword is required")
+                    st.warning("No media available")
+
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                # Label selector section
+                with st.container():
+                    try:
+                        products_data = self.backend.get_products()
+                        product_titles = sorted([p['Title'] for p in products_data if p.get('Title')])
+                        custom_labels = st.session_state.get('custom_labels', [])
+                        all_labels = ["-- Select --"] + sorted(list(set(product_titles + custom_labels)))
+
+                        current_label = story.get('label', '')
+                        try:
+                            default_select_index = all_labels.index(current_label) if current_label else 0
+                        except ValueError:
+                            if current_label:
+                                all_labels.append(current_label)
+                                default_select_index = all_labels.index(current_label)
                             else:
-                                success = self.backend.create_or_update_story_fixed_response(
-                                    story_id=story_id,
-                                    trigger_keyword=trigger_keyword,
-                                    direct_response_text=direct_response
-                                )
-                                
-                                if success:
-                                    st.success("Fixed response created!")
+                                default_select_index = 0
+
+                        label_col, ai_col, remove_col = st.columns([3, 1, 1])
+
+                        with label_col:
+                            select_key = f"story_label_select_detail_{story_id}"
+                            selected_label = st.selectbox(
+                                "Select Label",
+                                options=all_labels,
+                                key=select_key,
+                                index=default_select_index
+                            )
+
+                        with ai_col:
+                            st.write("")
+                            if st.button(f"{self.const.ICONS['brain']}", key=f"story_auto_label_btn_{story_id}", help="Auto-label using AI"):
+                                with st.spinner("Analyzing image..."):
+                                    result = self.backend.set_single_story_label_by_model(story_id)
+                                    if result and result.get("success"):
+                                        st.success(f"Image labeled as: {result.get('label')}")
+                                        st.rerun()
+                                    else:
+                                        error_msg = result.get('message', 'Unknown error') if result else 'Unknown error'
+                                        st.error(f"Failed to label image: {error_msg}")
+                                        if "Model confidence too low" in error_msg:
+                                            st.info("The AI model wasn't confident enough to determine a label for this image.")
+
+                        with remove_col:
+                            st.write("")
+                            if st.button(f"{self.const.ICONS['delete']}", key=f"story_remove_label_btn_{story_id}", help="Remove label"):
+                                if self.backend.remove_story_label(story_id):
+                                    st.success("Label removed successfully")
                                     st.rerun()
                                 else:
-                                    st.error("Failed to create fixed response")
-            
-            except Exception as e:
-                st.error(f"Error managing fixed responses: {str(e)}")
-        
+                                    st.error("Failed to remove label")
+
+                        if selected_label != current_label and selected_label != "-- Select --":
+                            try:
+                                label_success = self.backend.set_story_label(story_id, selected_label)
+                                if label_success:
+                                    st.success(f"{self.const.ICONS['success']} Label updated")
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"{self.const.ICONS['error']} Error saving label: {str(e)}")
+                    except Exception as e:
+                        st.error(f"Error loading labels: {str(e)}")
+
+                    label_input_col, label_btn_col = st.columns([3, 1])
+                    with label_input_col:
+                        new_label = st.text_input(
+                            "Add custom label",
+                            key=f"story_detail_new_custom_label_{story_id}",
+                            placeholder="Add custom label",
+                            label_visibility="collapsed"
+                        )
+
+                    with label_btn_col:
+                        if st.button(f"{self.const.ICONS['add']}", key=f"story_detail_add_label_btn_{story_id}", help="Add label", use_container_width=True):
+                            new_label_stripped = new_label.strip()
+                            if new_label_stripped and new_label_stripped not in st.session_state['custom_labels']:
+                                st.session_state['custom_labels'].append(new_label_stripped)
+                                st.success(f"Added '{new_label_stripped}'")
+                                st.rerun()
+                            elif not new_label_stripped:
+                                st.warning("Label cannot be empty")
+                            else:
+                                st.warning(f"Label already exists")
+
+            with col2:
+                # Story details - Caption
+                st.write("")
+                st.markdown('<div class="story-mini-header">Caption</div>', unsafe_allow_html=True)
+                caption = story.get('caption', 'No caption available')
+
+                st.markdown(f'<div style="margin-bottom:20px;">{caption}</div>', unsafe_allow_html=True)
+
+                # Admin Explanation section
+                st.write("")
+
+                try:
+                    current_explanation = self.backend.get_story_admin_explanation(story_id)
+
+                    with st.form(key=f"story_admin_explanation_form_{story_id}", border=False):
+                        explanation = st.text_area(
+                            "Explain",
+                            value=current_explanation if current_explanation else "",
+                            placeholder="Add an explanation for this story",
+                            key=f"story_admin_explanation_{story_id}"
+                        )
+
+                        exp_col1, exp_col2 = st.columns(2)
+
+                        with exp_col1:
+                            save_exp_button = st.form_submit_button(
+                                f"{self.const.ICONS['save']} Save Explanation",
+                                use_container_width=True
+                            )
+
+                        with exp_col2:
+                            remove_exp_button = st.form_submit_button(
+                                f"{self.const.ICONS['delete']} Remove Explanation",
+                                type="secondary",
+                                use_container_width=True
+                            )
+
+                        if save_exp_button:
+                            if explanation.strip():
+                                try:
+                                    success = self.backend.set_story_admin_explanation(story_id, explanation.strip())
+                                    if success:
+                                        st.success(f"{self.const.ICONS['success']} Explanation saved!")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"{self.const.ICONS['error']} Failed to save explanation")
+                                except Exception as e:
+                                    st.error(f"{self.const.ICONS['error']} Error saving explanation: {str(e)}")
+                            else:
+                                st.warning("Explanation cannot be empty")
+
+                        if remove_exp_button:
+                            try:
+                                success = self.backend.remove_story_admin_explanation(story_id)
+                                if success:
+                                    st.success("Explanation removed")
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to remove explanation")
+                            except Exception as e:
+                                st.error(f"Error removing explanation: {str(e)}")
+
+                except Exception as e:
+                    st.error(f"Error loading admin explanation: {str(e)}")
+
+                # Fixed response editing functionality
+                st.write("")
+                st.markdown('<div class="story-mini-header">Fixed Response</div>', unsafe_allow_html=True)
+
+                try:
+                    fixed_response = self.backend.get_story_fixed_response(story_id)
+                except Exception as e:
+                    fixed_response = None
+                    st.error(f"Error loading fixed response: {str(e)}")
+
+                exist_tab, add_tab = st.tabs(["Existing", "Add New"])
+
+                with exist_tab:
+                    if fixed_response and fixed_response.get("trigger_keyword"):
+                        try:
+                            with st.form(key=f"story_existing_response_form_{story_id}", border=False):
+                                trigger_keyword = st.text_input(
+                                    "Trigger keyword",
+                                    value=fixed_response.get("trigger_keyword", "")
+                                )
+                                dm_response = st.text_area(
+                                    "DM reply",
+                                    value=fixed_response.get("direct_response_text", "")
+                                )
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    submit_button = st.form_submit_button(f"{self.const.ICONS['save']} Update", use_container_width=True)
+                                with col2:
+                                    delete_button = st.form_submit_button(
+                                        f"{self.const.ICONS['delete']} Remove",
+                                        type="secondary",
+                                        use_container_width=True
+                                    )
+                                if submit_button:
+                                    try:
+                                        if trigger_keyword.strip():
+                                            success = self.backend.create_or_update_story_fixed_response(
+                                                story_id=story_id,
+                                                trigger_keyword=trigger_keyword.strip(),
+                                                direct_response_text=dm_response.strip() if dm_response.strip() else None
+                                            )
+                                            if success:
+                                                st.success(f"{self.const.ICONS['success']} Updated!")
+                                                st.rerun()
+                                        else:
+                                            st.error("Trigger keyword is required")
+                                    except Exception as e:
+                                        st.error(f"{self.const.ICONS['error']} Error updating: {str(e)}")
+                                if delete_button:
+                                    try:
+                                        success = self.backend.delete_story_fixed_response(story_id)
+                                        if success:
+                                            st.success("Response removed")
+                                            st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Error removing response: {str(e)}")
+                        except Exception as e:
+                            st.error(f"Error loading form: {str(e)}")
+                    else:
+                        st.info("No fixed response exists for this story. Use the 'Add New' tab to create one.")
+
+                with add_tab:
+                    try:
+                        with st.form(key=f"story_new_response_form_{story_id}", border=False):
+                            new_trigger_keyword = st.text_input(
+                                "Trigger keyword",
+                                placeholder="Enter words that will trigger this response"
+                            )
+                            new_dm_response = st.text_area(
+                                "DM reply",
+                                placeholder="Response sent as DM when someone messages with trigger words"
+                            )
+                            new_submit_button = st.form_submit_button(f"{self.const.ICONS['add']} Create", use_container_width=True)
+                            if new_submit_button:
+                                try:
+                                    if new_trigger_keyword.strip():
+                                        new_success = self.backend.create_or_update_story_fixed_response(
+                                            story_id=story_id,
+                                            trigger_keyword=new_trigger_keyword.strip(),
+                                            direct_response_text=new_dm_response.strip() if new_dm_response.strip() else None
+                                        )
+                                        if new_success:
+                                            st.success(f"{self.const.ICONS['success']} Created!")
+                                            st.rerun()
+                                    else:
+                                        st.error("Trigger keyword is required")
+                                except Exception as e:
+                                    st.error(f"{self.const.ICONS['error']} Error creating: {str(e)}")
+                    except Exception as e:
+                        st.error(f"Error loading form: {str(e)}")
+
         except Exception as e:
             st.error(f"Error loading story details: {str(e)}")
-            if st.button("Back to stories", use_container_width=True):
+            if st.button("Back to grid", use_container_width=True):
                 st.session_state['selected_story_id'] = None
                 st.rerun()
 
@@ -1115,7 +1496,7 @@ class InstagramSection(BaseSection): #
                     media_url = post.get('media_url') #
                     thumbnail_url = post.get('thumbnail_url')
                     label = post.get('label', '')
-                    
+
                     # Show the image in a container
                     st.markdown(f"""
                     <div class="post-image-container">
@@ -1123,10 +1504,10 @@ class InstagramSection(BaseSection): #
                         {f'<div class="post-label">{label}</div>' if label else ''}
                     </div>
                     """, unsafe_allow_html=True)
-                    
+
                     # Use a regular button styled to be small and flat
                     view_btn = st.button("View Details", key=f"view_btn_{post_id_key}", use_container_width=True)
-                    
+
                     # Handle click
                     if view_btn:
                         st.session_state['selected_post_id'] = post_id
@@ -1135,23 +1516,23 @@ class InstagramSection(BaseSection): #
     def _render_post_detail(self, post_id):
         """Renders the detail view for a single Instagram post"""
         posts = self.backend.get_posts()
-        
+
         # Get all posts with the same label if filtered view is active
         if st.session_state['post_filter'] != "All":
             filtered_posts = [post for post in posts if post.get('label', '') == st.session_state['post_filter']]
         else:
             filtered_posts = posts
-            
+
         # Find the current post
         post = next((p for p in filtered_posts if p.get('id') == post_id), None)
-        
+
         # Get the index of the current post in the filtered list
         if post:
             current_index = filtered_posts.index(post)
             total_posts = len(filtered_posts)
             prev_index = (current_index - 1) % total_posts if total_posts > 1 else None
             next_index = (current_index + 1) % total_posts if total_posts > 1 else None
-            
+
             prev_post_id = filtered_posts[prev_index]['id'] if prev_index is not None else None
             next_post_id = filtered_posts[next_index]['id'] if next_index is not None else None
         else:
@@ -1160,14 +1541,14 @@ class InstagramSection(BaseSection): #
             total_posts = len(filtered_posts)
             prev_post_id = None
             next_post_id = None
-        
+
         if not post:
             st.error(f"Post not found with ID: {post_id}")
             if st.button("Back to grid", use_container_width=True):
                 st.session_state['selected_post_id'] = None
                 st.rerun()
             return
-        
+
         # Apply some styling for the details page
         st.markdown("""
         <style>
@@ -1217,59 +1598,62 @@ class InstagramSection(BaseSection): #
         }
         </style>
         """, unsafe_allow_html=True)
-        
+
         # Simplified navigation header with only back, prev, next buttons
-        cols = st.columns([1, 1, 1])
-        
+        cols = st.columns([1, 3, 1])
+
         with cols[0]:
             # Back button
-            if st.button(f"{self.const.ICONS['previous']}", key="back_to_grid_btn", help="Back to grid", use_container_width=True):
+            if st.button("Back", key="back_to_grid_btn", help="Back to grid", use_container_width=True):
                 st.session_state['selected_post_id'] = None
                 st.rerun()
-                
-        with cols[1]:
-            # Previous button
-            prev_disabled = prev_post_id is None
-            if st.button(f"{self.const.ICONS['previous']}", 
-                       key="detail_prev_post_btn", 
-                       disabled=prev_disabled,
-                       help="Previous post",
-                       use_container_width=True):
-                if prev_post_id:
-                    st.session_state['selected_post_id'] = prev_post_id
-                    st.rerun()
-                    
+
         with cols[2]:
-            # Next button
-            next_disabled = next_post_id is None
-            if st.button(f"{self.const.ICONS['next']}", 
-                       key="detail_next_post_btn", 
-                       disabled=next_disabled,
-                       help="Next post",
-                       use_container_width=True):
-                if next_post_id:
-                    st.session_state['selected_post_id'] = next_post_id
-                    st.rerun()
-        
-        if current_index is not None:
-            st.caption(f"Post {current_index + 1} of {total_posts}")
-            
+            # Navigation buttons container
+            nav_cols = st.columns(2)
+            with nav_cols[0]:
+                # Previous button
+                prev_disabled = prev_post_id is None
+                if st.button(f"{self.const.ICONS['previous']}",
+                           key="detail_prev_post_btn",
+                           disabled=prev_disabled,
+                           help="Previous post",
+                           use_container_width=True):
+                    if prev_post_id:
+                        st.session_state['selected_post_id'] = prev_post_id
+                        st.rerun()
+
+            with nav_cols[1]:
+                # Next button
+                next_disabled = next_post_id is None
+                if st.button(f"{self.const.ICONS['next']}",
+                           key="detail_next_post_btn",
+                           disabled=next_disabled,
+                           help="Next post",
+                           use_container_width=True):
+                    if next_post_id:
+                        st.session_state['selected_post_id'] = next_post_id
+                        st.rerun()
+
+            # Add post counter below navigation buttons
+            if current_index is not None:
+                st.markdown(
+                    f'<div style="text-align: center; font-size: 0.9em; color: #666; margin-top: 10px;">'
+                    f'Post <span style="font-size: 1.2em; font-weight: bold;">{current_index + 1}</span> of {total_posts}'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+
         # Layout for post details
         col1, col2 = st.columns([2, 3])
-        
+
         with col1:
             # Image display with custom class
             st.markdown('<div class="post-detail-image">', unsafe_allow_html=True)
             media_url = post.get('media_url')
             thumbnail_url = post.get('thumbnail_url')
-            
-            # Get metadata to determine proper media type
-            try:
-                metadata = self.backend.get_post_metadata(post_id)
-                media_type = metadata.get('media_type', '').lower()
-            except:
-                media_type = post.get('media_type', '').lower()
-            
+            media_type = post.get('media_type', '').lower()
+
             if media_type == "video":
                 try:
                     # For videos, use the native video player
@@ -1287,9 +1671,9 @@ class InstagramSection(BaseSection): #
                 st.image(media_url, use_container_width=True)
             else:
                 st.warning("No media available")
-                
+
             st.markdown('</div>', unsafe_allow_html=True)
-            
+
             # Add custom label input section below the image
             with st.container():
                 # Get product titles for dropdown (moved from settings section)
@@ -1308,38 +1692,52 @@ class InstagramSection(BaseSection): #
                             default_select_index = all_labels.index(current_label)
                         else:
                             default_select_index = 0
-                    
-                    # Add columns for label selection and auto-label button
-                    label_col, auto_label_col = st.columns([3, 1])
-                    
+
+                    # Add columns for label selection and buttons
+                    label_col, ai_col, remove_col = st.columns([3, 1, 1])
+
                     with label_col:
-                        # Label selector (moved from settings form)
+                        # Label selector
                         select_key = f"label_select_detail_{post_id}"
                         selected_label = st.selectbox(
-                            "Label",
+                            "Select Label",  # Added label parameter
                             options=all_labels,
                             key=select_key,
                             index=default_select_index
                         )
-                    
-                    with auto_label_col:
-                        # Auto-label button with AI icon
+
+                    with ai_col:
+                        # Auto-label button
                         st.write("") # Add space to align with selectbox
-                        if st.button(f"{self.const.ICONS['magic']}", key=f"auto_label_btn_{post_id}", help="Auto-label using AI"):
+                        if st.button(f"{self.const.ICONS['brain']}", key=f"auto_label_btn_{post_id}", help="Auto-label using AI"):
                             with st.spinner("Analyzing image..."):
                                 # Call backend method to set label using vision model
-                                result = self.backend.set_single_label(post_id)
+                                result = self.backend.set_single_post_label_by_model(post_id)
                                 if result and result.get("success"):
                                     st.success(f"Image labeled as: {result.get('label')}")
                                     st.rerun()
                                 else:
-                                    st.error(f"Failed to label image: {result.get('message', 'Unknown error')}")
-                    
+                                    error_msg = result.get('message', 'Unknown error') if result else 'Unknown error'
+                                    st.error(f"Failed to label image: {error_msg}")
+                                    # If the error is about model confidence, show a more user-friendly message
+                                    if "Model confidence too low" in error_msg:
+                                        st.info("The AI model wasn't confident enough to determine a label for this image.")
+
+                    with remove_col:
+                        # Remove label button
+                        st.write("") # Add space to align with selectbox
+                        if st.button(f"{self.const.ICONS['delete']}", key=f"remove_label_btn_{post_id}", help="Remove label"):
+                            if self.backend.remove_post_label(post_id):
+                                st.success("Label removed successfully")
+                                st.rerun()
+                            else:
+                                st.error("Failed to remove label")
+
                     # Handle label update when selection changes
                     if selected_label != current_label and selected_label != "-- Select --":
                         if hasattr(self.backend, 'set_label'):
                             try:
-                                label_success = self.backend.set_label(post_id, selected_label)
+                                label_success = self.backend.set_post_label(post_id, selected_label)
                                 if label_success:
                                     st.success(f"{self.const.ICONS['success']} Label updated")
                                     st.rerun()
@@ -1347,17 +1745,17 @@ class InstagramSection(BaseSection): #
                                 st.error(f"{self.const.ICONS['error']} Error saving label: {str(e)}")
                 except Exception as e:
                     st.error(f"Error loading labels: {str(e)}")
-                
+
                 # Custom label input field
                 label_input_col, label_btn_col = st.columns([3, 1])
                 with label_input_col:
                     new_label = st.text_input(
-                        "Add custom label", 
-                        key=f"detail_new_custom_label_{post_id}", 
-                        placeholder="Add custom label", 
+                        "Add custom label",
+                        key=f"detail_new_custom_label_{post_id}",
+                        placeholder="Add custom label",
                         label_visibility="collapsed"
                     )
-                
+
                 with label_btn_col:
                     if st.button(f"{self.const.ICONS['add']}", key=f"detail_add_label_btn_{post_id}", help="Add label", use_container_width=True):
                         new_label_stripped = new_label.strip()
@@ -1369,89 +1767,130 @@ class InstagramSection(BaseSection): #
                             st.warning("Label cannot be empty")
                         else:
                             st.warning(f"Label already exists")
-        
+
         with col2:
             # Post details - Caption
             st.write("")  # Add some spacing
             st.markdown('<div class="mini-header">Caption</div>', unsafe_allow_html=True)
             caption = post.get('caption', 'No caption available')
-            
+
             st.markdown(f'<div style="margin-bottom:20px;">{caption}</div>', unsafe_allow_html=True)
-            
-            # Additional metadata
+
+            # Admin Explanation section
             st.write("")  # Add some spacing
-            st.markdown('<div class="mini-header">Metadata</div>', unsafe_allow_html=True)
-            
-            # Get metadata from backend instead of directly from post
+
+            # Get existing admin explanation
             try:
-                metadata = self.backend.get_post_metadata(post_id)
-                
-                media_type = metadata.get('media_type', 'Unknown')
-                like_count = metadata.get('like_count', 0)
-                timestamp = metadata.get('timestamp', 'Unknown date')
-                
-                meta_html = "<div style='margin-top:10px;'>"
-                meta_html += f"<div><strong>Type:</strong> {media_type}</div>"
-                meta_html += f"<div><strong>Likes:</strong> {like_count}</div>"
-                meta_html += f"<div><strong>Posted:</strong> {timestamp}</div>"
-                meta_html += "</div>"
-                
-                st.markdown(meta_html, unsafe_allow_html=True)
+                current_explanation = self.backend.get_post_admin_explanation(post_id)
+
+                # Create a form for the admin explanation
+                with st.form(key=f"admin_explanation_form_{post_id}", border=False):
+                    # Text area for explanation
+                    explanation = st.text_area(
+                        "Explain",
+                        value=current_explanation if current_explanation else "",
+                        placeholder="Add an explanation for this post",
+                        key=f"admin_explanation_{post_id}"
+                    )
+
+                    # Buttons row
+                    exp_col1, exp_col2 = st.columns(2)
+
+                    with exp_col1:
+                        # Save button
+                        save_exp_button = st.form_submit_button(
+                            f"{self.const.ICONS['save']} Save Explanation",
+                            use_container_width=True
+                        )
+
+                    with exp_col2:
+                        # Remove button
+                        remove_exp_button = st.form_submit_button(
+                            f"{self.const.ICONS['delete']} Remove Explanation",
+                            type="secondary",
+                            use_container_width=True
+                        )
+
+                    if save_exp_button:
+                        if explanation.strip():
+                            try:
+                                success = self.backend.set_post_admin_explanation(post_id, explanation.strip())
+                                if success:
+                                    st.success(f"{self.const.ICONS['success']} Explanation saved!")
+                                    st.rerun()
+                                else:
+                                    st.error(f"{self.const.ICONS['error']} Failed to save explanation")
+                            except Exception as e:
+                                st.error(f"{self.const.ICONS['error']} Error saving explanation: {str(e)}")
+                        else:
+                            st.warning("Explanation cannot be empty")
+
+                    if remove_exp_button:
+                        try:
+                            success = self.backend.remove_post_admin_explanation(post_id)
+                            if success:
+                                st.success("Explanation removed")
+                                st.rerun()
+                            else:
+                                st.error("Failed to remove explanation")
+                        except Exception as e:
+                            st.error(f"Error removing explanation: {str(e)}")
+
             except Exception as e:
-                st.error(f"Error loading metadata: {str(e)}")
-            
+                st.error(f"Error loading admin explanation: {str(e)}")
+
             # Fixed response editing functionality (moved below metadata)
             st.write("")  # Add some spacing
             st.markdown('<div class="mini-header">Fixed Response</div>', unsafe_allow_html=True)
-            
+
             # Get existing fixed response using backend
             try:
-                fixed_response = self.backend.get_posts_fixed_response(post_id)
+                fixed_response = self.backend.get_post_fixed_response(post_id)
             except Exception as e:
                 fixed_response = None
                 st.error(f"Error loading fixed response: {str(e)}")
-                
+
             # Create tabs for existing and adding responses
             exist_tab, add_tab = st.tabs(["Existing", "Add New"])
-            
+
             with exist_tab:
                 if fixed_response and fixed_response.get("trigger_keyword"):
                     # Form for editing existing response
                     try:
                         with st.form(key=f"existing_response_form_{post_id}", border=False):
-                            
+
                             # Trigger keyword
                             trigger_keyword = st.text_input(
-                                "Trigger keyword", 
+                                "Trigger keyword",
                                 value=fixed_response.get("trigger_keyword", "")
                             )
-                            
+
                             # Comment response
                             comment_response = st.text_area(
-                                "Comment reply", 
+                                "Comment reply",
                                 value=fixed_response.get("comment_response_text", "")
                             )
-                            
+
                             # Direct message response
                             dm_response = st.text_area(
-                                "DM reply", 
+                                "DM reply",
                                 value=fixed_response.get("direct_response_text", "")
                             )
-                            
+
                             # Row for buttons
                             col1, col2 = st.columns(2)
                             with col1:
                                 # Submit button to save fixed response
                                 submit_button = st.form_submit_button(f"{self.const.ICONS['save']} Update", use_container_width=True)
-                            
+
                             with col2:
                                 # Delete button (this works differently in a form)
                                 delete_button = st.form_submit_button(
-                                    f"{self.const.ICONS['delete']} Remove", 
+                                    f"{self.const.ICONS['delete']} Remove",
                                     type="secondary",
                                     use_container_width=True
                                 )
-                            
+
                             if submit_button:
                                 # Handle fixed response update using backend
                                 try:
@@ -1469,7 +1908,7 @@ class InstagramSection(BaseSection): #
                                         st.error("Trigger keyword is required")
                                 except Exception as e:
                                     st.error(f"{self.const.ICONS['error']} Error updating: {str(e)}")
-                            
+
                             if delete_button:
                                 try:
                                     success = self.backend.delete_post_fixed_response(post_id)
@@ -1482,34 +1921,34 @@ class InstagramSection(BaseSection): #
                         st.error(f"Error loading form: {str(e)}")
                 else:
                     st.info("No fixed response exists for this post. Use the 'Add New' tab to create one.")
-            
+
             with add_tab:
                 # Form for adding new fixed response
                 try:
                     # Set up form
                     with st.form(key=f"new_response_form_{post_id}", border=False):
-                        
+
                         # Trigger keyword
                         new_trigger_keyword = st.text_input(
-                            "Trigger keyword", 
+                            "Trigger keyword",
                             placeholder="Enter words that will trigger this response"
                         )
-                        
+
                         # Comment response
                         new_comment_response = st.text_area(
-                            "Comment reply", 
+                            "Comment reply",
                             placeholder="Response to post when someone comments with trigger words"
                         )
-                        
+
                         # Direct message response
                         new_dm_response = st.text_area(
-                            "DM reply", 
+                            "DM reply",
                             placeholder="Response sent as DM when someone messages with trigger words"
                         )
-                        
+
                         # Submit button to save fixed response
                         new_submit_button = st.form_submit_button(f"{self.const.ICONS['add']} Create", use_container_width=True)
-                        
+
                         if new_submit_button:
                             # Handle adding new fixed response using backend
                             try:
@@ -1527,56 +1966,56 @@ class InstagramSection(BaseSection): #
                                     st.error("Trigger keyword is required")
                             except Exception as e:
                                 st.error(f"{self.const.ICONS['error']} Error creating: {str(e)}")
-                
+
                 except Exception as e:
                     st.error(f"Error loading form: {str(e)}")
 
 class UserManagementSection(BaseSection):
     """Handles admin user management functionality"""
-    
+
     def render(self):
         st.subheader(f"{self.const.ICONS['user']} Admin User Management")
-        
+
         # Create tabs for user management
         list_tab, add_tab, edit_tab = st.tabs(["Users List", "Add User", "Change Password"])
-        
+
         with list_tab:
             self._render_users_list()
-            
+
         with add_tab:
             self._render_add_user_form()
-            
+
         with edit_tab:
             self._render_change_password_form()
-        
+
         st.write("---")
-    
+
     def _render_users_list(self):
         """Display a list of all admin users"""
         try:
             users = self.backend.get_admin_users()
-            
+
             if not users:
                 st.info("No admin users found.")
                 return
-                
+
             # Create a table for users
             if users:
                 st.dataframe(users, use_container_width=True)
-                
+
                 # User actions
                 selected_user = st.selectbox(
                     "Select user for actions:",
                     options=[user['Username'] for user in users],
                     key="user_action_select"
                 )
-                
+
                 col1, col2 = st.columns(2)
-                
+
                 # Get the current status of the selected user
                 selected_user_data = next((user for user in users if user['Username'] == selected_user), None)
                 is_active = selected_user_data['Status'] == "Active" if selected_user_data else True
-                
+
                 with col1:
                     if st.button(
                         f"{self.const.ICONS['error'] if is_active else self.const.ICONS['success']} {'Deactivate' if is_active else 'Activate'} User",
@@ -1589,7 +2028,7 @@ class UserManagementSection(BaseSection):
                             st.rerun()
                         else:
                             st.error(f"Failed to update user status.")
-                
+
                 with col2:
                     if st.button(
                         f"{self.const.ICONS['delete']} Delete User",
@@ -1608,10 +2047,10 @@ class UserManagementSection(BaseSection):
                             else:
                                 st.error(f"Failed to delete user.")
                                 st.session_state.pop('confirm_delete', None)
-                
+
         except Exception as e:
             st.error(f"Error loading users: {str(e)}")
-    
+
     def _render_add_user_form(self):
         """Form to add a new admin user"""
         with st.form("add_user_form"):
@@ -1619,9 +2058,9 @@ class UserManagementSection(BaseSection):
             password = st.text_input("Password", type="password")
             confirm_password = st.text_input("Confirm Password", type="password")
             is_active = st.checkbox("Active", value=True)
-            
+
             submitted = st.form_submit_button(f"{self.const.ICONS['add']} Add User")
-            
+
             if submitted:
                 if not username or not password:
                     st.error("Username and password are required.")
@@ -1633,19 +2072,19 @@ class UserManagementSection(BaseSection):
                         st.success(f"User {username} created successfully!")
                     else:
                         st.error(f"Failed to create user. Username may already exist.")
-    
+
     def _render_change_password_form(self):
         """Form to change a user's password"""
         # Only show for the current logged-in user
         current_username = st.session_state.get('username')
-        
+
         with st.form("change_password_form"):
             current_password = st.text_input("Current Password", type="password")
             new_password = st.text_input("New Password", type="password")
             confirm_password = st.text_input("Confirm New Password", type="password")
-            
+
             submitted = st.form_submit_button(f"{self.const.ICONS['save']} Change Password")
-            
+
             if submitted:
                 if not current_password or not new_password:
                     st.error("All fields are required.")
@@ -1663,19 +2102,19 @@ class AdminUI:
     """Main application container"""
     def __init__(self):
         st.set_page_config(layout="wide", page_title="Admin Dashboard")
-        
+
         # Initialize session state variables for authentication
         if 'authenticated' not in st.session_state:
             st.session_state['authenticated'] = False
         if 'username' not in st.session_state:
             st.session_state['username'] = None
-            
+
         try:
             self.backend = Backend()
-            
+
             # Initialize the default admin user if needed
             self.backend.ensure_default_admin()
-            
+
             # Check for authentication token on startup
             self._check_auth_token()
         except NameError:
@@ -1718,7 +2157,7 @@ class AdminUI:
             "Instagram": InstagramSection(self.backend),
             "Monitoring": UserManagementSection(self.backend)
         }
-        
+
         # Initialize session state for the selected page if it doesn't exist
         if 'selected_page' not in st.session_state:
             st.session_state.selected_page = "Dashboard" # Default page
@@ -1728,7 +2167,7 @@ class AdminUI:
         if 'auth_token' in st.session_state:
             # For security reasons, prioritize session state over cookies
             return
-            
+
         auth_token = st.query_params.get('auth_token')
         if auth_token and len(auth_token) > 0:
             username = self.backend.verify_auth_token(auth_token)
@@ -1748,23 +2187,23 @@ class AdminUI:
                 if 'auth_token' not in st.query_params:
                     st.query_params['auth_token'] = st.session_state['auth_token']
             self._render_authenticated_ui()
-        
+
     def _render_login_page(self):
         """Display login page for unauthenticated users"""
         const = AppConstants()
-        
+
         st.title(f"{const.ICONS['login']} Admin Login")
-        
+
         # Center the login form
         col1, col2, col3 = st.columns([1, 2, 1])
-        
+
         with col2:
             with st.form("login_form"):
                 st.subheader("Please sign in")
                 username = st.text_input("Username", key="login_username")
                 password = st.text_input("Password", type="password", key="login_password")
                 submitted = st.form_submit_button("Login", use_container_width=True)
-                
+
                 if submitted:
                     if not username or not password:
                         st.error("Please enter both username and password.")
@@ -1773,22 +2212,22 @@ class AdminUI:
                         if self.backend.authenticate_admin(username, password):
                             # Create authentication token
                             auth_token = self.backend.create_auth_token(username)
-                            
+
                             # Store in session state
                             st.session_state['authenticated'] = True
                             st.session_state['username'] = username
                             st.session_state['auth_token'] = auth_token
-                            
+
                             # Set in query params for persistence
                             st.query_params['auth_token'] = auth_token
-                            
+
                             st.rerun()
                         else:
                             st.error("Invalid username or password.")
-                
+
             # Add a note about default credentials
             st.info("If this is your first time logging in, use the default credentials:\nUsername: admin\nPassword: admin123\n\nPlease change the password immediately after login.")
-    
+
     def _render_authenticated_ui(self):
         """Render the main UI for authenticated users"""
         # Add custom CSS for sidebar
@@ -1828,16 +2267,16 @@ class AdminUI:
         }
         </style>
         """, unsafe_allow_html=True)
-        
+
         # Add logout button to sidebar
         const = AppConstants()
-        
+
         # Use styled headers instead of built-in title
         st.sidebar.markdown('<div class="sidebar-header">Navigation</div>', unsafe_allow_html=True)
-        
+
         # Welcome message with styled text
         st.sidebar.markdown(f'<div class="sidebar-welcome">Welcome, {st.session_state["username"]}!</div>', unsafe_allow_html=True)
-        
+
         # Logout button with custom styling
         logout_col = st.sidebar.columns(1)[0]
         with logout_col:
@@ -1850,10 +2289,10 @@ class AdminUI:
                 # Clear query params
                 st.query_params.clear()
                 st.rerun()
-        
+
         # Add a visual divider
         st.sidebar.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
-        
+
         # Create radio buttons in the sidebar for section selection
         st.session_state.selected_page = st.sidebar.radio(
             "Navigation Menu",  # Provide descriptive label for accessibility
@@ -1874,4 +2313,4 @@ class AdminUI:
 
 if __name__ == "__main__":
     app = AdminUI()
-    app.render() 
+    app.render()

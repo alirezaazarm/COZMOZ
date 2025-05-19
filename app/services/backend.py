@@ -14,6 +14,7 @@ import io
 from ..models.additional_info import Additionalinfo
 from ..models.admin_user import AdminUser
 from ..models.story import Story
+from app.utils.helpers import  expand_triggers
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,6 @@ class Backend:
     # ------------------------------------------------------------------
     # Admin Authentication Methods
     # ------------------------------------------------------------------
-    
     def authenticate_admin(self, username, password):
         """Authenticate an admin user by username and password"""
         logger.info(f"Authenticating admin user: {username}")
@@ -44,7 +44,7 @@ class Backend:
         except Exception as e:
             logger.error(f"Error authenticating admin user: {str(e)}")
             return False
-    
+
     def create_auth_token(self, username):
         """Create a secure authentication token containing the username and expiration time"""
         logger.info(f"Creating auth token for user: {username}")
@@ -54,32 +54,32 @@ class Backend:
             import hashlib
             import base64
             import time
-            
+
             # Secret key for signing - in production this should be a proper secret
             secret = Config.VERIFY_TOKEN or "streamlit_admin_secret_key"
-            
+
             # Create token payload with username and expiration (7 days)
             expire_time = int(time.time()) + (7 * 24 * 60 * 60)
             token_data = {"username": username, "exp": expire_time}
-            
+
             # Serialize and sign the token
             token_string = json.dumps(token_data)
             token_bytes = token_string.encode('utf-8')
             token_b64 = base64.b64encode(token_bytes).decode('utf-8')
-            
+
             # Create signature
             signature = hmac.new(
                 secret.encode('utf-8'),
                 token_b64.encode('utf-8'),
                 hashlib.sha256
             ).hexdigest()
-            
+
             # Return the complete token
             return f"{token_b64}.{signature}"
         except Exception as e:
             logger.error(f"Error creating auth token: {str(e)}")
             return None
-    
+
     def verify_auth_token(self, token):
         """Verify the authentication token and extract the username if valid"""
         logger.info("Verifying auth token")
@@ -89,58 +89,58 @@ class Backend:
             import hashlib
             import base64
             import time
-            
+
             # Secret key for verification
             secret = Config.VERIFY_TOKEN or "streamlit_admin_secret_key"
-            
+
             # Split token into data and signature
             token_b64, signature = token.split('.')
-            
+
             # Verify signature
             expected_signature = hmac.new(
                 secret.encode('utf-8'),
                 token_b64.encode('utf-8'),
                 hashlib.sha256
             ).hexdigest()
-            
+
             if signature != expected_signature:
                 logger.warning("Token signature verification failed")
                 return None
-            
+
             # Decode and parse token data
             token_bytes = base64.b64decode(token_b64)
             token_data = json.loads(token_bytes.decode('utf-8'))
-            
+
             # Check expiration
             if token_data.get('exp', 0) < int(time.time()):
                 logger.warning("Token has expired")
                 return None
-            
+
             username = token_data.get('username')
-            
+
             # Verify that the user exists in the database
             user = AdminUser.get_by_username(username)
             if not user:
                 logger.warning(f"Token contains invalid username: {username}")
                 return None
-                
+
             if not user.get('is_active', False):
                 logger.warning(f"Token contains inactive user: {username}")
                 return None
-                
+
             logger.info(f"Token verified successfully for user: {username}")
             return username
-            
+
         except Exception as e:
             logger.error(f"Token verification error: {str(e)}")
             return None
-    
+
     def get_admin_users(self):
         """Get all admin users"""
         logger.info("Fetching all admin users")
         try:
             users = AdminUser.get_all()
-            
+
             # Format user data for display
             user_data = []
             for user in users:
@@ -148,13 +148,13 @@ class Backend:
                 is_active = user.get('is_active', False)
                 created_at = user.get('created_at', 'Unknown')
                 last_login = user.get('last_login', 'Never')
-                
+
                 # Format dates
                 if hasattr(created_at, 'strftime'):
                     created_at = created_at.strftime("%Y-%m-%d %H:%M")
                 if hasattr(last_login, 'strftime'):
                     last_login = last_login.strftime("%Y-%m-%d %H:%M")
-                
+
                 status = "Active" if is_active else "Inactive"
                 user_data.append({
                     "Username": username,
@@ -162,13 +162,13 @@ class Backend:
                     "Created": created_at,
                     "Last Login": last_login
                 })
-            
+
             logger.info(f"Successfully fetched {len(user_data)} admin users")
             return user_data
         except Exception as e:
             logger.error(f"Error fetching admin users: {str(e)}")
             return []
-    
+
     def create_admin_user(self, username, password, is_active=True):
         """Create a new admin user"""
         logger.info(f"Creating admin user: {username}")
@@ -183,7 +183,7 @@ class Backend:
         except Exception as e:
             logger.error(f"Error creating admin user: {str(e)}")
             return False
-    
+
     def update_admin_password(self, username, current_password, new_password):
         """Update an admin user's password"""
         logger.info(f"Updating password for admin user: {username}")
@@ -193,7 +193,7 @@ class Backend:
             if not user:
                 logger.warning(f"Password update failed: Current password is incorrect for user '{username}'")
                 return False
-            
+
             # Update password
             result = AdminUser.update_password(username, new_password)
             if result:
@@ -205,7 +205,7 @@ class Backend:
         except Exception as e:
             logger.error(f"Error updating admin user password: {str(e)}")
             return False
-    
+
     def update_admin_status(self, username, is_active):
         """Update an admin user's active status"""
         logger.info(f"Updating status for admin user: {username} to {'active' if is_active else 'inactive'}")
@@ -220,7 +220,7 @@ class Backend:
         except Exception as e:
             logger.error(f"Error updating admin user status: {str(e)}")
             return False
-    
+
     def delete_admin_user(self, username):
         """Delete an admin user"""
         logger.info(f"Deleting admin user: {username}")
@@ -235,7 +235,7 @@ class Backend:
         except Exception as e:
             logger.error(f"Error deleting admin user: {str(e)}")
             return False
-    
+
     def ensure_default_admin(self):
         """Ensure there is at least one active admin user"""
         logger.info("Checking for default admin user")
@@ -276,9 +276,9 @@ class Backend:
         except ValueError as e:
             logger.error(f"Invalid timestamp format: {updated_at}. Error: {str(e)}")
             return "Invalid timestamp"
-    
+
     # ------------------------------------------------------------------
-    # Appsetting to main app
+    # Appsetting  ---> main app
     # ------------------------------------------------------------------
     def app_settings_to_main(self):
         logger.info("Sending app settings to the main server.")
@@ -316,7 +316,7 @@ class Backend:
         except Exception as e:
             logger.error(f"Error in app_settings_to_main: {str(e)}")
             return {"error in app_settings_to_main calling": str(e)}
-    
+
     def get_app_setting(self, key):
         logger.info(f"Fetching app setting for key: {key}.")
         self.app_settings_to_main()
@@ -328,7 +328,7 @@ class Backend:
         except Exception as e:
             logger.error(f"Error in get_app_setting for key '{key}': {str(e)}")
             return {"error in get_app_setting calling": str(e)}
-        
+
     def update_is_active(self, key, value):
         logger.info(f"Updating app setting for key: {key} with value: {value}.")
         try:
@@ -339,14 +339,95 @@ class Backend:
             else:
                 logger.error(f"Failed to update app setting for key: {key}.")
             self.app_settings_to_main()
+            self.send_all_fixed_responses_to_main()
         except Exception as e:
             logger.error(f"Error in update_is_active for key '{key}': {str(e)}")
             return {"error in update_is_active": str(e)}
+    # ------------------------------------------------------------------
+    # Fixed responses ---> main app
+    # ------------------------------------------------------------------
+    def send_comment_fixed_responses_to_main(self, comment_fixed_responses):
+        """
+        Send the comment fixed responses dict to the main app to update in-memory cache.
+        The dict should be structured as:
+        {
+            "POST_ID_1": expand_triggers({
+                "trigger1": {"comment": "Reply text", "DM": "Direct message text"},
+                ...
+            }),
+            ...
+        }
+        Use expand_triggers to ensure all numeral variants are included for each trigger.
+        """
+        # Expand triggers for each post before sending
+        expanded_dict = {post_id: expand_triggers(triggers) for post_id, triggers in comment_fixed_responses.items()}
+        url = Config.BASE_URL + "/update/fixed-responses/comments"
+        logger.info(f"Sending comment fixed responses to {url}")
+        try:
+            response = requests.post(url, headers=self.headers, json=expanded_dict)
+            if response.status_code == 200:
+                logger.info("Comment fixed responses successfully sent to main app.")
+                return True
+            else:
+                logger.error(f"Failed to send comment fixed responses. Status: {response.status_code}, Response: {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Error sending comment fixed responses: {str(e)}")
+            return False
 
+    def send_story_fixed_responses_to_main(self, story_fixed_responses):
+        """
+        Send the story fixed responses dict to the main app to update in-memory cache.
+        The dict should be structured as:
+        {
+            "STORY_ID_1": {"trigger_keyword": "trigger", "direct_response_text": "DM text"},
+            ...
+        }
+        The trigger_keyword for each story will be expanded to include all numeral variants using expand_triggers.
+        """
+        # Expand trigger_keyword for each story before sending
+        expanded_dict = {}
+        for story_id, response in story_fixed_responses.items():
+            trigger = response.get('trigger_keyword')
+            if trigger:
+                # Expand the trigger to all numeral variants
+                for variant in expand_triggers({trigger: None}).keys():
+                    expanded_dict[story_id + '__' + variant] = {
+                        **response,
+                        'trigger_keyword': variant
+                    }
+            else:
+                expanded_dict[story_id] = response
+        url = Config.BASE_URL + "/update/fixed-responses/stories"
+        logger.info(f"Sending story fixed responses to {url}")
+        try:
+            response = requests.post(url, headers=self.headers, json=expanded_dict)
+            if response.status_code == 200:
+                logger.info("Story fixed responses successfully sent to main app.")
+                return True
+            else:
+                logger.error(f"Failed to send story fixed responses. Status: {response.status_code}, Response: {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Error sending story fixed responses: {str(e)}")
+            return False
+
+    def send_all_fixed_responses_to_main(self):
+        """
+        Fetch all fixed responses from posts and stories and send them to the main app.
+        Returns a dict summarizing the result.
+        """
+        logger.info("Fetching all fixed responses from posts and stories.")
+        post_fixed = Post.get_all_fixed_responses_structured()
+        story_fixed = Story.get_all_fixed_responses_structured()
+        logger.info(f"Found {len(post_fixed)} post fixed responses and {len(story_fixed)} story fixed responses.")
+        post_result = self.send_comment_fixed_responses_to_main(post_fixed)
+        story_result = self.send_story_fixed_responses_to_main(story_fixed)
+        logger.info(f"Post fixed responses sent: {post_result}, Story fixed responses sent: {story_result}")
+        return {"post_fixed_sent": post_result, "story_fixed_sent": story_result}
     # ------------------------------------------------------------------
     # Data : Product + additional info
     # ------------------------------------------------------------------
-
     def update_products(self):
         logger.info("Scraping the site is starting...")
         try:
@@ -360,7 +441,7 @@ class Backend:
             self.app_settings_to_main()
         except Exception as e:
             logger.error(f"Failed to send app settings: {e}")
-            
+
         return True
 
     def get_products(self):
@@ -434,7 +515,7 @@ class Backend:
 
             # delete file from openai if it has file_id
             if entries[0]['file_id']:
-                resp = self.openai_service.delete_single_file(entries[0]['file_id'])     
+                resp = self.openai_service.delete_single_file(entries[0]['file_id'])
                 if resp:
                     result = Additionalinfo.delete(str(entries[0]['_id']))
                     if result:
@@ -458,7 +539,7 @@ class Backend:
         except Exception as e:
             logger.error(f"Error deleting additional text entry '{key}': {str(e)}")
             return False
-        
+
     def rebuild_files_and_vs(self):
         try:
             clear_success = self.openai_service.rebuild_all()
@@ -471,475 +552,404 @@ class Backend:
         except Exception as e:
             logger.error(f"Error in update_additionalinfo_files_and_vs: {str(e)}")
             return False
-            
+
     # ------------------------------------------------------------------
-    # Instagram management : Posts + Stories
+    # Instagram management : Posts + Stories + vision
     # ------------------------------------------------------------------
-    #                     ---- vision ----
+    # --- Vision ---
+    def _process_media_for_labeling(self, item_id, media_url, thumbnail_url, item_type="post"):
+        """Helper to download and process an image for labeling."""
+        if not media_url and not thumbnail_url:
+            logger.warning(f"{item_type.capitalize()} ID {item_id} has no media URL or thumbnail URL.")
+            return None, "No image URL available"
 
-    def set_label(self, post_id, label):
-        """
-        Sets the label for a specific Instagram post identified by its Post ID.
-        Returns True if the post was found and the update was attempted, False otherwise.
-        """
-        logger.info(f"Setting label '{label}' for post ID: {post_id}.")
-        if not post_id:
-            logger.error("Cannot set label: post_id is missing or invalid.")
-            return False
-        try:
-            # Ensure label is a string, trim whitespace
-            label_to_set = str(label).strip() if label is not None else ""
-
-            success = Post.update(post_id, {"label": label_to_set})
-
-            if success:
-                logger.info(f"Label update attempted for post ID: {post_id}. Label set to '{label_to_set}'.")
-                return True
-            else:
-                logger.warning(f"Could not set label for post ID {post_id}. Post not found.")
-                return False
-        except Exception as e:
-            logger.error(f"Error setting label for post ID {post_id}: {str(e)}", exc_info=True)
-            return False
-
-    def set_labels_by_model(self):
-        """
-        Identifies unlabeled posts, downloads their images, uses img_search.process_image
-        to predict a label (product title), and updates the post's label if a prediction is found.
-        """
-        logger.info("Starting automatic labeling of posts by model.")
-        processed_count = 0
-        labeled_count = 0
-        errors = []
+        url_to_use = thumbnail_url if thumbnail_url else media_url
+        logger.info(f"Downloading image for {item_type} ID {item_id} from {url_to_use}")
 
         try:
-            # 1. Get all posts from the database
-            all_posts = Post.get_all()
-            if not all_posts:
-                logger.info("No posts found in the database.")
-                return {'success': True, 'processed': 0, 'labeled': 0, 'message': 'No posts found.'}
+            response = requests.get(url_to_use, stream=True, timeout=20)
+            response.raise_for_status()
+            image_bytes = response.content
+            if not image_bytes:
+                return None, "Downloaded image is empty"
 
-            # 2. Filter for posts that are unlabeled (label is missing, None, or empty string)
-            unlabeled_posts = [
-                post for post in all_posts
-                if not post.get('label')
-            ]
-            logger.info(f"Found {len(unlabeled_posts)} posts without labels.")
+            image_stream = io.BytesIO(image_bytes)
+            pil_image = Image.open(image_stream)
+            predicted_label = process_image(pil_image) # Assumes process_image returns label or None
 
-            if not unlabeled_posts:
-                 return {'success': True, 'processed': 0, 'labeled': 0, 'message': 'All posts are already labeled.'}
-
-            # 3. Iterate through unlabeled posts
-            for post in unlabeled_posts:
-                post_id = post.get('id') # Instagram's post ID
-                thumbnail_url = post.get('thumbnail_url')
-                media_url = post.get('media_url')
-                processed_count += 1
-
-                if not post_id:
-                    logger.warning(f"Skipping post due to missing 'id': MongoDB _id {post.get('_id', 'N/A')}")
-                    errors.append(f"Post missing Instagram ID: MongoDB _id {post.get('_id', 'N/A')}")
-                    continue
-
-                if not media_url:
-                    logger.warning(f"Skipping post ID {post_id} due to missing 'media_url'.")
-                    errors.append(f"Post ID {post_id} missing media_url.")
-                    continue
-
-                try:
-                    # 4. Download the image content
-                    logger.debug(f"Downloading image for post ID {post_id} from {media_url}")
-
-                    if thumbnail_url:
-                        response = requests.get(thumbnail_url, stream=True, timeout=20) # Increased timeout
-                        response.raise_for_status()
-                    else:
-                        response = requests.get(media_url, stream=True, timeout=20) # Increased timeout
-                        response.raise_for_status() # Check for HTTP errors
-
-                    image_bytes = response.content
-                    if not image_bytes:
-                        logger.warning(f"Downloaded image for post ID {post_id} is empty.")
-                        errors.append(f"Empty image downloaded for post ID {post_id}.")
-                        continue
-
-                    # 5. Process the image using the imported function
-                    logger.debug(f"Processing image for post ID {post_id}")
-                    # Assuming process_image takes image bytes and returns the top label string or None
-
-                    image_stream = io.BytesIO(image_bytes)
-                    pil_image = Image.open(image_stream)
-                    predicted_label = process_image(pil_image)
-
-                    # 6. If a label was predicted, update the post
-                    if predicted_label:
-                        logger.info(f"Post ID {post_id}: Model predicted label '{predicted_label}'. Setting label.")
-                        # Use the existing set_label method which handles DB update
-                        label_set_success = self.set_label(post_id, predicted_label)
-                        if label_set_success:
-                            labeled_count += 1
-                        else:
-                             # set_label logs warnings/errors internally
-                             errors.append(f"Failed to set label for post ID {post_id} after prediction '{predicted_label}'.")
-                    else:
-                        logger.info(f"Post ID {post_id}: Model did not return a confident label.")
-
-                except requests.exceptions.RequestException as e:
-                    logger.error(f"Failed to download image for post ID {post_id} from {media_url}: {e}")
-                    errors.append(f"Download failed for post ID {post_id}: {e}")
-                except Exception as e:
-                    # Catch errors from process_image or set_label
-                    logger.error(f"Error processing image or setting label for post ID {post_id}: {e}", exc_info=True)
-                    errors.append(f"Processing/SetLabel error for post ID {post_id}: {e}")
-
-            # 7. Construct and return the result summary
-            message = f"Processed {processed_count} unlabeled posts. Set labels for {labeled_count} posts."
-            success_status = not errors # Success is true only if there are no errors
-
-            if errors:
-                # Log first few errors for brevity in the message
-                error_summary = '; '.join(errors[:3]) + ('...' if len(errors) > 3 else '')
-                message += f" Encountered {len(errors)} errors. First few: {error_summary}"
-                logger.warning(f"Automatic labeling completed with {len(errors)} errors. Full list: {errors}")
-                return {'success': success_status, 'processed': processed_count, 'labeled': labeled_count, 'message': message, 'errors': errors}
-            else:
-                logger.info("Automatic labeling completed successfully.")
-                return {'success': success_status, 'processed': processed_count, 'labeled': labeled_count, 'message': message}
-
+            if not predicted_label:
+                logger.info(f"Vision model couldn't find a label for {item_type} ID {item_id}")
+                return None, "Model couldn't determine a label"
+            return predicted_label, None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to download image for {item_type} {item_id}: {str(e)}")
+            return None, f"Failed to download image: {str(e)}"
+        except Image.UnidentifiedImageError:
+            logger.error(f"Could not identify image for {item_type} {item_id} (not a valid image format or corrupted). URL: {url_to_use}")
+            return None, "Invalid image format or corrupted file."
         except Exception as e:
-            # Catch unexpected errors during the overall process (e.g., DB connection)
-            logger.error(f"An unexpected error occurred during set_labels_by_model: {e}", exc_info=True)
-            return {'success': False, 'processed': processed_count, 'labeled': labeled_count, 'message': f"An unexpected error occurred: {e}"}
+            logger.error(f"Error processing image for {item_type} {item_id}: {str(e)}")
+            return None, f"Error processing image: {str(e)}"
 
-    def download_posts_label(self):
-        """
-        Creates a JSON object with post labels as keys and lists of image URLs as values.
-        For each label, the value is a list of thumbnail_urls (or media_urls if thumbnail is None).
-        Returns a dictionary in the format: {"label1": ["url1", "url2"], "label2": ["url3", "url4"], ...}
-        """
-        logger.info("Preparing posts organized by labels")
-        try:
-            # Get all posts
-            posts = Post.get_all()
-            
-            if not posts:
-                logger.info("No posts found in database")
-                return {}
-                
-            # Initialize the result dictionary
-            labeled_posts = {}
-            
-            # Process each post
-            for post in posts:
-                # Get the label (or use "Unlabeled" if none exists)
-                label = post.get('label', '')
-                if not label:
-                    continue
-                    
-                # Get the image URL (preferring thumbnail if it exists)
-                image_url = post.get('thumbnail_url') or post.get('media_url')
-                
-                # Skip if no image URL
-                if not image_url:
-                    continue
-                    
-                # Add to the appropriate label list
-                if label not in labeled_posts:
-                    labeled_posts[label] = []
-                    
-                labeled_posts[label].append(image_url)
-            
-            logger.info(f"Successfully prepared posts by label, found {len(labeled_posts)} unique labels")
-            
-            # Log some stats about the data
-            for label, urls in labeled_posts.items():
-                logger.debug(f"Label '{label}' has {len(urls)} images")
-                
-            return labeled_posts
-            
-        except Exception as e:
-            logger.error(f"Error preparing posts by label: {str(e)}", exc_info=True)
-            return {"error": str(e)}
-
-    #                      ---- Post ----
-
+    # --- Post Methods ---
     def fetch_instagram_posts(self):
-        """
-        Fetch Instagram posts via InstagramService and store them in the DB.
-        Returns True if successful, False otherwise.
-        """
         logger.info("Fetching Instagram posts.")
         try:
             result = InstagramService.get_posts()
-            if result:
-                logger.info("Instagram posts fetched successfully.")
-            else:
-                logger.warning("Failed to fetch Instagram posts.")
+            if result: logger.info("Instagram posts fetched/updated successfully.")
+            else: logger.warning("Failed to fetch/update Instagram posts.")
             return result
-        except Exception as e:
-            logger.error(f"Failed to fetch Instagram posts: {str(e)}", exc_info=True)
-            return False
+        except Exception as e: logger.error(f"Failed to fetch Instagram posts: {str(e)}", exc_info=True); return False
 
     def get_posts(self):
-        """
-        Retrieves stored Instagram posts, returning their media_url and caption.
-        """
         logger.info("Fetching stored Instagram posts.")
         try:
-            # Use the MongoDB InstagramPost model directly
             posts = Post.get_all()
-
-            # Extract required fields
             post_data = [
-                {
-                    "id": post.get('id'),  # Include the Instagram ID for labeling
-                    "media_url": post.get('media_url'),
-                    "thumbnail_url": post.get('thumbnail_url'),
-                    "caption": post.get('caption'),
-                    "label": post.get('label', ''),
-                }
-                for post in posts if post.get('media_url')  # Ensure media_url exists
+                {"id": post.get('id'), "media_url": post.get('media_url'), "thumbnail_url": post.get('thumbnail_url'),
+                 "caption": post.get('caption'), "label": post.get('label', ''), "media_type": post.get('media_type')}
+                for post in posts if post.get('id') # Ensure id exists
             ]
-
             logger.info(f"Successfully fetched {len(post_data)} Instagram posts.")
             return post_data
-        except Exception as e:
-            logger.error(f"Error fetching stored Instagram posts: {str(e)}", exc_info=True)
-            return []  # Return empty list on error
+        except Exception as e: logger.error(f"Error fetching stored Instagram posts: {str(e)}", exc_info=True); return []
 
-    def get_posts_fixed_response(self, post_id):
-        """
-        Get fixed response for a post by its ID.
-        Returns the fixed response object if found, None otherwise.
-        """
+    def set_post_label(self, post_id, label):
+        logger.info(f"Setting label '{label}' for post ID: {post_id}.")
+        if not post_id: logger.error("Cannot set post label: post_id is missing."); return False
+        try:
+            success = Post.set_label(post_id, label)
+            if success: logger.info(f"Label update successful for post ID: {post_id}."); return True
+            else: logger.warning(f"Could not set label for post ID {post_id}."); return False
+        except Exception as e: logger.error(f"Error setting label for post ID {post_id}: {str(e)}", exc_info=True); return False
+
+    def remove_post_label(self, post_id):
+        logger.info(f"Removing label for post ID: {post_id}.")
+        if not post_id: logger.error("Cannot remove post label: post_id is missing."); return False
+        try:
+            success = Post.remove_label(post_id) # This sets label to ""
+            if success: logger.info(f"Label removed for post ID: {post_id}."); return True
+            else: logger.warning(f"Could not remove label for post ID {post_id}."); return False
+        except Exception as e: logger.error(f"Error removing label for post ID {post_id}: {str(e)}", exc_info=True); return False
+
+    def unset_all_post_labels(self):
+        logger.info("Unsetting labels from all posts.")
+        try:
+            updated_count = Post.unset_all_labels()
+            logger.info(f"Successfully unset labels from {updated_count} posts.")
+            return updated_count
+        except Exception as e: logger.error(f"Error unsetting all post labels: {str(e)}", exc_info=True); return 0
+
+    def set_single_post_label_by_model(self, post_id):
+        logger.info(f"Processing post ID {post_id} for automatic labeling.")
+        try:
+            post = Post.get_by_instagram_id(post_id)
+            if not post:
+                logger.warning(f"Post with ID {post_id} not found."); return {"success": False, "message": "Post not found"}
+
+            predicted_label, error_msg = self._process_media_for_labeling(post_id, post.get('media_url'), post.get('thumbnail_url'), "post")
+            if error_msg:
+                return {"success": False, "message": error_msg}
+
+            if predicted_label:
+                label_set_success = self.set_post_label(post_id, predicted_label)
+                if label_set_success:
+                    logger.info(f"Post ID {post_id} automatically labeled as '{predicted_label}'")
+                    return {"success": True, "label": predicted_label}
+                else:
+                    return {"success": False, "message": "Failed to set label in database"}
+            return {"success": False, "message": "Model couldn't determine a label"} # Should be caught by _process_media_for_labeling
+
+        except Exception as e:
+            logger.error(f"Error in set_single_post_label_by_model for post ID {post_id}: {str(e)}", exc_info=True)
+            return {"success": False, "message": f"Unexpected error: {str(e)}"}
+
+    def set_post_labels_by_model(self):
+        logger.info("Starting automatic labeling of posts by model.")
+        processed_count, labeled_count, errors = 0, 0, []
+        all_posts = Post.get_all()
+        if not all_posts:
+            return {'success': True, 'processed': 0, 'labeled': 0, 'message': 'No posts found.'}
+
+        unlabeled_posts = [p for p in all_posts if not p.get('label')]
+        logger.info(f"Found {len(unlabeled_posts)} posts without labels.")
+        if not unlabeled_posts:
+            return {'success': True, 'processed': 0, 'labeled': 0, 'message': 'All posts are already labeled.'}
+
+        for post in unlabeled_posts:
+            post_id = post.get('id')
+            processed_count += 1
+            if not post_id: errors.append(f"Post missing Instagram ID: MongoDB _id {post.get('_id', 'N/A')}"); continue
+
+            predicted_label, error_msg = self._process_media_for_labeling(post_id, post.get('media_url'), post.get('thumbnail_url'), "post")
+            if error_msg:
+                errors.append(f"Post ID {post_id}: {error_msg}"); continue
+
+            if predicted_label:
+                if self.set_post_label(post_id, predicted_label): labeled_count += 1
+                else: errors.append(f"Failed to set label for post ID {post_id} after prediction '{predicted_label}'.")
+
+        message = f"Processed {processed_count} unlabeled posts. Set labels for {labeled_count} posts."
+        if errors: message += f" Encountered {len(errors)} errors. First few: {'; '.join(errors[:3])}"
+        logger.info(message)
+        return {'success': not errors, 'processed': processed_count, 'labeled': labeled_count, 'message': message, 'errors': errors}
+
+    def download_post_labels(self):
+        logger.info("Preparing posts organized by labels for download.")
+        try:
+            posts = Post.get_all()
+            if not posts: return {}
+            labeled_posts = {}
+            for post in posts:
+                label = post.get('label', '').strip()
+                if not label: continue # Skip unlabeled or empty-label posts
+                image_url = post.get('thumbnail_url') or post.get('media_url')
+                if not image_url: continue
+                if label not in labeled_posts: labeled_posts[label] = []
+                labeled_posts[label].append(image_url)
+            logger.info(f"Successfully prepared posts by label, found {len(labeled_posts)} unique labels.")
+            return labeled_posts
+        except Exception as e: logger.error(f"Error preparing post labels for download: {str(e)}", exc_info=True); return {"error": str(e)}
+
+    def get_post_fixed_response(self, post_id):
         logger.info(f"Fetching fixed response for post ID: {post_id}")
         try:
-            post = Post.get_by_instagram_id(post_id)
-            if post and post.get('fixed_response'):
-                logger.info(f"Fixed response found for post ID: {post_id}")
-                return post['fixed_response']
-            else:
-                logger.info(f"No fixed response found for post ID: {post_id}")
-                return None
-        except Exception as e:
-            logger.error(f"Error fetching fixed response for post ID {post_id}: {str(e)}")
-            return None
-    
+            response = Post.get_fixed_response(post_id) # Use the model method
+            if response: logger.info(f"Fixed response found for post ID: {post_id}"); return response
+            else: logger.info(f"No fixed response found for post ID: {post_id}"); return None
+        except Exception as e: logger.error(f"Error fetching fixed response for post ID {post_id}: {str(e)}"); return None
+
     def create_or_update_post_fixed_response(self, post_id, trigger_keyword, comment_response_text=None, direct_response_text=None):
-        """
-        Create or update a fixed response for a post.
-        Returns True if successful, False otherwise.
-        """
         logger.info(f"Creating/updating fixed response for post ID: {post_id}")
         try:
-            result = Post.set_fixed_response(
-                post_id=post_id,
-                trigger_keyword=trigger_keyword,
-                comment_response_text=comment_response_text,
-                direct_response_text=direct_response_text
-            )
-            if result:
-                logger.info(f"Fixed response created/updated successfully for post ID: {post_id}")
-                return True
-            else:
-                logger.warning(f"Failed to create/update fixed response for post ID: {post_id}")
-                return False
-        except Exception as e:
-            logger.error(f"Error creating/updating fixed response for post ID {post_id}: {str(e)}")
-            return False
-    
+            # Use the model method
+            result = Post.set_fixed_response(post_id, trigger_keyword, comment_response_text, direct_response_text)
+            if result: logger.info(f"Fixed response C/U successful for post ID: {post_id}"); return True
+            else: logger.warning(f"Failed to C/U fixed response for post ID: {post_id}"); return False
+        except Exception as e: logger.error(f"Error C/U fixed response for post ID {post_id}: {str(e)}"); return False
+
     def delete_post_fixed_response(self, post_id):
-        """
-        Delete a fixed response for a post by its ID.
-        Returns True if successful, False otherwise.
-        """
         logger.info(f"Deleting fixed response for post ID: {post_id}")
         try:
-            result = Post.remove_fixed_response(post_id)
-            if result:
-                logger.info(f"Fixed response deleted successfully for post ID: {post_id}")
-                return True
-            else:
-                logger.warning(f"Failed to delete fixed response for post ID: {post_id}")
-                return False
-        except Exception as e:
-            logger.error(f"Error deleting fixed response for post ID {post_id}: {str(e)}")
-            return False
+            result = Post.delete_fixed_response(post_id) # Use the model method
+            if result: logger.info(f"Fixed response deleted successfully for post ID: {post_id}"); return True
+            else: logger.warning(f"Failed to delete fixed response for post ID: {post_id}"); return False
+        except Exception as e: logger.error(f"Error deleting fixed response for post ID {post_id}: {str(e)}"); return False
 
-    def get_post_metadata(self, post_id):
-        """
-        Get metadata for a specific post.
-        Returns a dictionary with media_type, like_count, and timestamp.
-        """
-        logger.info(f"Fetching metadata for post ID: {post_id}")
+    def set_post_admin_explanation(self, post_id, explanation):
+        logger.info(f"Setting admin explanation for post ID: {post_id}")
         try:
-            # Use the specialized method to get post by Instagram ID
-            post = Post.get_by_instagram_id(post_id)
-            
-            if post:
-                metadata = {
-                    "media_type": post.get('media_type', 'Unknown'),
-                    "like_count": post.get('like_count', 0),
-                    "timestamp": post.get('timestamp', 'Unknown date')
-                }
-                logger.info(f"Metadata retrieved for post ID: {post_id}")
-                return metadata
-            else:
-                logger.warning(f"Post with ID {post_id} not found for metadata retrieval")
-                return {
-                    "media_type": 'Unknown',
-                    "like_count": 0,
-                    "timestamp": 'Unknown date'
-                }
-        except Exception as e:
-            logger.error(f"Error retrieving metadata for post ID {post_id}: {str(e)}")
-            return {
-                "media_type": 'Error',
-                "like_count": 0,
-                "timestamp": 'Error retrieving data'
-            }
+            result = Post.set_admin_explanation(post_id, explanation) # Use the model method
+            if result: logger.info(f"Admin explanation set for post ID: {post_id}"); return True
+            else: logger.warning(f"Failed to set admin explanation for post ID: {post_id}"); return False
+        except Exception as e: logger.error(f"Error setting admin explanation for post ID {post_id}: {str(e)}"); return False
 
-    #                       ---- Story ----
-   
+    def get_post_admin_explanation(self, post_id):
+        logger.info(f"Fetching admin explanation for post ID: {post_id}")
+        try:
+            explanation = Post.get_admin_explanation(post_id) # Use the model method
+            if explanation is not None: logger.info(f"Admin explanation found for post ID: {post_id}"); return explanation
+            else: logger.info(f"No admin explanation for post ID: {post_id}"); return None # Distinguish empty from not found
+        except Exception as e: logger.error(f"Error fetching admin explanation for post ID {post_id}: {str(e)}"); return None
+
+    def remove_post_admin_explanation(self, post_id):
+        logger.info(f"Removing admin explanation for post ID: {post_id}")
+        try:
+            result = Post.remove_admin_explanation(post_id) # Use the model method
+            if result: logger.info(f"Admin explanation removed for post ID: {post_id}"); return True
+            else: logger.warning(f"Failed to remove admin explanation for post ID: {post_id}"); return False
+        except Exception as e: logger.error(f"Error removing admin explanation for post ID {post_id}: {str(e)}"); return False
+
+    # --- Story Methods (Paired with Post Methods) ---
     def fetch_instagram_stories(self):
-        """
-        Fetch Instagram stories via InstagramService and store them in the DB.
-        Returns True if successful, False otherwise.
-        """
         logger.info("Fetching Instagram stories.")
         try:
+            # InstagramService.get_stories should ideally call Story.create_or_update_from_instagram
             result = InstagramService.get_stories()
-            if result:
-                logger.info("Instagram stories fetched successfully.")
-            else:
-                logger.warning("Failed to fetch Instagram stories.")
+            if result: logger.info("Instagram stories fetched/updated successfully.")
+            else: logger.warning("Failed to fetch/update Instagram stories.")
             return result
-        except Exception as e:
-            logger.error(f"Failed to fetch Instagram stories: {str(e)}", exc_info=True)
-            return False
+        except Exception as e: logger.error(f"Failed to fetch Instagram stories: {str(e)}", exc_info=True); return False
 
     def get_stories(self):
-        """
-        Retrieves stored Instagram stories, returning their media_url and caption.
-        """
         logger.info("Fetching stored Instagram stories.")
         try:
-            # Use the MongoDB Story model directly
-            stories = Story.get_all()
-
-            # Extract required fields
+            stories = Story.get_all() # Fetches from DB
             story_data = [
-                {
-                    "id": story.get('id'),  # Include the Instagram ID for labeling
-                    "media_url": story.get('media_url'),
-                    "thumbnail_url": story.get('thumbnail_url'),
-                    "caption": story.get('caption'),
-                }
-                for story in stories if story.get('media_url')  # Ensure media_url exists
+                {"id": story.get('id'), "media_url": story.get('media_url'), "thumbnail_url": story.get('thumbnail_url'),
+                 "caption": story.get('caption'), "label": story.get('label', ''), "media_type": story.get('media_type')}
+                for story in stories if story.get('id') # Ensure id exists
             ]
-
-            logger.info(f"Successfully fetched {len(story_data)} Instagram stories.")
+            logger.info(f"Successfully fetched {len(story_data)} Instagram stories from DB.")
             return story_data
+        except Exception as e: logger.error(f"Error fetching stored Instagram stories: {str(e)}", exc_info=True); return []
+
+    def set_story_label(self, story_id, label):
+        logger.info(f"Setting label '{label}' for story ID: {story_id}.")
+        if not story_id: logger.error("Cannot set story label: story_id is missing."); return False
+        try:
+            success = Story.set_label(story_id, label)
+            if success: logger.info(f"Label update successful for story ID: {story_id}."); return True
+            else: logger.warning(f"Could not set label for story ID {story_id}."); return False
+        except Exception as e: logger.error(f"Error setting label for story ID {story_id}: {str(e)}", exc_info=True); return False
+
+    def remove_story_label(self, story_id):
+        logger.info(f"Removing label for story ID: {story_id}.")
+        if not story_id: logger.error("Cannot remove story label: story_id is missing."); return False
+        try:
+            success = Story.remove_label(story_id)
+            if success: logger.info(f"Label removed for story ID: {story_id}."); return True
+            else: logger.warning(f"Could not remove label for story ID {story_id}."); return False
+        except Exception as e: logger.error(f"Error removing label for story ID {story_id}: {str(e)}", exc_info=True); return False
+
+    def unset_all_story_labels(self):
+        logger.info("Unsetting labels from all stories.")
+        try:
+            updated_count = Story.unset_all_labels()
+            logger.info(f"Successfully unset labels from {updated_count} stories.")
+            return updated_count
+        except Exception as e: logger.error(f"Error unsetting all story labels: {str(e)}", exc_info=True); return 0
+
+    def set_single_story_label_by_model(self, story_id):
+        logger.info(f"Processing story ID {story_id} for automatic labeling.")
+        try:
+            story = Story.get_by_instagram_id(story_id)
+            if not story:
+                logger.warning(f"Story with ID {story_id} not found."); return {"success": False, "message": "Story not found"}
+
+            # Stories can be videos. process_image expects an image.
+            # Simplified: only attempt if media_type is IMAGE or if thumbnail_url exists.
+            media_type = story.get('media_type', '').upper()
+            media_url = story.get('media_url')
+            thumbnail_url = story.get('thumbnail_url')
+
+            if media_type == 'VIDEO' and not thumbnail_url:
+                logger.info(f"Story ID {story_id} is a video without a thumbnail. Skipping AI labeling.")
+                return {"success": False, "message": "Cannot label video without thumbnail."}
+
+            predicted_label, error_msg = self._process_media_for_labeling(story_id, media_url, thumbnail_url, "story")
+            if error_msg:
+                return {"success": False, "message": error_msg}
+
+            if predicted_label:
+                label_set_success = self.set_story_label(story_id, predicted_label)
+                if label_set_success:
+                    logger.info(f"Story ID {story_id} automatically labeled as '{predicted_label}'")
+                    return {"success": True, "label": predicted_label}
+                else:
+                    return {"success": False, "message": "Failed to set label in database"}
+            return {"success": False, "message": "Model couldn't determine a label"}
+
         except Exception as e:
-            logger.error(f"Error fetching stored Instagram stories: {str(e)}", exc_info=True)
-            return []  # Return empty list on error
+            logger.error(f"Error in set_single_story_label_by_model for story ID {story_id}: {str(e)}", exc_info=True)
+            return {"success": False, "message": f"Unexpected error: {str(e)}"}
+
+    def set_story_labels_by_model(self):
+        logger.info("Starting automatic labeling of stories by model.")
+        processed_count, labeled_count, errors = 0, 0, []
+        all_stories = Story.get_all()
+        if not all_stories:
+            return {'success': True, 'processed': 0, 'labeled': 0, 'message': 'No stories found.'}
+
+        unlabeled_stories = [s for s in all_stories if not s.get('label')]
+        logger.info(f"Found {len(unlabeled_stories)} stories without labels.")
+        if not unlabeled_stories:
+            return {'success': True, 'processed': 0, 'labeled': 0, 'message': 'All stories are already labeled.'}
+
+        for story in unlabeled_stories:
+            story_id = story.get('id')
+            processed_count += 1
+            if not story_id: errors.append(f"Story missing Instagram ID: MongoDB _id {story.get('_id', 'N/A')}"); continue
+
+            media_type = story.get('media_type', '').upper()
+            media_url = story.get('media_url')
+            thumbnail_url = story.get('thumbnail_url')
+
+            if media_type == 'VIDEO' and not thumbnail_url:
+                errors.append(f"Story ID {story_id}: Cannot label video without thumbnail."); continue
+
+            predicted_label, error_msg = self._process_media_for_labeling(story_id, media_url, thumbnail_url, "story")
+            if error_msg:
+                errors.append(f"Story ID {story_id}: {error_msg}"); continue
+
+            if predicted_label:
+                if self.set_story_label(story_id, predicted_label): labeled_count += 1
+                else: errors.append(f"Failed to set label for story ID {story_id} after prediction '{predicted_label}'.")
+
+        message = f"Processed {processed_count} unlabeled stories. Set labels for {labeled_count} stories."
+        if errors: message += f" Encountered {len(errors)} errors. First few: {'; '.join(errors[:3])}"
+        logger.info(message)
+        return {'success': not errors, 'processed': processed_count, 'labeled': labeled_count, 'message': message, 'errors': errors}
+
+    def download_story_labels(self):
+        logger.info("Preparing stories organized by labels for download.")
+        try:
+            stories = Story.get_all()
+            if not stories: return {}
+            labeled_stories = {}
+            for story in stories:
+                label = story.get('label', '').strip()
+                if not label: continue
+                image_url = story.get('thumbnail_url') or story.get('media_url') # Prefer thumbnail
+                if not image_url: continue
+                if label not in labeled_stories: labeled_stories[label] = []
+                labeled_stories[label].append(image_url)
+            logger.info(f"Successfully prepared stories by label, found {len(labeled_stories)} unique labels.")
+            return labeled_stories
+        except Exception as e: logger.error(f"Error preparing story labels for download: {str(e)}", exc_info=True); return {"error": str(e)}
 
     def get_story_fixed_response(self, story_id):
-        """
-        Get fixed response for a story by its ID.
-        Returns the fixed response object if found, None otherwise.
-        """
         logger.info(f"Fetching fixed response for story ID: {story_id}")
         try:
-            # Use the Story model's method to get fixed response by story ID
-            fixed_response = Story.get_fixed_response_by_story(story_id)
-            if fixed_response:
-                logger.info(f"Fixed response found for story ID: {story_id}")
-                return fixed_response
-            else:
-                logger.info(f"No fixed response found for story ID: {story_id}")
-                return None
-        except Exception as e:
-            logger.error(f"Error fetching fixed response for story ID {story_id}: {str(e)}")
-            return None
-    
+            response = Story.get_fixed_response(story_id) # Use the model method
+            if response: logger.info(f"Fixed response found for story ID: {story_id}"); return response
+            else: logger.info(f"No fixed response found for story ID: {story_id}"); return None
+        except Exception as e: logger.error(f"Error fetching fixed response for story ID {story_id}: {str(e)}"); return None
+
     def create_or_update_story_fixed_response(self, story_id, trigger_keyword, direct_response_text=None):
-        """
-        Create or update a fixed response for a story.
-        Returns True if successful, False otherwise.
-        """
         logger.info(f"Creating/updating fixed response for story ID: {story_id}")
         try:
-            result = Story.create_or_update_fixed_response(
-                story_id=story_id,
-                trigger_keyword=trigger_keyword,
-                direct_response_text=direct_response_text
-            )
-            if result:
-                logger.info(f"Fixed response created/updated successfully for story ID: {story_id}")
-                return True
-            else:
-                logger.warning(f"Failed to create/update fixed response for story ID: {story_id}")
-                return False
-        except Exception as e:
-            logger.error(f"Error creating/updating fixed response for story ID {story_id}: {str(e)}")
-            return False
-    
+            # Use the model method. Note: No comment_response_text for stories.
+            result = Story.set_fixed_response(story_id, trigger_keyword, direct_response_text)
+            if result: logger.info(f"Fixed response C/U successful for story ID: {story_id}"); return True
+            else: logger.warning(f"Failed to C/U fixed response for story ID: {story_id}"); return False
+        except Exception as e: logger.error(f"Error C/U fixed response for story ID {story_id}: {str(e)}"); return False
+
     def delete_story_fixed_response(self, story_id):
-        """
-        Delete a fixed response for a story by its ID.
-        Returns True if successful, False otherwise.
-        """
         logger.info(f"Deleting fixed response for story ID: {story_id}")
         try:
-            result = Story.delete_fixed_response_by_story(story_id)
-            if result:
-                logger.info(f"Fixed response deleted successfully for story ID: {story_id}")
-                return True
-            else:
-                logger.warning(f"Failed to delete fixed response for story ID: {story_id}")
-                return False
-        except Exception as e:
-            logger.error(f"Error deleting fixed response for story ID {story_id}: {str(e)}")
-            return False
+            result = Story.delete_fixed_response(story_id) # Use the model method
+            if result: logger.info(f"Fixed response deleted successfully for story ID: {story_id}"); return True
+            else: logger.warning(f"Failed to delete fixed response for story ID: {story_id}"); return False
+        except Exception as e: logger.error(f"Error deleting fixed response for story ID {story_id}: {str(e)}"); return False
 
-    def get_story_metadata(self, story_id):
-        """
-        Get metadata for a specific story.
-        Returns a dictionary with media_type, like_count, and timestamp.
-        """
-        logger.info(f"Fetching metadata for story ID: {story_id}")
+    def set_story_admin_explanation(self, story_id, explanation):
+        logger.info(f"Setting admin explanation for story ID: {story_id}")
         try:
-            stories = Story.get_all()
-            story = next((s for s in stories if s.get('id') == story_id), None)
-            
-            if story:
-                metadata = {
-                    "media_type": story.get('media_type', 'Unknown'),
-                    "like_count": story.get('like_count', 0),
-                    "timestamp": story.get('timestamp', 'Unknown date')
-                }
-                logger.info(f"Metadata retrieved for story ID: {story_id}")
-                return metadata
-            else:
-                logger.warning(f"Story with ID {story_id} not found for metadata retrieval")
-                return {
-                    "media_type": 'Unknown',
-                    "like_count": 0,
-                    "timestamp": 'Unknown date'
-                }
-        except Exception as e:
-            logger.error(f"Error retrieving metadata for story ID {story_id}: {str(e)}")
-            return {
-                "media_type": 'Error',
-                "like_count": 0,
-                "timestamp": 'Error retrieving data'
-            }
+            result = Story.set_admin_explanation(story_id, explanation) # Use the model method
+            if result: logger.info(f"Admin explanation set for story ID: {story_id}"); return True
+            else: logger.warning(f"Failed to set admin explanation for story ID: {story_id}"); return False
+        except Exception as e: logger.error(f"Error setting admin explanation for story ID {story_id}: {str(e)}"); return False
+
+    def get_story_admin_explanation(self, story_id):
+        logger.info(f"Fetching admin explanation for story ID: {story_id}")
+        try:
+            explanation = Story.get_admin_explanation(story_id) # Use the model method
+            if explanation is not None: logger.info(f"Admin explanation found for story ID: {story_id}"); return explanation
+            else: logger.info(f"No admin explanation for story ID: {story_id}"); return None
+        except Exception as e: logger.error(f"Error fetching admin explanation for story ID {story_id}: {str(e)}"); return None
+
+    def remove_story_admin_explanation(self, story_id):
+        logger.info(f"Removing admin explanation for story ID: {story_id}")
+        try:
+            result = Story.remove_admin_explanation(story_id) # Use the model method
+            if result: logger.info(f"Admin explanation removed for story ID: {story_id}"); return True
+            else: logger.warning(f"Failed to remove admin explanation for story ID: {story_id}"); return False
+        except Exception as e: logger.error(f"Error removing admin explanation for story ID {story_id}: {str(e)}"); return False
 
     # ------------------------------------------------------------------
     # Openai management
     # ------------------------------------------------------------------
-
     def get_vs_id(self):
         """Get the store IDs from the database."""
         logger.info("Fetching current vector store ID.")
@@ -1071,7 +1081,7 @@ class Backend:
         except Exception as e:
             logger.error(f"Failed to send message to thread {thread_id}: {str(e)}", exc_info=True)
             raise
-    
+
     def process_uploaded_image(self, image_bytes):
             """
             Processes image bytes using PIL, calls img_search.process_image, and returns the result.
@@ -1098,76 +1108,4 @@ class Backend:
                 logger.error(f"Error processing uploaded image in backend: {str(e)}", exc_info=True)
                 # Return a generic error message to the UI
                 return f"Error: An unexpected error occurred while processing the image."
-
-    # ------------------------------------------------------------------
-    # Fixed response methods for post detail view
-    # ------------------------------------------------------------------
-    
-
-    def set_single_label(self, post_id):
-        """
-        Processes a single post image using the vision model and sets its label.
-        Returns the predicted label if successful, or an error message.
-        """
-        logger.info(f"Processing post ID {post_id} for automatic labeling.")
-        try:
-            # Get the post by its ID
-            post = Post.get_by_instagram_id(post_id)
-            if not post:
-                logger.warning(f"Post with ID {post_id} not found.")
-                return {"success": False, "message": "Post not found"}
-            
-            # Check if media URL exists
-            media_url = post.get('media_url')
-            thumbnail_url = post.get('thumbnail_url')
-            
-            if not media_url and not thumbnail_url:
-                logger.warning(f"Post ID {post_id} has no media URL or thumbnail URL.")
-                return {"success": False, "message": "No image URL available"}
-            
-            # Try to download the image (prefer thumbnail if available)
-            try:
-                url_to_use = thumbnail_url if thumbnail_url else media_url
-                logger.info(f"Downloading image for post ID {post_id} from {url_to_use}")
-                
-                response = requests.get(url_to_use, stream=True, timeout=20)
-                response.raise_for_status()
-                
-                image_bytes = response.content
-                if not image_bytes:
-                    return {"success": False, "message": "Downloaded image is empty"}
-                
-                # Process the image
-                image_stream = io.BytesIO(image_bytes)
-                pil_image = Image.open(image_stream)
-                predicted_label = process_image(pil_image)
-                
-                if not predicted_label or predicted_label == "Not certain":
-                    logger.info(f"Model couldn't find a confident label for post ID {post_id}")
-                    return {"success": False, "message": "Model couldn't determine a label with confidence"}
-                
-                # Extract just the label part after the confidence score (format is "0.8==>Label")
-                if "==>" in predicted_label:
-                    confidence, label = predicted_label.split("==>")
-                    predicted_label = label
-                
-                # Set the label
-                label_set_success = self.set_label(post_id, predicted_label)
-                
-                if label_set_success:
-                    logger.info(f"Post ID {post_id} automatically labeled as '{predicted_label}'")
-                    return {"success": True, "label": predicted_label}
-                else:
-                    return {"success": False, "message": "Failed to set label in database"}
-                
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Failed to download image: {str(e)}")
-                return {"success": False, "message": f"Failed to download image: {str(e)}"}
-            
-        except Exception as e:
-            logger.error(f"Error in set_single_label for post ID {post_id}: {str(e)}", exc_info=True)
-            return {"success": False, "message": f"Error: {str(e)}"}
-
-
-
 

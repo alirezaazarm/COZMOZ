@@ -271,9 +271,15 @@ class OpenAIService:
                 except openai.APIError:
                     logger.error("Existing thread invalid, creating new one")
 
-            # Get vector store ID from global variable
-            if "VS_ID" not in globals():
-                logger.error("No valid vector store ID found in AppSettings.")
+            # Get vector store ID from global variable, or from AppSettings if not set
+            global VS_ID
+            if not VS_ID:
+                setting = AppSettings.get_by_key('vs_id')
+                if setting and setting.get('value'):
+                    VS_ID = setting.get('value')
+                    logger.info(f"Loaded VS_ID from AppSettings: {VS_ID}")
+                else:
+                    logger.error("No valid vector store ID found in AppSettings.")
 
             thread = self.client.beta.threads.create(
                 tool_resources={"file_search": {"vector_store_ids": [VS_ID]}}
@@ -516,45 +522,50 @@ class OpenAIService:
                 logger.error("OpenAI client is not initialized.")
                 raise PermanentError("OpenAI client is not initialized.")
 
-            # Check that a VS_ID exists memory
-            if "VS_ID" in globals():
+            # Check that a VS_ID exists in memory, or load from AppSettings
+            global VS_ID
+            if not VS_ID:
+                from ..models.appsettings import AppSettings
+                setting = AppSettings.get_by_key('vs_id')
+                if setting and setting.get('value'):
+                    VS_ID = setting.get('value')
+                    logger.info(f"Loaded VS_ID from AppSettings: {VS_ID}")
+                else:
+                    logger.error("No vector store ID found in memory or AppSettings")
+                    raise PermanentError("No vector store ID found in memory or AppSettings")
 
-                # Verify the assistant is connected to this vector store
-                assistant = self.client.beta.assistants.retrieve(Config.OPENAI_ASSISTANT_ID)
+            # Verify the assistant is connected to this vector store
+            assistant = self.client.beta.assistants.retrieve(Config.OPENAI_ASSISTANT_ID)
 
-                # If the assistant doesn't have tools or file_search tool resources, update it
-                has_file_search = False
-                has_vector_store = False
+            # If the assistant doesn't have tools or file_search tool resources, update it
+            has_file_search = False
+            has_vector_store = False
 
-                # Check if assistant has file_search tool
-                if hasattr(assistant, 'tools'):
-                    for tool in assistant.tools:
-                        if tool.type == "file_search":
-                            has_file_search = True
-                            break
+            # Check if assistant has file_search tool
+            if hasattr(assistant, 'tools'):
+                for tool in assistant.tools:
+                    if tool.type == "file_search":
+                        has_file_search = True
+                        break
 
-                # Check if assistant has the vector store connected
-                if hasattr(assistant, 'tool_resources') and hasattr(assistant.tool_resources, 'file_search'):
-                    if VS_ID in assistant.tool_resources.file_search.vector_store_ids:
-                        has_vector_store = True
+            # Check if assistant has the vector store connected
+            if hasattr(assistant, 'tool_resources') and hasattr(assistant.tool_resources, 'file_search'):
+                if VS_ID in assistant.tool_resources.file_search.vector_store_ids:
+                    has_vector_store = True
 
-                # If the assistant doesn't have file_search tool or vector store, update it
-                if not has_file_search or not has_vector_store:
-                    logger.info(f"Updating assistant to connect with vector store {VS_ID}")
-                    self.client.beta.assistants.update(
-                        assistant_id=Config.OPENAI_ASSISTANT_ID,
-                        tools=[{"type": "file_search"}],
-                        tool_resources={
-                            "file_search": {
-                                "vector_store_ids": [VS_ID]
-                            }
+            # If the assistant doesn't have file_search tool or vector store, update it
+            if not has_file_search or not has_vector_store:
+                logger.info(f"Updating assistant to connect with vector store {VS_ID}")
+                self.client.beta.assistants.update(
+                    assistant_id=Config.OPENAI_ASSISTANT_ID,
+                    tools=[{"type": "file_search"}],
+                    tool_resources={
+                        "file_search": {
+                            "vector_store_ids": [VS_ID]
                         }
-                    )
-                    logger.info(f"Successfully connected assistant to vector store {VS_ID}")
-
-            else:
-                logger.error("No vector store ID found in memory")
-                raise PermanentError("No vector store is configured. Please connect to a vector store first.")
+                    }
+                )
+                logger.info(f"Successfully connected assistant to vector store {VS_ID}")
 
             # Create the thread
             thread = self.client.beta.threads.create()

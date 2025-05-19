@@ -1,16 +1,12 @@
 from flask import Blueprint, request, jsonify
 from ..config import Config
 from ..utils.helpers import allowed_file, secure_filename_wrapper
-from ..services.instagram_service import InstagramService
+from ..services.instagram_service import APP_SETTINGS, COMMENT_FIXED_RESPONSES, STORY_FIXED_RESPONSES, InstagramService
 from ..services.openai_service import OpenAIService
-from ..models.post import Post
-from ..models.story import Story
 import os
 import logging
 
 logger = logging.getLogger(__name__)
-
-APP_SETTINGS = {}
 
 update_bp = Blueprint('update', __name__, url_prefix='/update')
 
@@ -174,17 +170,42 @@ def update_app_settings():
         return jsonify({'message': 'request method is wrong!'}), 405
 
 # ============================ FIXED RESPONSE UPDATE ================================= #
-@update_bp.route('/fixed-responses', methods=['POST'])
-def update_fixed_responses():
-    """Handle fixed responses update."""
-    logger.info("Received request to update fixed responses and keep in the main app memory.")
+@update_bp.route('/fixed-responses/comments', methods=['POST'])
+def update_comment_fixed_responses():
+    """Update comment fixed responses in memory."""
+    logger.info("Received request to update comment fixed responses.")
     auth_error = authenticate()
     if auth_error:
         return auth_error
 
     if request.method == 'POST':
         data = request.json
-        if data:
-            try:
-                # Load the responses for content IDs into memory and save to appropriate model                
-                
+        if not isinstance(data, dict):
+            logger.error("Invalid data format for comment fixed responses. Expected a dictionary.")
+            return jsonify({'error': 'Invalid data format, expected a dictionary mapping post IDs to responses.'}), 400
+        InstagramService.set_comment_fixed_responses(data)
+        logger.info(f"Updated COMMENT_FIXED_RESPONSES: {COMMENT_FIXED_RESPONSES}")
+        return jsonify({'message': 'Comment fixed responses updated successfully.'}), 200
+    else:
+        logger.error("Invalid request method for updating comment fixed responses.")
+        return jsonify({'message': 'Request method is wrong!'}), 405
+
+@update_bp.route('/fixed-responses/stories', methods=['POST'])
+def update_story_fixed_responses():
+    """Update story fixed responses in memory."""
+    logger.info("Received request to update story fixed responses.")
+    auth_error = authenticate()
+    if auth_error:
+        return auth_error
+
+    if request.method == 'POST':
+        data = request.json
+        if not isinstance(data, dict):
+            logger.error("Invalid data format for story fixed responses. Expected a dictionary.")
+            return jsonify({'error': 'Invalid data format, expected a dictionary mapping story IDs to responses.'}), 400
+        InstagramService.set_story_fixed_responses(data)
+        logger.info(f"Updated STORY_FIXED_RESPONSES: {STORY_FIXED_RESPONSES}")
+        return jsonify({'message': 'Story fixed responses updated successfully.'}), 200
+    else:
+        logger.error("Invalid request method for updating story fixed responses.")
+        return jsonify({'message': 'Request method is wrong!'}), 405
