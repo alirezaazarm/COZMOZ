@@ -13,6 +13,9 @@ default_settings = {
 }
 
 for key, value in default_settings.items():
-    AppSettings.create_or_update(key, value)
+    # check if the key already exists
+    if not AppSettings.exist(key):
+        # If it doesn't exist, create it
+        AppSettings.create_or_update(key, value)
 
 __all__ = ['User', 'AppSettings', 'Product', 'UserStatus', 'MessageRole', 'Story', 'Post', 'Additionalinfo', 'AdminUser']

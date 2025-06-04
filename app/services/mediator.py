@@ -37,14 +37,14 @@ class Mediator:
 
     def _get_waiting_users(self, cutoff_time=None):
         logger.info(f"Getting users with WAITING status and messages older than {cutoff_time}")
-        
+
         # Make sure cutoff_time is timezone-aware if it's not None
         if cutoff_time is not None and cutoff_time.tzinfo is None:
             cutoff_time = cutoff_time.replace(tzinfo=timezone.utc)
-        
+
         # Build the match condition - only status check
         match_condition = {"status": UserStatus.WAITING.value}
-        
+
         # Add additional match condition if cutoff_time is provided
         # Find users whose LATEST message is older than the cutoff time
         if cutoff_time is not None:
@@ -52,26 +52,26 @@ class Mediator:
             pipeline = [
                 # Match users with WAITING status
                 {"$match": {"status": UserStatus.WAITING.value}},
-                
+
                 # Find users with at least one message
                 {"$match": {"direct_messages": {"$exists": True, "$ne": []}}},
-                
+
                 # Unwind the direct_messages array
                 {"$unwind": "$direct_messages"},
-                
+
                 # Only consider user messages
                 {"$match": {"direct_messages.role": MessageRole.USER.value}},
-                
+
                 # Group by user_id and find the max timestamp of user messages
                 {"$group": {
                     "_id": "$user_id",
                     "latest_msg_time": {"$max": "$direct_messages.timestamp"},
                     "user_id": {"$first": "$user_id"}
                 }},
-                
+
                 # Only include users whose latest message is older than cutoff_time
                 {"$match": {"latest_msg_time": {"$lte": cutoff_time}}},
-                
+
                 # Only return the user_id
                 {"$project": {"user_id": 1, "_id": 0}}
             ]
@@ -81,74 +81,67 @@ class Mediator:
                 {"$match": match_condition},
                 {"$project": {"user_id": 1, "_id": 0}}
             ]
-        
+
         users = list(self.db.users.aggregate(pipeline))
         user_ids = [user.get('user_id') for user in users]
-        
+
         logger.info(f"Found {len(user_ids)} users with WAITING status and latest message older than cutoff")
         return user_ids
 
     def _process_user_messages(self, user_id, cutoff_time=None):
         logger.info(f"Processing batch messages for user {user_id}")
-        
+
         try:
             # Get user
             user = self.db.users.find_one({"user_id": user_id})
             if not user:
                 logger.warning(f"User {user_id} not found")
                 return
-            
+
             # Ensure cutoff_time is properly timezone-aware if provided (for logging only)
             if cutoff_time is not None and cutoff_time.tzinfo is None:
                 cutoff_time = cutoff_time.replace(tzinfo=timezone.utc)
-            
+
             # Get all user messages since the last assistant/admin reply as a single batch
             # We don't do any filtering by timestamp here - that was done in _get_waiting_users
             user_messages = self.message_service.get_user_messages(user_id, cutoff_time)
             if not user_messages:
                 logger.info(f"No user messages found for user {user_id}")
                 return
-            
+
             # Get the message texts for processing
             message_texts = [msg.get('text') for msg in user_messages]
             logger.info(f"Processing batch of {len(user_messages)} user messages: {message_texts}")
-            
+
             # Process with OpenAI
             thread_id = self.openai_service.ensure_thread(user)
             response_text = self.openai_service.process_messages(
-                thread_id, 
+                thread_id,
                 message_texts
             )
-            
+
             if not response_text:
                 logger.warning(f"No response generated for user {user_id}")
                 self.message_service.update_user_status(user_id, UserStatus.ASSISTANT_FAILED.value)
                 return
-            
+
             logger.info(f"Generated response: {response_text}")
-            
-            # Save response
-            success = self.message_service.save_assistant_response(user_messages, response_text, user_id)
-            if not success:
-                logger.error(f"Failed to save response for user {user_id}")
-                self.message_service.update_user_status(user_id, UserStatus.ASSISTANT_FAILED.value)
-                return
-            
+
             # Try to send to Instagram
             try:
                 instagram_success = InstagramService.send_message(user_id, response_text)
-                
+
                 # Update user status based on Instagram success
                 if instagram_success:
                     self.message_service.update_user_status(user_id, UserStatus.REPLIED.value)
                 else:
                     self.message_service.update_user_status(user_id, UserStatus.INSTAGRAM_FAILED.value)
-                    
+
             except Exception as insta_error:
                 logger.error(f"Instagram update failed: {str(insta_error)}")
                 self.message_service.update_user_status(user_id, UserStatus.INSTAGRAM_FAILED.value)
                 raise
-                
+
         except Exception as e:
             logger.error(f"Processing failed for user {user_id}: {str(e)}", exc_info=True)
             self.message_service.update_user_status(user_id, UserStatus.ASSISTANT_FAILED.value)

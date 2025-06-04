@@ -10,7 +10,7 @@ class Post:
     """Post model for MongoDB"""
 
     @staticmethod
-    def create_post_document(post_id, caption, media_url, media_type, like_count=0, admin_explanation=None, thumbnail_url=None, timestamp=None):
+    def create_post_document(post_id, caption, media_url, media_type, like_count=0, admin_explanation=None, thumbnail_url=None, timestamp=None, children=None):
         """Helper to create a new post document structure."""
         return {
             "id": post_id,  # The unique integer from Meta
@@ -20,16 +20,17 @@ class Post:
             "like_count": like_count,
             "thumbnail_url" : thumbnail_url,
             "timestamp": timestamp if timestamp else datetime.now(timezone.utc),
-            "fixed_response": None, # Embedded directly in the post document
+            "children": children if children else [],  # Array to store children media
+            "fixed_responses": [], # Changed to an array to support multiple fixed responses
             "admin_explanation": admin_explanation, # Embedded
             "label": "" # Embedded
         }
 
     @staticmethod
     @with_db
-    def create(post_id, caption, media_url, media_type, like_count=0, admin_explanation=None, thumbnail_url=None, timestamp=None):
+    def create(post_id, caption, media_url, media_type, like_count=0, admin_explanation=None, thumbnail_url=None, timestamp=None, children=None):
         """Create a new post."""
-        post_doc = Post.create_post_document(post_id, caption, media_url, media_type, like_count, admin_explanation, thumbnail_url, timestamp)
+        post_doc = Post.create_post_document(post_id, caption, media_url, media_type, like_count, admin_explanation, thumbnail_url, timestamp, children)
         try:
             result = db[POSTS_COLLECTION].insert_one(post_doc)
             if result.acknowledged:
@@ -65,9 +66,25 @@ class Post:
     @staticmethod
     @with_db
     def create_or_update_from_instagram(instagram_post_data):
-        """Create or update a post from Instagram API data, preserving existing fixed_response, label, and admin_explanation."""
+        """Create or update a post from Instagram API data, preserving existing fixed_responses, label, and admin_explanation."""
         instagram_id = instagram_post_data['id']
         existing_post = db[POSTS_COLLECTION].find_one({"id": instagram_id})
+
+        # Process children data if exists
+        children_data = []
+        if 'children' in instagram_post_data:
+            # Handle both direct API format and our internal format
+            if 'data' in instagram_post_data['children']:
+                # This is the format directly from the Instagram API
+                for child in instagram_post_data['children']['data']:
+                    child_item = {}
+                    if 'media_url' in child:
+                        child_item['media_url'] = child['media_url']
+                    if 'thumbnail_url' in child:
+                        child_item['thumbnail_url'] = child['thumbnail_url']
+                    # We don't need to store the children IDs as per requirements
+                    if child_item:  # Only add if we have at least one URL
+                        children_data.append(child_item)
 
         # Data from Instagram API
         api_data = {
@@ -77,13 +94,10 @@ class Post:
             "media_type": instagram_post_data.get('media_type', ''),
             "like_count": instagram_post_data.get('like_count', 0),
             "timestamp": instagram_post_data.get('timestamp'),
+            "children": children_data,
         }
 
         if existing_post:
-            # Update existing post, but only with fields from API data
-            # Fields like fixed_response, label, admin_explanation are managed separately
-            # and should not be overwritten by this method unless explicitly included in instagram_post_data
-            # and handled here.
             update_payload = {"$set": api_data}
             # If admin_explanation is in instagram_post_data, include it (e.g., if API provides it)
             if 'admin_explanation' in instagram_post_data: # This field is unlikely to come from API, but good practice
@@ -108,9 +122,10 @@ class Post:
                 like_count=api_data['like_count'],
                 thumbnail_url=api_data['thumbnail_url'],
                 timestamp=api_data['timestamp'],
+                children=children_data,
                 admin_explanation=instagram_post_data.get('admin_explanation') # if provided by API (unlikely)
             )
-            # label and fixed_response are already initialized by create_post_document
+            # label and fixed_responses are already initialized by create_post_document
             result = db[POSTS_COLLECTION].insert_one(new_post_doc)
             logger.info(f"New post {instagram_id} created from Instagram data. Inserted ID: {result.inserted_id}")
             return result
@@ -182,13 +197,15 @@ class Post:
 
     @staticmethod
     @with_db
-    def set_fixed_response(
+    def add_fixed_response(
         instagram_post_id,
         trigger_keyword,
         comment_response_text=None,
         direct_response_text=None
     ):
-        """Set or update the fixed response for a specific post by its Instagram ID."""
+        """
+        Adds a new fixed response to a post or updates an existing one if the trigger_keyword matches.
+        """
         if not trigger_keyword or not trigger_keyword.strip():
             logger.warning(f"Trigger keyword cannot be empty for post {instagram_post_id}.")
             return False
@@ -196,43 +213,65 @@ class Post:
         fixed_response_subdoc = Post._create_fixed_response_subdocument(
             trigger_keyword, comment_response_text, direct_response_text
         )
+
         try:
-            result = db[POSTS_COLLECTION].update_one(
-                {"id": instagram_post_id},
-                {"$set": {"fixed_response": fixed_response_subdoc}} # Overwrites existing fixed_response
+            # Check if a fixed response with this trigger already exists
+            post = db[POSTS_COLLECTION].find_one(
+                {"id": instagram_post_id, "fixed_responses.trigger_keyword": trigger_keyword}
             )
-            if result.matched_count == 0:
-                logger.warning(f"No post found with Instagram ID {instagram_post_id} to set fixed response.")
-                return False
-            logger.info(f"Fixed response set/updated for post {instagram_post_id}. Modified: {result.modified_count > 0}")
-            # Return True if matched, even if not modified (idempotent update of same data)
-            return result.matched_count > 0
+
+            if post:
+                # Update existing fixed response
+                result = db[POSTS_COLLECTION].update_one(
+                    {"id": instagram_post_id, "fixed_responses.trigger_keyword": trigger_keyword},
+                    {"$set": {
+                        "fixed_responses.$.comment_response_text": fixed_response_subdoc["comment_response_text"],
+                        "fixed_responses.$.direct_response_text": fixed_response_subdoc["direct_response_text"],
+                        "fixed_responses.$.updated_at": fixed_response_subdoc["updated_at"]
+                    }}
+                )
+                if result.matched_count == 0:
+                    logger.warning(f"No fixed response found with trigger '{trigger_keyword}' for post {instagram_post_id} to update.")
+                    return False
+                logger.info(f"Fixed response for post {instagram_post_id} with trigger '{trigger_keyword}' updated. Modified: {result.modified_count > 0}")
+                return result.modified_count > 0
+            else:
+                # Add new fixed response to the array
+                result = db[POSTS_COLLECTION].update_one(
+                    {"id": instagram_post_id},
+                    {"$push": {"fixed_responses": fixed_response_subdoc}}
+                )
+                if result.matched_count == 0:
+                    logger.warning(f"No post found with Instagram ID {instagram_post_id} to add fixed response.")
+                    return False
+                logger.info(f"New fixed response added to post {instagram_post_id} with trigger '{trigger_keyword}'. Modified: {result.modified_count > 0}")
+                return result.modified_count > 0
         except PyMongoError as e:
-            logger.error(f"Failed to set fixed response for post {instagram_post_id}: {str(e)}")
+            logger.error(f"Failed to add/update fixed response for post {instagram_post_id}: {str(e)}")
             return False
 
     @staticmethod
     @with_db
-    def get_fixed_response(instagram_post_id):
-        """Get the fixed response for a post by its Instagram ID."""
+    def get_fixed_responses(instagram_post_id):
+        """Get all fixed responses for a post by its Instagram ID."""
         post = Post.get_by_instagram_id(instagram_post_id)
         if post:
-            return post.get('fixed_response') # This will be the subdocument or None
-        return None
+            return post.get('fixed_responses', []) # Returns the array, or empty list if not found
+        return []
 
     @staticmethod
     @with_db
-    def delete_fixed_response(instagram_post_id):
-        """Remove (nullify) the fixed response from a post by its Instagram ID."""
+    def delete_fixed_response(instagram_post_id, trigger_keyword):
+        """Deletes a specific fixed response from a post by its Instagram ID and trigger_keyword."""
         try:
             result = db[POSTS_COLLECTION].update_one(
                 {"id": instagram_post_id},
-                {"$set": {"fixed_response": None}} # Set the field to null
+                {"$pull": {"fixed_responses": {"trigger_keyword": trigger_keyword}}}
             )
             if result.matched_count == 0:
                 logger.warning(f"No post found with Instagram ID {instagram_post_id} to delete fixed response.")
                 return False
-            logger.info(f"Fixed response deleted (set to null) for post {instagram_post_id}. Modified: {result.modified_count > 0}")
+            logger.info(f"Fixed response with trigger '{trigger_keyword}' deleted from post {instagram_post_id}. Modified: {result.modified_count > 0}")
             return result.modified_count > 0
         except PyMongoError as e:
             logger.error(f"Failed to delete fixed response for post {instagram_post_id}: {str(e)}")
@@ -245,27 +284,26 @@ class Post:
         Return all fixed responses for posts in the format:
         {
             instagram_post_id: {
-                trigger: {"comment": ..., "DM": ...},
-                # Only one trigger per post is supported by current embedded structure
+                trigger1: {"comment": ..., "DM": ...},
+                trigger2: {"comment": ..., "DM": ...},
+                ...
             },
             ...
         }
         """
-        posts_with_responses = db[POSTS_COLLECTION].find({"fixed_response": {"$ne": None}})
+        posts_with_responses = db[POSTS_COLLECTION].find({"fixed_responses": {"$exists": True, "$ne": []}})
         result = {}
-        for post in posts_with_responses:
-            post_insta_id = post.get("id")
-            fixed_resp_data = post.get("fixed_response")
-            if post_insta_id and fixed_resp_data and fixed_resp_data.get("trigger_keyword"):
-                trigger = fixed_resp_data["trigger_keyword"]
-                comment = fixed_resp_data.get("comment_response_text")
-                dm = fixed_resp_data.get("direct_response_text")
-                
-                # Since fixed_response is a single object, a post_id will only have one trigger.
-                if post_insta_id not in result:
-                    result[post_insta_id] = {}
-                
-                result[post_insta_id][trigger] = {"comment": comment, "DM": dm}
+        for post_doc in posts_with_responses:
+            post_insta_id = post_doc.get("id")
+            fixed_responses_list = post_doc.get("fixed_responses", [])
+            if post_insta_id and fixed_responses_list:
+                result[post_insta_id] = {}
+                for fr in fixed_responses_list:
+                    trigger = fr.get("trigger_keyword")
+                    comment = fr.get("comment_response_text")
+                    dm = fr.get("direct_response_text")
+                    if trigger:
+                        result[post_insta_id][trigger] = {"comment": comment, "DM": dm}
         return result
 
     # --- Label Methods ---
@@ -318,3 +356,12 @@ class Post:
         """Remove (nullify) the admin explanation for a post by its Instagram ID."""
         return Post.update(instagram_post_id, {"admin_explanation": None})
 
+    @staticmethod
+    @with_db
+    def get_post_ids():
+        """Get all Instagram post IDs."""
+        try:
+            return [post['id'] for post in db[POSTS_COLLECTION].find({}, {"id": 1})]
+        except PyMongoError as e:
+            logger.error(f"Failed to retrieve all Instagram post IDs: {str(e)}")
+            return []

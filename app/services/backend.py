@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 class Backend:
     def __init__(self):
-        self.fixed_responses_url = Config.BASE_URL + "/update/fixed-responses"
         self.app_setting_url = Config.BASE_URL + "/update/app-settings"
         self.headers = {"Content-Type": "application/json",  "Authorization": f"Bearer {Config.VERIFY_TOKEN}" }
         self.scraper = CozmozScraper()
@@ -323,6 +322,9 @@ class Backend:
         try:
             # Use the MongoDB AppSettings model directly
             setting = AppSettings.get_by_key(key)
+            self.app_settings_to_main()
+            self.send_all_fixed_responses_to_main()
+            self.send_all_ig_content_ids_to_main()
             logger.info(f"App setting for key '{key}' fetched successfully.")
             return setting['value'] if setting else None
         except Exception as e:
@@ -340,27 +342,39 @@ class Backend:
                 logger.error(f"Failed to update app setting for key: {key}.")
             self.app_settings_to_main()
             self.send_all_fixed_responses_to_main()
+            self.send_all_ig_content_ids_to_main()
         except Exception as e:
             logger.error(f"Error in update_is_active for key '{key}': {str(e)}")
             return {"error in update_is_active": str(e)}
     # ------------------------------------------------------------------
-    # Fixed responses ---> main app
+    # Fixed responses + ig content ids ---> main app
     # ------------------------------------------------------------------
     def send_comment_fixed_responses_to_main(self, comment_fixed_responses):
         """
         Send the comment fixed responses dict to the main app to update in-memory cache.
         The dict should be structured as:
         {
-            "POST_ID_1": expand_triggers({
+            "POST_ID_1": {
                 "trigger1": {"comment": "Reply text", "DM": "Direct message text"},
+                "trigger2": {"comment": "Reply text", "DM": "Direct message text"},
                 ...
             }),
             ...
         }
         Use expand_triggers to ensure all numeral variants are included for each trigger.
         """
-        # Expand triggers for each post before sending
-        expanded_dict = {post_id: expand_triggers(triggers) for post_id, triggers in comment_fixed_responses.items()}
+        # Expand triggers for each post and its triggers before sending
+        expanded_dict = {}
+        for post_id, triggers_dict in comment_fixed_responses.items():
+            expanded_post_triggers = {}
+            for trigger, responses in triggers_dict.items():
+                # expand_triggers expects a dict like {trigger: None} or {trigger: value}
+                # We need to expand the trigger and apply the responses to each variant
+                expanded_trigger_variants = expand_triggers({trigger: None})
+                for variant in expanded_trigger_variants.keys():
+                    expanded_post_triggers[variant] = responses
+            expanded_dict[post_id] = expanded_post_triggers
+
         url = Config.BASE_URL + "/update/fixed-responses/comments"
         logger.info(f"Sending comment fixed responses to {url}")
         try:
@@ -380,24 +394,25 @@ class Backend:
         Send the story fixed responses dict to the main app to update in-memory cache.
         The dict should be structured as:
         {
-            "STORY_ID_1": {"trigger_keyword": "trigger", "direct_response_text": "DM text"},
+            "STORY_ID_1": {
+                "trigger1": {"direct_response_text": "DM text"},
+                "trigger2": {"direct_response_text": "DM text"},
+                ...
+            },
             ...
         }
         The trigger_keyword for each story will be expanded to include all numeral variants using expand_triggers.
         """
-        # Expand trigger_keyword for each story before sending
         expanded_dict = {}
-        for story_id, response in story_fixed_responses.items():
-            trigger = response.get('trigger_keyword')
-            if trigger:
+        for story_id, triggers_dict in story_fixed_responses.items():
+            expanded_story_triggers = {}
+            for trigger, responses in triggers_dict.items():
                 # Expand the trigger to all numeral variants
-                for variant in expand_triggers({trigger: None}).keys():
-                    expanded_dict[story_id + '__' + variant] = {
-                        **response,
-                        'trigger_keyword': variant
-                    }
-            else:
-                expanded_dict[story_id] = response
+                expanded_trigger_variants = expand_triggers({trigger: None})
+                for variant in expanded_trigger_variants.keys():
+                    expanded_story_triggers[variant] = responses
+            expanded_dict[story_id] = expanded_story_triggers
+
         url = Config.BASE_URL + "/update/fixed-responses/stories"
         logger.info(f"Sending story fixed responses to {url}")
         try:
@@ -425,6 +440,29 @@ class Backend:
         story_result = self.send_story_fixed_responses_to_main(story_fixed)
         logger.info(f"Post fixed responses sent: {post_result}, Story fixed responses sent: {story_result}")
         return {"post_fixed_sent": post_result, "story_fixed_sent": story_result}
+
+    def send_all_ig_content_ids_to_main(self):
+        logger.info("Fetching all IG content IDs.")
+        post_ids = Post.get_post_ids()
+        story_ids = Story.get_story_ids()
+        data = {
+            "post_ids": post_ids,
+            "story_ids": story_ids
+        }
+
+        url = Config.BASE_URL + "/update/ig-content-ids"
+        try:
+            response = requests.post(url, headers=self.headers, json=data)
+            if response.status_code == 200:
+                logger.info("IG content IDs successfully sent to main app.")
+                return True
+            else:
+                logger.error(f"Failed to send IG content IDs. Status: {response.status_code}, Response: {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Error sending IG content IDs: {str(e)}")
+            return False
+
     # ------------------------------------------------------------------
     # Data : Product + additional info
     # ------------------------------------------------------------------
@@ -596,7 +634,9 @@ class Backend:
         logger.info("Fetching Instagram posts.")
         try:
             result = InstagramService.get_posts()
-            if result: logger.info("Instagram posts fetched/updated successfully.")
+            if result:
+                self.send_all_ig_content_ids_to_main()
+                logger.info("Instagram posts fetched/updated successfully.")
             else: logger.warning("Failed to fetch/update Instagram posts.")
             return result
         except Exception as e: logger.error(f"Failed to fetch Instagram posts: {str(e)}", exc_info=True); return False
@@ -703,35 +743,49 @@ class Backend:
             for post in posts:
                 label = post.get('label', '').strip()
                 if not label: continue # Skip unlabeled or empty-label posts
+                
+                # Add main post URL (prefer thumbnail_url over media_url)
                 image_url = post.get('thumbnail_url') or post.get('media_url')
-                if not image_url: continue
-                if label not in labeled_posts: labeled_posts[label] = []
-                labeled_posts[label].append(image_url)
+                if image_url:
+                    if label not in labeled_posts: labeled_posts[label] = []
+                    labeled_posts[label].append(image_url)
+                
+                # Add children URLs if they exist (prefer thumbnail_url over media_url for each child)
+                children = post.get('children', [])
+                if children:
+                    for child in children:
+                        child_url = child.get('thumbnail_url') or child.get('media_url')
+                        if child_url:
+                            if label not in labeled_posts: labeled_posts[label] = []
+                            labeled_posts[label].append(child_url)
+                            
             logger.info(f"Successfully prepared posts by label, found {len(labeled_posts)} unique labels.")
             return labeled_posts
         except Exception as e: logger.error(f"Error preparing post labels for download: {str(e)}", exc_info=True); return {"error": str(e)}
 
-    def get_post_fixed_response(self, post_id):
-        logger.info(f"Fetching fixed response for post ID: {post_id}")
+    def get_post_fixed_responses(self, post_id): # Renamed
+        logger.info(f"Fetching fixed responses for post ID: {post_id}")
         try:
-            response = Post.get_fixed_response(post_id) # Use the model method
-            if response: logger.info(f"Fixed response found for post ID: {post_id}"); return response
-            else: logger.info(f"No fixed response found for post ID: {post_id}"); return None
-        except Exception as e: logger.error(f"Error fetching fixed response for post ID {post_id}: {str(e)}"); return None
+            responses = Post.get_fixed_responses(post_id) # Use the new model method
+            if responses: logger.info(f"Fixed responses found for post ID: {post_id}"); return responses
+            else: logger.info(f"No fixed responses found for post ID: {post_id}"); return []
+        except Exception as e: logger.error(f"Error fetching fixed responses for post ID {post_id}: {str(e)}"); return []
 
-    def create_or_update_post_fixed_response(self, post_id, trigger_keyword, comment_response_text=None, direct_response_text=None):
-        logger.info(f"Creating/updating fixed response for post ID: {post_id}")
+    def create_or_update_post_fixed_response(self, post_id, trigger_keyword, comment_response_text=None, direct_response_text=None): # Renamed
+        logger.info(f"Adding/updating fixed response for post ID: {post_id} with trigger: {trigger_keyword}")
         try:
             # Use the model method
-            result = Post.set_fixed_response(post_id, trigger_keyword, comment_response_text, direct_response_text)
-            if result: logger.info(f"Fixed response C/U successful for post ID: {post_id}"); return True
-            else: logger.warning(f"Failed to C/U fixed response for post ID: {post_id}"); return False
-        except Exception as e: logger.error(f"Error C/U fixed response for post ID {post_id}: {str(e)}"); return False
+            result = Post.add_fixed_response(post_id, trigger_keyword, comment_response_text, direct_response_text)
+            self.send_all_fixed_responses_to_main()
+            if result: logger.info(f"Fixed response added/updated successful for post ID: {post_id}"); return True
+            else: logger.warning(f"Failed to add/update fixed response for post ID: {post_id}"); return False
+        except Exception as e: logger.error(f"Error adding/updating fixed response for post ID {post_id}: {str(e)}"); return False
 
-    def delete_post_fixed_response(self, post_id):
-        logger.info(f"Deleting fixed response for post ID: {post_id}")
+    def delete_post_fixed_response(self, post_id, trigger_keyword): # Modified to accept trigger_keyword
+        logger.info(f"Deleting fixed response for post ID: {post_id} with trigger: {trigger_keyword}")
         try:
-            result = Post.delete_fixed_response(post_id) # Use the model method
+            result = Post.delete_fixed_response(post_id, trigger_keyword) # Use the model method with trigger
+            self.send_all_fixed_responses_to_main()
             if result: logger.info(f"Fixed response deleted successfully for post ID: {post_id}"); return True
             else: logger.warning(f"Failed to delete fixed response for post ID: {post_id}"); return False
         except Exception as e: logger.error(f"Error deleting fixed response for post ID {post_id}: {str(e)}"); return False
@@ -766,7 +820,9 @@ class Backend:
         try:
             # InstagramService.get_stories should ideally call Story.create_or_update_from_instagram
             result = InstagramService.get_stories()
-            if result: logger.info("Instagram stories fetched/updated successfully.")
+            if result:
+                logger.info("Instagram stories fetched/updated successfully.")
+                self.send_all_ig_content_ids_to_main()
             else: logger.warning("Failed to fetch/update Instagram stories.")
             return result
         except Exception as e: logger.error(f"Failed to fetch Instagram stories: {str(e)}", exc_info=True); return False
@@ -898,27 +954,29 @@ class Backend:
             return labeled_stories
         except Exception as e: logger.error(f"Error preparing story labels for download: {str(e)}", exc_info=True); return {"error": str(e)}
 
-    def get_story_fixed_response(self, story_id):
-        logger.info(f"Fetching fixed response for story ID: {story_id}")
+    def get_story_fixed_responses(self, story_id): # Renamed
+        logger.info(f"Fetching fixed responses for story ID: {story_id}")
         try:
-            response = Story.get_fixed_response(story_id) # Use the model method
-            if response: logger.info(f"Fixed response found for story ID: {story_id}"); return response
-            else: logger.info(f"No fixed response found for story ID: {story_id}"); return None
-        except Exception as e: logger.error(f"Error fetching fixed response for story ID {story_id}: {str(e)}"); return None
+            responses = Story.get_fixed_responses(story_id) # Use the new model method
+            if responses: logger.info(f"Fixed responses found for story ID: {story_id}"); return responses
+            else: logger.info(f"No fixed responses found for story ID: {story_id}"); return []
+        except Exception as e: logger.error(f"Error fetching fixed responses for story ID {story_id}: {str(e)}"); return []
 
     def create_or_update_story_fixed_response(self, story_id, trigger_keyword, direct_response_text=None):
-        logger.info(f"Creating/updating fixed response for story ID: {story_id}")
+        logger.info(f"Adding/updating fixed response for story ID: {story_id} with trigger: {trigger_keyword}")
         try:
             # Use the model method. Note: No comment_response_text for stories.
-            result = Story.set_fixed_response(story_id, trigger_keyword, direct_response_text)
-            if result: logger.info(f"Fixed response C/U successful for story ID: {story_id}"); return True
-            else: logger.warning(f"Failed to C/U fixed response for story ID: {story_id}"); return False
-        except Exception as e: logger.error(f"Error C/U fixed response for story ID {story_id}: {str(e)}"); return False
+            result = Story.add_fixed_response(story_id, trigger_keyword, direct_response_text)
+            self.send_all_fixed_responses_to_main()
+            if result: logger.info(f"Fixed response added/updated successful for story ID: {story_id}"); return True
+            else: logger.warning(f"Failed to add/update fixed response for story ID: {story_id}"); return False
+        except Exception as e: logger.error(f"Error adding/updating fixed response for story ID {story_id}: {str(e)}"); return False
 
-    def delete_story_fixed_response(self, story_id):
-        logger.info(f"Deleting fixed response for story ID: {story_id}")
+    def delete_story_fixed_response(self, story_id, trigger_keyword):
+        logger.info(f"Deleting fixed response for story ID: {story_id} with trigger: {trigger_keyword}")
         try:
-            result = Story.delete_fixed_response(story_id) # Use the model method
+            result = Story.delete_fixed_response(story_id, trigger_keyword) # Use the model method with trigger
+            self.send_all_fixed_responses_to_main()
             if result: logger.info(f"Fixed response deleted successfully for story ID: {story_id}"); return True
             else: logger.warning(f"Failed to delete fixed response for story ID: {story_id}"); return False
         except Exception as e: logger.error(f"Error deleting fixed response for story ID {story_id}: {str(e)}"); return False
@@ -1108,4 +1166,3 @@ class Backend:
                 logger.error(f"Error processing uploaded image in backend: {str(e)}", exc_info=True)
                 # Return a generic error message to the UI
                 return f"Error: An unexpected error occurred while processing the image."
-

@@ -53,12 +53,6 @@ class BaseSection:
         self.backend = backend
         self.const = AppConstants()
 #===============================================================================================================================
-# --- (Keep AppStatusSection, ProductScraperSection, OpenAIManagementSection, InstagramSection as they are) ---
-# Placeholder for your existing section classes:
-# AppStatusSection, ProductScraperSection, OpenAIManagementSection, InstagramSection
-# Ensure these classes are defined as they are in your ui.py file.
-# For brevity, I'm not reproducing them here but they are essential.
-
 class AppStatusSection(BaseSection): #
     """Handles application status settings""" #
     def render(self):
@@ -84,7 +78,6 @@ class AppStatusSection(BaseSection): #
                 status_msg = "enabled" if new_state else "disabled" #
                 icon = self.const.ICONS['success'] if new_state else self.const.ICONS['error'] #
                 st.success(f"{icon} {key.replace('_', ' ').title()} {status_msg} successfully!") #
-
 
 class ProductScraperSection(BaseSection):
     """Handles product scraping functionality and additional info management."""
@@ -1328,61 +1321,86 @@ class InstagramSection(BaseSection): #
                 st.markdown('<div class="story-mini-header">Fixed Response</div>', unsafe_allow_html=True)
 
                 try:
-                    fixed_response = self.backend.get_story_fixed_response(story_id)
+                    raw_responses_data = self.backend.get_story_fixed_responses(story_id)
                 except Exception as e:
-                    fixed_response = None
-                    st.error(f"Error loading fixed response: {str(e)}")
+                    raw_responses_data = None
+                    st.error(f"Error loading fixed responses: {str(e)}")
 
                 exist_tab, add_tab = st.tabs(["Existing", "Add New"])
 
                 with exist_tab:
-                    if fixed_response and fixed_response.get("trigger_keyword"):
-                        try:
-                            with st.form(key=f"story_existing_response_form_{story_id}", border=False):
-                                trigger_keyword = st.text_input(
+                    fixed_responses_to_display = []
+                    if isinstance(raw_responses_data, list):
+                        fixed_responses_to_display = raw_responses_data
+                    elif isinstance(raw_responses_data, dict) and raw_responses_data:
+                        fixed_responses_to_display = [raw_responses_data]
+
+                    if not fixed_responses_to_display:
+                        st.info("No fixed response exists for this story. Use the 'Add New' tab to create one.")
+                    else:
+                        for index, response_item in enumerate(fixed_responses_to_display):
+                            if not isinstance(response_item, dict):
+                                st.warning(f"Skipping an invalid fixed response item (item {index + 1}).")
+                                continue
+
+                            st.markdown("---")
+                            form_key = f"story_existing_response_form_{story_id}_{index}"
+                            original_trigger_keyword = response_item.get("trigger_keyword", "")
+
+                            with st.form(key=form_key, border=True):
+                                st.markdown(f"**Response for Trigger: \"{original_trigger_keyword}\"**" if original_trigger_keyword else f"**Response Item {index+1}**")
+
+                                trigger_keyword_input = st.text_input(
                                     "Trigger keyword",
-                                    value=fixed_response.get("trigger_keyword", "")
+                                    value=original_trigger_keyword,
+                                    key=f"trigger_{form_key}"
                                 )
-                                dm_response = st.text_area(
+                                dm_response_input = st.text_area(
                                     "DM reply",
-                                    value=fixed_response.get("direct_response_text", "")
+                                    value=response_item.get("direct_response_text", ""),
+                                    key=f"dm_{form_key}"
                                 )
-                                col1, col2 = st.columns(2)
-                                with col1:
-                                    submit_button = st.form_submit_button(f"{self.const.ICONS['save']} Update", use_container_width=True)
-                                with col2:
+                                col_update, col_delete = st.columns(2)
+                                with col_update:
+                                    update_button = st.form_submit_button(f"{self.const.ICONS['save']} Update This Response", use_container_width=True)
+                                with col_delete:
                                     delete_button = st.form_submit_button(
-                                        f"{self.const.ICONS['delete']} Remove",
+                                        f"{self.const.ICONS['delete']} Remove This Response",
                                         type="secondary",
                                         use_container_width=True
                                     )
-                                if submit_button:
-                                    try:
-                                        if trigger_keyword.strip():
-                                            success = self.backend.create_or_update_story_fixed_response(
-                                                story_id=story_id,
-                                                trigger_keyword=trigger_keyword.strip(),
-                                                direct_response_text=dm_response.strip() if dm_response.strip() else None
-                                            )
-                                            if success:
-                                                st.success(f"{self.const.ICONS['success']} Updated!")
-                                                st.rerun()
-                                        else:
-                                            st.error("Trigger keyword is required")
-                                    except Exception as e:
-                                        st.error(f"{self.const.ICONS['error']} Error updating: {str(e)}")
-                                if delete_button:
-                                    try:
-                                        success = self.backend.delete_story_fixed_response(story_id)
+
+                                if update_button:
+                                    new_trigger_keyword = trigger_keyword_input.strip()
+                                    if not new_trigger_keyword:
+                                        st.error("Trigger keyword is required.")
+                                    else:
+                                        success = self.backend.create_or_update_story_fixed_response(
+                                            story_id=story_id,
+                                            trigger_keyword=new_trigger_keyword,
+                                            direct_response_text=dm_response_input.strip() or None
+                                        )
                                         if success:
-                                            st.success("Response removed")
+                                            st.success(f"Response for '{new_trigger_keyword}' processed successfully!")
+                                            if original_trigger_keyword and original_trigger_keyword != new_trigger_keyword:
+                                                st.info(f"Content previously associated with '{original_trigger_keyword}' is now under '{new_trigger_keyword}'. The old trigger entry might still exist if not explicitly managed by the backend as a 'rename'.")
                                             st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Error removing response: {str(e)}")
-                        except Exception as e:
-                            st.error(f"Error loading form: {str(e)}")
-                    else:
-                        st.info("No fixed response exists for this story. Use the 'Add New' tab to create one.")
+                                        else:
+                                            st.error(f"Failed to process response for '{new_trigger_keyword}'.")
+
+                                if delete_button:
+                                    if not original_trigger_keyword:
+                                        st.error("Cannot delete response: Original trigger keyword is missing.")
+                                    else:
+                                        try:
+                                            success = self.backend.delete_story_fixed_response(story_id, original_trigger_keyword)
+                                            if success:
+                                                st.success(f"Response for '{original_trigger_keyword}' removed successfully.")
+                                                st.rerun()
+                                            else:
+                                                st.error(f"Failed to remove response for '{original_trigger_keyword}'.")
+                                        except Exception as e:
+                                            st.error(f"Error removing response: {str(e)}")
 
                 with add_tab:
                     try:
@@ -1735,14 +1753,13 @@ class InstagramSection(BaseSection): #
 
                     # Handle label update when selection changes
                     if selected_label != current_label and selected_label != "-- Select --":
-                        if hasattr(self.backend, 'set_label'):
-                            try:
-                                label_success = self.backend.set_post_label(post_id, selected_label)
-                                if label_success:
-                                    st.success(f"{self.const.ICONS['success']} Label updated")
-                                    st.rerun()
-                            except Exception as e:
-                                st.error(f"{self.const.ICONS['error']} Error saving label: {str(e)}")
+                        try:
+                            label_success = self.backend.set_post_label(post_id, selected_label)
+                            if label_success:
+                                st.success(f"{self.const.ICONS['success']} Label updated")
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"{self.const.ICONS['error']} Error saving label: {str(e)}")
                 except Exception as e:
                     st.error(f"Error loading labels: {str(e)}")
 
@@ -1845,82 +1862,97 @@ class InstagramSection(BaseSection): #
 
             # Get existing fixed response using backend
             try:
-                fixed_response = self.backend.get_post_fixed_response(post_id)
+                # This is expected to be a list of response dictionaries
+                raw_responses_data = self.backend.get_post_fixed_responses(post_id)
             except Exception as e:
-                fixed_response = None
-                st.error(f"Error loading fixed response: {str(e)}")
+                raw_responses_data = None # Ensure it's None on error
+                st.error(f"Error loading fixed responses: {str(e)}")
 
             # Create tabs for existing and adding responses
             exist_tab, add_tab = st.tabs(["Existing", "Add New"])
 
             with exist_tab:
-                if fixed_response and fixed_response.get("trigger_keyword"):
-                    # Form for editing existing response
-                    try:
-                        with st.form(key=f"existing_response_form_{post_id}", border=False):
+                fixed_responses_to_display = []
+                if isinstance(raw_responses_data, list):
+                    fixed_responses_to_display = raw_responses_data
+                elif isinstance(raw_responses_data, dict) and raw_responses_data: # Handle if backend returns a single dict
+                    fixed_responses_to_display = [raw_responses_data]
 
-                            # Trigger keyword
-                            trigger_keyword = st.text_input(
+                if not fixed_responses_to_display:
+                    st.info("No fixed responses exist for this post. Use the 'Add New' tab to create one.")
+                else:
+                    for index, response_item in enumerate(fixed_responses_to_display):
+                        if not isinstance(response_item, dict):
+                            st.warning(f"Skipping an invalid fixed response item (item {index + 1}).")
+                            continue
+
+                        st.markdown("---") # Visual separator for each response
+                        # Use a unique key for each form, including post_id and index
+                        form_key = f"existing_response_form_{post_id}_{index}"
+                        original_trigger_keyword = response_item.get("trigger_keyword", "")
+
+                        with st.form(key=form_key, border=True):
+                            st.markdown(f"**Response for Trigger: \"{original_trigger_keyword}\"**" if original_trigger_keyword else f"**Response Item {index+1}**")
+
+                            trigger_keyword_input = st.text_input(
                                 "Trigger keyword",
-                                value=fixed_response.get("trigger_keyword", "")
+                                value=original_trigger_keyword,
+                                key=f"trigger_{form_key}"
                             )
-
-                            # Comment response
-                            comment_response = st.text_area(
+                            comment_response_input = st.text_area(
                                 "Comment reply",
-                                value=fixed_response.get("comment_response_text", "")
+                                value=response_item.get("comment_response_text", ""),
+                                key=f"comment_{form_key}"
                             )
-
-                            # Direct message response
-                            dm_response = st.text_area(
+                            dm_response_input = st.text_area(
                                 "DM reply",
-                                value=fixed_response.get("direct_response_text", "")
+                                value=response_item.get("direct_response_text", ""),
+                                key=f"dm_{form_key}"
                             )
 
                             # Row for buttons
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                # Submit button to save fixed response
-                                submit_button = st.form_submit_button(f"{self.const.ICONS['save']} Update", use_container_width=True)
-
-                            with col2:
-                                # Delete button (this works differently in a form)
+                            col_update, col_delete = st.columns(2)
+                            with col_update:
+                                update_button = st.form_submit_button(f"{self.const.ICONS['save']} Update This Response", use_container_width=True)
+                            with col_delete:
                                 delete_button = st.form_submit_button(
-                                    f"{self.const.ICONS['delete']} Remove",
+                                    f"{self.const.ICONS['delete']} Remove This Response",
                                     type="secondary",
                                     use_container_width=True
                                 )
 
-                            if submit_button:
-                                # Handle fixed response update using backend
-                                try:
-                                    if trigger_keyword.strip():
-                                        success = self.backend.create_or_update_post_fixed_response(
-                                            post_id=post_id,
-                                            trigger_keyword=trigger_keyword.strip(),
-                                            comment_response_text=comment_response.strip() if comment_response.strip() else None,
-                                            direct_response_text=dm_response.strip() if dm_response.strip() else None
-                                        )
-                                        if success:
-                                            st.success(f"{self.const.ICONS['success']} Updated!")
-                                            st.rerun()
+                            if update_button:
+                                new_trigger_keyword = trigger_keyword_input.strip()
+                                if not new_trigger_keyword:
+                                    st.error("Trigger keyword is required.")
+                                else:
+                                    success = self.backend.create_or_update_post_fixed_response(
+                                        post_id=post_id,
+                                        trigger_keyword=new_trigger_keyword,
+                                        comment_response_text=comment_response_input.strip() or None,
+                                        direct_response_text=dm_response_input.strip() or None
+                                    )
+                                    if success:
+                                        st.success(f"Response for '{new_trigger_keyword}' processed successfully!")
+                                        if original_trigger_keyword and original_trigger_keyword != new_trigger_keyword:
+                                            st.info(f"Content previously associated with '{original_trigger_keyword}' is now under '{new_trigger_keyword}'. The old trigger entry might still exist if not explicitly managed by the backend as a 'rename'.")
+                                        st.rerun()
                                     else:
-                                        st.error("Trigger keyword is required")
-                                except Exception as e:
-                                    st.error(f"{self.const.ICONS['error']} Error updating: {str(e)}")
+                                        st.error(f"Failed to process response for '{new_trigger_keyword}'.")
 
                             if delete_button:
-                                try:
-                                    success = self.backend.delete_post_fixed_response(post_id)
-                                    if success:
-                                        st.success("Response removed")
-                                        st.rerun()
-                                except Exception as e:
-                                    st.error(f"Error removing response: {str(e)}")
-                    except Exception as e:
-                        st.error(f"Error loading form: {str(e)}")
-                else:
-                    st.info("No fixed response exists for this post. Use the 'Add New' tab to create one.")
+                                if not original_trigger_keyword:
+                                    st.error("Cannot delete response: Original trigger keyword is missing.")
+                                else:
+                                    try:
+                                        success = self.backend.delete_post_fixed_response(post_id, original_trigger_keyword)
+                                        if success:
+                                            st.success(f"Response for '{original_trigger_keyword}' removed successfully.")
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Failed to remove response for '{original_trigger_keyword}'.")
+                                    except Exception as e:
+                                        st.error(f"Error removing response: {str(e)}")
 
             with add_tab:
                 # Form for adding new fixed response

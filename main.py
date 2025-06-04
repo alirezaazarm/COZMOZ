@@ -1,8 +1,9 @@
 from flask import Flask
 from apscheduler.triggers.interval import IntervalTrigger
 from app.jobs.scheduler import scheduler, start_scheduler, shutdown_hook
-from app.jobs.message_job import process_messages_job, cleanup_processed_messages
+from app.jobs.message_job import process_messages_job
 from app.jobs.post_story_job import fetch_posts_job, fetch_stories_job
+from app.jobs.status_recovery_job import recover_failed_assistant_status_job
 from app.routes.webhook import webhook_bp
 from app.routes.update import update_bp
 import logging
@@ -33,31 +34,33 @@ if __name__ == '__main__':
             misfire_grace_time=120,
             coalesce=True
         )
-        scheduler.add_job(
-            cleanup_processed_messages,
-            IntervalTrigger(hours=1),
-            misfire_grace_time=300,
-            coalesce=True
-        )
-
 
         scheduler.add_job(
-            fetch_posts_job,
-            IntervalTrigger(minutes=30),
-            id='fetch_posts_job',
+            recover_failed_assistant_status_job,
+            IntervalTrigger(minutes=2),
+            id='status_recovery_job',
             max_instances=1,
-            misfire_grace_time=300,
+            misfire_grace_time=60,
             coalesce=True
         )
 
-        scheduler.add_job(
-            fetch_stories_job,
-            IntervalTrigger(minutes=6),
-            id='fetch_stories_job',
-            max_instances=1,
-            misfire_grace_time=120,
-            coalesce=True
-        )
+#        scheduler.add_job(
+ #           fetch_posts_job,
+  #          IntervalTrigger(minutes=30),
+   #         id='fetch_posts_job',
+    #        max_instances=1,
+     #       misfire_grace_time=300,
+      #      coalesce=True
+       # )
+
+#        scheduler.add_job(
+ #           fetch_stories_job,
+  #          IntervalTrigger(minutes=6),
+   #         id='fetch_stories_job',
+    #        max_instances=1,
+     #       misfire_grace_time=120,
+      #      coalesce=True
+       # )
 
         app.run(host='localhost', port=5000, debug=False, use_reloader=False)
     except KeyboardInterrupt:

@@ -21,7 +21,6 @@ db = client[Config.MONGODB_DB_NAME] if client else None
 
 # Collection constants - only keeping collections that are still needed
 USERS_COLLECTION = 'users'
-FIXED_RESPONSES_COLLECTION = 'fixed_responses'
 APP_SETTINGS_COLLECTION = 'app_settings'
 PRODUCTS_COLLECTION = 'products'
 SCHEDULER_JOBS_COLLECTION = 'scheduler_jobs'

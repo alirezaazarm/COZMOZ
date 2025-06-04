@@ -12,10 +12,10 @@ class AppSettings:
 
     @staticmethod
     def update(key, value):
-        result = db.app_settings.update_one(
+        result = db[APP_SETTINGS_COLLECTION].update_one(
             {"key": key},
             {"$set": {"value": value}},
-            upsert=True  # This option creates the key if it does not exist
+            upsert=True
         )
         if result.modified_count == 0 and result.upserted_id is None:
             raise ValueError(f"Failed to update AppSettings for key: {key}")
@@ -86,19 +86,24 @@ class AppSettings:
         """Get all settings from the database"""
         return list(db[APP_SETTINGS_COLLECTION].find())
 
-def _update_memory_store(key, value):
-    """Update the in-memory store with a setting"""
-    _settings_store[key] = value
-    logger.info(f"Updated app setting in memory: {key}")
+    def _update_memory_store(key, value):
+        """Update the in-memory store with a setting"""
+        _settings_store[key] = value
+        logger.info(f"Updated app setting in memory: {key}")
 
-@with_db
-def load_all_settings():
-    """Load all settings into memory"""
-    settings = db[APP_SETTINGS_COLLECTION].find()
-    count = 0
+    @with_db
+    def load_all_settings():
+        """Load all settings into memory"""
+        settings = db[APP_SETTINGS_COLLECTION].find()
+        count = 0
 
-    for setting in settings:
-        _update_memory_store(setting["key"], setting["value"])
-        count += 1
+        for setting in settings:
+            _update_memory_store(setting["key"], setting["value"])
+            count += 1
 
-    logger.info(f"Loaded {count} app settings into memory")
+        logger.info(f"Loaded {count} app settings into memory")
+
+    @with_db
+    def exist(key):
+        """Check if a setting exists in the database"""
+        return db[APP_SETTINGS_COLLECTION].count_documents({"key": key}) > 0

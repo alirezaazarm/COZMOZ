@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from ..config import Config
 from ..utils.helpers import allowed_file, secure_filename_wrapper
-from ..services.instagram_service import APP_SETTINGS, COMMENT_FIXED_RESPONSES, STORY_FIXED_RESPONSES, InstagramService
+from ..services.instagram_service import APP_SETTINGS, COMMENT_FIXED_RESPONSES, STORY_FIXED_RESPONSES, IG_CONTENT_IDS, InstagramService
 from ..services.openai_service import OpenAIService
 import os
 import logging
@@ -208,4 +208,25 @@ def update_story_fixed_responses():
         return jsonify({'message': 'Story fixed responses updated successfully.'}), 200
     else:
         logger.error("Invalid request method for updating story fixed responses.")
+        return jsonify({'message': 'Request method is wrong!'}), 405
+
+# ============================ IG CONTENCT UPDATE ================================= #
+@update_bp.route('/ig-content-ids', methods=['POST'])
+def update_ig_content_ids():
+    """Update IG content IDs in memory."""
+    logger.info("Received request to update IG content IDs.")
+    auth_error = authenticate()
+    if auth_error:
+        return auth_error
+
+    if request.method == 'POST':
+        data = request.json
+        if not isinstance(data, dict):
+            logger.error("Invalid data format for IG content IDs. Expected a dictionary.")
+            return jsonify({'error': 'Invalid data format, expected a dictionary mapping post IDs to content IDs.'}), 400
+        InstagramService.set_ig_content_ids(data)
+        logger.info(f"Updated IG_CONTENT_IDS: {IG_CONTENT_IDS}")
+        return jsonify({'message': 'IG content IDs updated successfully.'}), 200
+    else:
+        logger.error("Invalid request method for updating IG content IDs.")
         return jsonify({'message': 'Request method is wrong!'}), 405

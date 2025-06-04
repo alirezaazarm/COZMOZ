@@ -10,6 +10,7 @@ from ..models.user import User
 from ..models.enums import UserStatus, MessageRole
 from ..models.post import Post
 from ..models.story import Story
+from .img_search import process_image
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 APP_SETTINGS = {}
 COMMENT_FIXED_RESPONSES = {}
 STORY_FIXED_RESPONSES = {}
-
+IG_CONTENT_IDS = {}
 
 def parse_instagram_timestamp(ts):
     if not ts:
@@ -55,7 +56,7 @@ class InstagramService:
         try:
             logger.info(f"Sending single message to {recipient_id}")
             response = requests.post(
-                "https://graph.instagram.com/v21.0/me/messages",
+                "https://graph.instagram.com/v22.0/me/messages",
                 headers={"Authorization": f"Bearer {Config.PAGE_ACCESS_TOKEN}"},
                 json={"recipient": {"id": recipient_id}, "message": {"text": text}},
                 timeout=10
@@ -279,7 +280,7 @@ class InstagramService:
                 try:
                     logger.info(f"Sending message to {user_id} (attempt {attempt+1}/{MAX_RETRIES+1})")
                     response = requests.post(
-                        "https://graph.instagram.com/v21.0/me/messages",
+                        "https://graph.instagram.com/v22.0/me/messages",
                         headers={"Authorization": f"Bearer {Config.PAGE_ACCESS_TOKEN}"},
                         json={"recipient": {"id": user_id}, "message": {"text": text}},
                         timeout=30  # Increased from 15 to 30 seconds
@@ -346,9 +347,25 @@ class InstagramService:
             return False
 
     @staticmethod
+    def send_comment_private_reply(comment_id, text):
+        try:
+            url = f"https://graph.facebook.com/v22.0/{comment_id}/private_replies"
+            response = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {Config.FB_ACCESS_TOKEN}"},
+                json={"message": text},
+                timeout=10
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send private reply: {str(e)}")
+            return False
+
+    @staticmethod
     def send_comment_reply(comment_id, text):
         try:
-            url = f"https://graph.instagram.com/v21.0/{comment_id}/replies"
+            url = f"https://graph.instagram.com/v22.0/{comment_id}/replies"
             response = requests.post(
                 url,
                 headers={"Authorization": f"Bearer {Config.PAGE_ACCESS_TOKEN}"},
@@ -368,7 +385,12 @@ class InstagramService:
             response = requests.head(url, allow_redirects=True)
             response.raise_for_status()
 
-            content_type = response.headers.get('content-type').lower()
+            content_type = response.headers.get('content-type')
+            if content_type:
+                content_type = content_type.lower()
+            else:
+                logger.warning("No content-type header found in response.")
+                return "unknown"
 
             if 'image' in content_type:
                 return "image"
@@ -403,9 +425,10 @@ class InstagramService:
             return None
 
     @staticmethod
-    def process_user(user_data):
+    def process_user(user_data,status):
         try:
             user_id = user_data['id']
+            username = user_data.get('username','')
             logger.debug(f"[process_user] Processing user: {user_id}, data: {user_data}")
 
             recipient_type = user_data.get('type', '')
@@ -417,17 +440,19 @@ class InstagramService:
             logger.debug(f"[process_user] User lookup result: {user is not None}")
 
             if not user:
-                username = user_data.get('username')
-
                 logger.info(f"[process_user] Creating user {user_id} with username: {username}")
 
-                user_doc = User.create( user_id=user_id,  username=username, status=UserStatus.SCRAPED.value,  )
+                user_doc = User.create( user_id=user_id,  username=username, status=status  )
 
                 if user_doc:
                     logger.debug(f"[process_user] Created user: {user_doc['user_id']}")
                     return user_doc
                 logger.error(f"[process_user] Failed to create user {user_id}")
                 return None
+
+            elif user and not user.get('username') and username:
+                User.update(user_id=user_id, update_data={'username': username, 'status': status})
+                logger.info(f"[process_user] Updated username for user {user_id}")
 
             logger.debug(f"[process_user] Found existing user: {user_id}")
             return user
@@ -483,12 +508,22 @@ class InstagramService:
     def set_comment_fixed_responses(responses):
         global COMMENT_FIXED_RESPONSES
         COMMENT_FIXED_RESPONSES = responses
+        logger.info(f"InstagramService - Updated COMMENT_FIXED_RESPONSES: {len(COMMENT_FIXED_RESPONSES)} posts configured.")
         return True
 
     @staticmethod
     def set_story_fixed_responses(responses):
         global STORY_FIXED_RESPONSES
         STORY_FIXED_RESPONSES = responses
+        logger.info(f"InstagramService - Updated STORY_FIXED_RESPONSES: {len(STORY_FIXED_RESPONSES)} stories configured.")
+        return True
+
+
+    @staticmethod
+    def set_ig_content_ids(data):
+        global IG_CONTENT_IDS
+        IG_CONTENT_IDS = data
+        logger.info(f"InstagramService - Updated IG_CONTENT_IDS: {len(IG_CONTENT_IDS)} posts configured.")
         return True
 
     @staticmethod
@@ -548,7 +583,8 @@ class InstagramService:
                     if not user_check:
                         logger.info(f"[handle_message] Creating user record for recipient: {actual_user_id}")
                         user_doc = User.create_user_document(
-                            user_id=actual_user_id
+                            user_id=actual_user_id,
+                            username=sender_info.get('username', '')
                         )
                         db.users.insert_one(user_doc)
                         logger.info(f"[handle_message] Created new user record for recipient ID: {actual_user_id}")
@@ -558,24 +594,32 @@ class InstagramService:
             # Process the sender user, this creates a document if needed
             if not is_echo or user_id != Config.PAGE_ID:
                 # Only process the sender user if it's not an echo from business account
-                user = InstagramService.process_user(sender_info)
+                user = InstagramService.process_user(sender_info, UserStatus.WAITING.value)
                 if not user:
                     logger.error(f"[handle_message] Failed to process user: {user_id}")
                     return False
 
-            # Check for fixed responses if there's text content
-            if message_text and "DIRECT_FIXED_RESPONSES" in globals() and DIRECT_FIXED_RESPONSES.get(message_text):
-                fixed_response = DIRECT_FIXED_RESPONSES.get(message_text)
-                logger.info(f"[handle_message] Found fixed response for message: {message_text}")
-
-                success = InstagramService.send_message(actual_user_id, fixed_response['DM'])
-                if success:
-                    logger.info("[handle_message] Fixed response sent successfully")
-                else:
-                    logger.error("[handle_message] Failed to send fixed response")
-
             # Handle echo messages (admin or assistant replies)
             if is_echo:
+                # Check if this is a fixed response echo by looking at the most recent user message
+                user_doc = db.users.find_one({"user_id": actual_user_id})
+                is_fixed_response_echo = False
+
+                if user_doc and user_doc.get('direct_messages'):
+                    # Get the most recent message
+                    recent_messages = user_doc['direct_messages']
+                    if recent_messages:
+                        last_message = recent_messages[-1]
+                        # If the last message has fixed_response role, this echo is from a fixed response
+                        if last_message.get('role') == MessageRole.FIXED_RESPONSE.value:
+                            is_fixed_response_echo = True
+                            logger.debug(f"[handle_message] Detected fixed response echo for user {actual_user_id}")
+
+                # Skip storing echo messages from fixed responses to avoid duplication
+                if is_fixed_response_echo:
+                    logger.info(f"[handle_message] Skipping fixed response echo message to avoid duplication for user {actual_user_id}")
+                    return True
+
                 # Determine the correct role based on assistant setting
                 is_assistant_enabled = "APP_SETTINGS" in globals() and APP_SETTINGS.get('assistant', True)
                 msg_role = MessageRole.ASSISTANT.value if is_assistant_enabled else MessageRole.ADMIN.value
@@ -616,7 +660,8 @@ class InstagramService:
                             # Create the user since they don't exist
                             logger.info(f"[handle_message] Creating missing user record for recipient: {actual_user_id}")
                             user_doc = User.create_user_document(
-                                user_id=actual_user_id
+                                user_id=actual_user_id,
+                                username=sender_info.get('username', '')
                             )
                             db.users.insert_one(user_doc)
                             logger.info(f"[handle_message] Created user, now adding the message")
@@ -712,8 +757,9 @@ class InstagramService:
             # Parse timestamp using helper function, fallback to now if invalid
             raw_timestamp = comment_data.get('timestamp')
             timestamp = parse_instagram_timestamp(raw_timestamp)
-            if not timestamp or timestamp.year == 1970:
+            if not timestamp or timestamp.year == 1970: # A common default for failed parsing
                 timestamp = datetime.now(timezone.utc)
+
 
             user_info = {
                 'id': comment_data['user_id'],
@@ -721,7 +767,7 @@ class InstagramService:
             }
 
             # Process the user who made the comment
-            user = InstagramService.process_user(user_info)
+            user = InstagramService.process_user(user_info, UserStatus.SCRAPED.value)
             if not user:
                 logger.error(f"Failed to process user: {user_info['id']}")
                 return False
@@ -742,7 +788,7 @@ class InstagramService:
                 comment_id=comment_data['comment_id'],
                 text=comment_text,
                 parent_id=comment_data.get('parent_id'),
-                timestamp=timestamp
+                timestamp=timestamp # Use parsed timestamp
             )
 
             # Add status field to comment document
@@ -763,24 +809,24 @@ class InstagramService:
             # Initialize reply flags
             replied_in_comment = False
             replied_in_direct = False
+            fixed_response_actions = None # To store the actions for the matched trigger
 
             # Check for in-memory fixed response for this post_id
-            fixed_response = None
             if post_id in COMMENT_FIXED_RESPONSES:
-                fixed_response = COMMENT_FIXED_RESPONSES[post_id].get(comment_text)
-                if fixed_response:
-                    logger.info(f"Found in-memory fixed response for post_id {post_id} and comment: {comment_text}")
+                post_triggers = COMMENT_FIXED_RESPONSES[post_id] # This is a dict of {trigger: actions}
+                for trigger, actions in post_triggers.items():
+                    # Case-insensitive matching, and check if trigger is a substring
+                    if trigger.lower() in comment_text.lower():
+                        fixed_response_actions = actions
+                        logger.info(f"Found matching trigger '{trigger}' in comment text for post_id {post_id}.")
+                        break # Found the first matching trigger
 
-            # Fallback to global if not found in memory (legacy)
-            if not fixed_response and "COMMENT_FIXED_RESPONSES" in globals() and COMMENT_FIXED_RESPONSES.get(comment_text):
-                fixed_response = COMMENT_FIXED_RESPONSES.get(comment_text)
-                logger.info(f"Found global fixed response for comment: {comment_text}")
-
-            if fixed_response:
+            if fixed_response_actions:
+                logger.info(f"Processing fixed response actions: {fixed_response_actions}")
                 # Send reply as a comment if available
-                if fixed_response.get('comment'):
-                    comment_reply = fixed_response['comment']
-                    comment_success = InstagramService.send_comment_reply(comment_data['comment_id'], comment_reply)
+                if fixed_response_actions.get('comment'):
+                    comment_reply_text = fixed_response_actions['comment']
+                    comment_success = InstagramService.send_comment_reply(comment_data['comment_id'], comment_reply_text)
                     if comment_success:
                         logger.info(f"Sent fixed comment reply to comment {comment_data['comment_id']}")
                         replied_in_comment = True
@@ -788,24 +834,64 @@ class InstagramService:
                         logger.error(f"Failed to send fixed comment reply to comment {comment_data['comment_id']}")
 
                 # Send reply as a direct message if available
-                if fixed_response.get('DM'):
-                    dm_reply = fixed_response['DM']
-                    dm_success = InstagramService.send_message(user_id, dm_reply)
+                if fixed_response_actions.get('DM'):
+                    dm_reply_text = fixed_response_actions['DM']
+                    dm_success = InstagramService.send_message(user_id, dm_reply_text)
                     if dm_success:
                         logger.info(f"Sent fixed DM reply to user {user_id} for comment {comment_data['comment_id']}")
                         replied_in_direct = True
+                        # Store the fixed response message
+                        message_doc = User.create_message_document(
+                            text=dm_reply_text,
+                            role=MessageRole.FIXED_RESPONSE.value,
+                            timestamp=datetime.now(timezone.utc)
+                        )
+                        # Add the fixed response message to user's direct messages and update status
+                        db.users.update_one(
+                            {"user_id": user_id},
+                            {
+                                "$push": {"direct_messages": message_doc},
+                                "$set": {"status": UserStatus.FIXED_REPLIED.value, "updated_at": datetime.now(timezone.utc)}
+                            }
+                        )
+                        logger.info(f"Stored fixed response DM message and set status to FIXED_REPLIED for user {user_id}")
+                    elif not dm_success:
+                        private_reply_success = InstagramService.send_comment_private_reply(comment_data['comment_id'], dm_reply_text)
+                        if private_reply_success:
+                            replied_in_direct = True
+                            logger.info(f"Sent private reply to comment {comment_data['comment_id']} for user {user_id}")
+                            # Store the fixed response message for private reply too
+                            message_doc = User.create_message_document(
+                                text=dm_reply_text,
+                                role=MessageRole.FIXED_RESPONSE.value,
+                                timestamp=datetime.now(timezone.utc)
+                            )
+                            # Add the fixed response message to user's direct messages and update status
+                            db.users.update_one(
+                                {"user_id": user_id},
+                                {
+                                    "$push": {"direct_messages": message_doc},
+                                    "$set": {"status": UserStatus.FIXED_REPLIED.value, "updated_at": datetime.now(timezone.utc)}
+                                }
+                            )
+                            logger.info(f"Stored fixed response private reply message and set status to FIXED_REPLIED for user {user_id}")
                     else:
                         logger.error(f"Failed to send fixed DM reply to user {user_id}")
+            else:
+                logger.info(f"No fixed response found for comment on post {post_id} with text: '{comment_text}'")
+
 
             # Update the comment status based on replies
             if replied_in_direct and replied_in_comment:
                 InstagramService.update_comment_status(db, user_id, comment_doc['comment_id'], "replied_in_cm_DM")
+                # Status already updated to FIXED_REPLIED when DM was sent
             elif replied_in_direct:
                 InstagramService.update_comment_status(db, user_id, comment_doc['comment_id'], "replied_in_DM")
+                # Status already updated to FIXED_REPLIED when DM was sent
             elif replied_in_comment:
                 InstagramService.update_comment_status(db, user_id, comment_doc['comment_id'], "replied_in_cm")
             else:
-                InstagramService.update_comment_status(db, user_id, comment_doc['comment_id'], "pending")
+                InstagramService.update_comment_status(db, user_id, comment_doc['comment_id'], "pending") # Or 'no_fixed_response_match'
 
             return True
 
@@ -826,7 +912,7 @@ class InstagramService:
         try:
             base_endpoint = f"https://graph.facebook.com/v22.0/{Config.PAGE_ID}"
             # /media?fields=caption,media_url,media_type,id,like_count,timestamp,comments.limit(1000){id,timestamp,text,from,like_count,replies.limit(1000){id,timestamp,text,from,like_count}}&limit=1000
-            post_endpoint = "/media?fields=caption,media_url,thumbnail_url,media_type,id,like_count,timestamp&limit=1000"
+            post_endpoint = "/media?fields=caption,media_url,thumbnail_url,media_type,id,like_count,timestamp,children{media_url,thumbnail_url,media_type,id}&limit=1000"
             params = {"access_token": Config.FB_ACCESS_TOKEN}
             response = requests.get(base_endpoint + post_endpoint, params=params)
             response.raise_for_status()
@@ -834,22 +920,23 @@ class InstagramService:
             data = response.json()
             posts = data.get('data', [])
 
-            for post in posts:
+            for post_item in posts: # Renamed post to post_item to avoid conflict with Post model
                 # Create/update post using Post model
                 post_data = {
-                    "id": post.get('id'),
-                    "caption": post.get('caption', ''),
-                    "media_url": post.get('media_url', ''),
-                    "media_type": post.get('media_type', ''),
-                    "like_count": post.get('like_count', 0),
-                    "timestamp": post.get('timestamp'),
-                    "thumbnail_url" : post.get('thumbnail_url')
+                    "id": post_item.get('id'),
+                    "caption": post_item.get('caption', ''),
+                    "media_url": post_item.get('media_url', ''),
+                    "media_type": post_item.get('media_type', ''),
+                    "like_count": post_item.get('like_count', 0),
+                    "timestamp": post_item.get('timestamp'),
+                    "thumbnail_url" : post_item.get('thumbnail_url'),
+                    "children": post_item.get('children', {})  # Include children data from API
                 }
                 Post.create_or_update_from_instagram(post_data)
 
                 # Process comments
-                comment_data = post.get('comments', {}).get('data', [])
-                for comment in comment_data:
+                comment_data_list = post_item.get('comments', {}).get('data', []) # Renamed comment_data
+                for comment in comment_data_list:
                     from_user = comment.get('from', {})
                     from_user_id = from_user.get('id')
                     from_username = from_user.get('username', '')
@@ -860,53 +947,54 @@ class InstagramService:
                             "id": from_user_id,
                             "username": from_username
                         }
-                        commented_user = InstagramService.process_user(commenter_info)
+                        # Ensure process_user is called to create/get the user document
+                        InstagramService.process_user(commenter_info, UserStatus.SCRAPED.value)
 
-                        if commented_user:
-                            # Create top-level comment using User model's method
-                            comment_doc = User.create_comment_document(
-                                post_id=post.get('id'),
-                                comment_id=comment.get('id'),
-                                text=comment.get('text', ''),
-                                parent_id=None,
-                                timestamp=parse_instagram_timestamp(comment.get('timestamp')),
-                                status="pending"
-                            )
-                            comment_doc["like_count"] = comment.get('like_count', 0)
 
-                            # Add comment to user's comments array
-                            User.add_comment_to_user(from_user_id, comment_doc)
+                        # Create top-level comment using User model's method
+                        comment_doc = User.create_comment_document(
+                            post_id=post_item.get('id'), # Use post_item here
+                            comment_id=comment.get('id'),
+                            text=comment.get('text', ''),
+                            parent_id=None,
+                            timestamp=parse_instagram_timestamp(comment.get('timestamp')),
+                            status="pending" # Or determine based on fixed response logic if applied here too
+                        )
+                        comment_doc["like_count"] = comment.get('like_count', 0)
 
-                            # Process replies
-                            replies_data = comment.get('replies', {}).get('data', [])
-                            for reply in replies_data:
-                                reply_from = reply.get('from', {})
-                                reply_user_id = reply_from.get('id')
-                                reply_username = reply_from.get('username', '')
+                        # Add comment to user's comments array
+                        User.add_comment_to_user(from_user_id, comment_doc)
 
-                                if reply_user_id:
-                                    # Process reply user
-                                    reply_user_info = {
-                                        "id": reply_user_id,
-                                        "username": reply_username
-                                    }
-                                    reply_user = InstagramService.process_user(reply_user_info)
+                        # Process replies
+                        replies_data = comment.get('replies', {}).get('data', [])
+                        for reply in replies_data:
+                            reply_from = reply.get('from', {})
+                            reply_user_id = reply_from.get('id')
+                            reply_username = reply_from.get('username', '')
 
-                                    if reply_user:
-                                        # Create reply comment using User model's method
-                                        reply_doc = User.create_comment_document(
-                                            post_id=post.get('id'),
-                                            comment_id=reply.get('id'),
-                                            text=reply.get('text', ''),
-                                            parent_id=comment.get('id'),
-                                            timestamp=parse_instagram_timestamp(reply.get('timestamp')),
-                                            status="pending"
-                                        )
-                                        reply_doc["like_count"] = reply.get('like_count', 0)
+                            if reply_user_id:
+                                # Process reply user
+                                reply_user_info = {
+                                    "id": reply_user_id,
+                                    "username": reply_username
+                                }
+                                InstagramService.process_user(reply_user_info, UserStatus.SCRAPED.value)
 
-                                        # Add reply to user's comments array
-                                        User.add_comment_to_user(reply_user_id, reply_doc)
 
+                                # Create reply comment using User model's method
+                                reply_doc = User.create_comment_document(
+                                    post_id=post_item.get('id'), # Use post_item here
+                                    comment_id=reply.get('id'),
+                                    text=reply.get('text', ''),
+                                    parent_id=comment.get('id'), # Parent is the top-level comment
+                                    timestamp=parse_instagram_timestamp(reply.get('timestamp')),
+                                    status="pending"
+                                )
+                                reply_doc["like_count"] = reply.get('like_count', 0)
+
+                                # Add reply to user's comments array
+                                User.add_comment_to_user(reply_user_id, reply_doc)
+            logger.info(f"Successfully processed {len(posts)} posts and their comments.")
             return True
 
         except requests.exceptions.RequestException as req_err:
@@ -926,22 +1014,22 @@ class InstagramService:
             response = requests.get(base_endpoint + story_endpoint, params=params)
             response.raise_for_status()
 
-            stories = response.json().get('data', [])
+            stories_data = response.json().get('data', []) # Renamed stories to stories_data
 
             result_stories = []
-            for story in stories:
-                story_data = {
-                    "id": story.get('id'),
-                    "media_type": story.get('media_type', ''),
-                    "caption": story.get('caption', ''),
-                    "like_count": story.get('like_count', 0),
-                    "thumbnail_url": story.get('thumbnail_url'),
-                    "media_url": story.get('media_url'),
-                    "timestamp": story.get('timestamp')
+            for story_item in stories_data: # Renamed story to story_item
+                story_data_dict = { # Renamed story_data to story_data_dict
+                    "id": story_item.get('id'),
+                    "media_type": story_item.get('media_type', ''),
+                    "caption": story_item.get('caption', ''),
+                    "like_count": story_item.get('like_count', 0),
+                    "thumbnail_url": story_item.get('thumbnail_url',''),
+                    "media_url": story_item.get('media_url'),
+                    "timestamp": story_item.get('timestamp')
                 }
-                Story.create_or_update_from_instagram(story_data)
-                result_stories.append(story_data)
-
+                Story.create_or_update_from_instagram(story_data_dict)
+                result_stories.append(story_data_dict)
+            logger.info(f"Successfully fetched and processed {len(result_stories)} stories.")
             return result_stories
 
         except requests.exceptions.RequestException as req_err:
@@ -952,27 +1040,142 @@ class InstagramService:
             return []
 
     @staticmethod
-    def handle_story_reply(db, story_id, trigger_keyword, user_id):
-        """Send a direct message in response to a story, using in-memory STORY_FIXED_RESPONSES."""
-        # Check global fixed_responses setting
-        if not APP_SETTINGS.get('fixed_responses', True):
-            logger.info("Fixed responses are globally disabled by app settings.")
-            return False
-        logger.info(f"Checking in-memory STORY_FIXED_RESPONSES for story_id={story_id}, trigger_keyword={trigger_keyword}")
-        if not story_id or not trigger_keyword:
-            logger.warning("Missing story_id or trigger_keyword for story fixed response.")
-            return False
-        if story_id in STORY_FIXED_RESPONSES:
-            response_obj = STORY_FIXED_RESPONSES[story_id]
-            if response_obj and response_obj.get('trigger_keyword') == trigger_keyword:
-                direct_response = response_obj.get('direct_response_text')
-                if direct_response:
-                    logger.info(f"Found fixed response for story_id={story_id}, sending DM to user_id={user_id}")
-                    return InstagramService.send_message(user_id, direct_response)
+    def handle_shared_content(db, attachment, user_id=None, trigger_keyword=None):
+        # trigger_keyword comes from message.get('text') in webhook.py process_message_event
+        try:
+            attachment_type = attachment.get('type', '')
+            payload = attachment.get('payload', {})
+            media_url = payload.get('url')
+            title = payload.get('title', 'No Title')
+            user_msg = payload.get('user_message', '')
+
+            logger.info(f"Handling shared content: type='{attachment_type}', title='{title}', trigger_keyword='{trigger_keyword}'")
+
+            # extract ID from URL if not directly present
+            story_id = payload.get('id') or payload.get('story_id')
+            if not story_id and 'url' in payload:
+                url = payload['url']
+                match = re.search(r'asset_id=(\d+)', url)
+                if match:
+                    story_id = match.group(1)
+                    logger.debug(f"Extracted story_id from URL: {story_id}")
+
+            # Only proceed if fixed responses enabled
+            if APP_SETTINGS.get('fixed_responses', True) and \
+               attachment_type in ['story', 'story_reply', 'story_mention', 'share'] and story_id and trigger_keyword and user_id:
+
+                logger.debug(f"Checking fixed responses for story_id='{story_id}', trigger_text='{trigger_keyword}'")
+                story_triggers = STORY_FIXED_RESPONSES.get(story_id, {})
+                matched = None
+
+                # Use substring matching for triggers
+                for trigger, actions in story_triggers.items():
+                    if trigger.lower() in trigger_keyword.lower():
+                        matched = (trigger, actions)
+                        logger.info(f"Matched trigger '{trigger}' for story_id {story_id}")
+                        break
+
+                if matched:
+                    trig_key, actions = matched
+                    response_text = actions.get('direct_response_text')
+                    if response_text:
+                        logger.info(f"Sending fixed DM for story {story_id} using trigger '{trig_key}' to user {user_id}")
+                        # Send the message
+                        success = InstagramService.send_message(user_id, response_text)
+                        if success:
+                            # Store the fixed response message and update user status
+                            message_doc = User.create_message_document(
+                                text=response_text,
+                                role=MessageRole.FIXED_RESPONSE.value,
+                                timestamp=datetime.now(timezone.utc)
+                            )
+                            # Update user with fixed response message and FIXED_REPLIED status
+                            db.users.update_one(
+                                {"user_id": user_id},
+                                {
+                                    "$push": {"direct_messages": message_doc},
+                                    "$set": {"status": UserStatus.FIXED_REPLIED.value, "updated_at": datetime.now(timezone.utc)}
+                                }
+                            )
+                            logger.info(f"Stored fixed response message and set status to FIXED_REPLIED for user {user_id}")
+                        return None  # skip further processing
+                    else:
+                        logger.warning(f"No direct_response_text for story {story_id}, trigger '{trig_key}'")
                 else:
-                    logger.warning(f"No direct_response_text found for story_id={story_id}")
+                    logger.debug(f"No matching fixed trigger for story_id {story_id}")
+
+            #  Begin normal shared content analysis if no fixed response was sent
+            result_text = f"Shared {attachment_type}: {title}\n"
+            if user_msg: result_text += f"User Message: {user_msg}...\n"
+
+            content_id_for_db_lookup = story_id  # Unified from id/story_id/asset_id
+
+            # Try to find more details from our DB if it's a known post or story
+            if content_id_for_db_lookup:
+                if content_id_for_db_lookup in IG_CONTENT_IDS.get('post_ids', []):
+                    post = Post.get_by_instagram_id(content_id_for_db_lookup)
+                    if post:
+                        result_text += "Post Details (from DB):\n"
+                        if post.get('caption'): result_text += f"Caption: {post['caption'][:100]}...\n"
+                        if post.get('label'): result_text += f"Label: {post['label']}\n"
+                        if post.get('admin_explanation'): result_text += f"Admin Explanation: {post['admin_explanation'][:100]}...\n"
+                        return result_text
+                elif content_id_for_db_lookup in IG_CONTENT_IDS.get('story_ids', []):
+                    story = Story.get_by_instagram_id(content_id_for_db_lookup)
+                    if story:
+                        result_text += "Story Details (from DB):\n"
+                        if story.get('caption'): result_text += f"Caption: {story['caption'][:100]}...\n"
+                        if story.get('label'): result_text += f"Label: {story['label']}\n"
+                        if story.get('admin_explanation'): result_text += f"Admin Explanation: {story['admin_explanation'][:100]}...\n"
+                        return result_text
+
+            # If not found in DB or no specific details, proceed with generic media analysis
+            if media_url:
+                content_media_type = InstagramService.check_content_type(media_url)
+                logger.info(f"Processing media URL: {media_url}, detected type: {content_media_type}")
+
+                if content_media_type == 'image':
+                    logger.info(f"Downloading and analyzing image from: {media_url}")
+                    image = InstagramService.download_image(media_url)
+                    if image:
+                        try:
+                            label = process_image(image)
+                            logger.info(f"Image analysis result: {label}")
+                            result_text += f"Image Analysis: {label}\n"
+                        except Exception as e:
+                            logger.error(f"Error during image analysis: {str(e)}")
+                            result_text += "Error analyzing image.\n"
+                    else:
+                        logger.warning("Failed to download image")
+                        result_text += "Could not download image for analysis.\n"
+                elif content_media_type == 'video':
+                    video_thumbnail_url = payload.get('thumbnail_url')
+                    if video_thumbnail_url:
+                        logger.info(f"Processing video thumbnail: {video_thumbnail_url}")
+                        image = InstagramService.download_image(video_thumbnail_url)
+                        if image:
+                            try:
+                                label = process_image(image)
+                                logger.info(f"Video thumbnail analysis result: {label}")
+                                result_text += f"Video Thumbnail Analysis: {label}\n"
+                            except Exception as e:
+                                logger.error(f"Error during video thumbnail analysis: {str(e)}")
+                                result_text += "Error analyzing video thumbnail.\n"
+                        else:
+                            result_text += "Could not process video thumbnail.\n"
+                    else:
+                        result_text += "Shared video (no thumbnail available for analysis).\n"
+                elif content_media_type == 'audio':
+                    result_text += "Shared audio content.\n"
+                else:
+                    result_text += f"Shared {content_media_type} content (URL: {media_url}).\n"
             else:
-                logger.info(f"No matching trigger_keyword in fixed response for story_id={story_id}")
-        else:
-            logger.info(f"No fixed response configured in memory for story_id={story_id}")
-        return False
+                logger.warning("No media URL available for analysis")
+                result_text += "Shared content (no media URL available for analysis).\n"
+
+            return result_text
+
+        except Exception as e:
+            logger.error(f"Error handling shared content: {str(e)}", exc_info=True)
+            return f"Shared {attachment.get('type', 'content')}: {attachment.get('payload', {}).get('title', 'N/A')}\n(Error processing content details)"
+

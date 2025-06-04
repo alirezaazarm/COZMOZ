@@ -28,7 +28,7 @@ class User:
     def create_user_document(user_id, username, thread_id=None, status=UserStatus.WAITING.value):
         """Create a new user document structure"""
         document = {
-            "user_id": user_id,
+            "user_id": str(user_id),
             "username": username,
             "status": status,
             "thread_id": thread_id,

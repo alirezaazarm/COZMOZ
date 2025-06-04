@@ -16,7 +16,7 @@ scheduler = BackgroundScheduler(
             collection=SCHEDULER_JOBS_COLLECTION
         )
     },
-    executors={'default': ThreadPoolExecutor(1)},
+    executors={'default': ThreadPoolExecutor(10)},
     job_defaults={'misfire_grace_time': 60, 'coalesce': True}
 )
 
