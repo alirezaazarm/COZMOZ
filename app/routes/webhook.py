@@ -6,7 +6,7 @@ import json
 from ..services.instagram_service import InstagramService
 from ..utils.helpers import get_db
 from ..config import Config
-from ..models.enums import MessageRole
+from ..models.enums import MessageRole, UserStatus
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +230,12 @@ def process_message_event(db, event, sender_id, timestamp):
 
         # 1) Handle story replies
         if 'reply_to' in message and isinstance(message['reply_to'], dict) and 'story' in message['reply_to']:
+            # Ensure user exists before processing story reply
+            if not is_echo:  # Only for non-echo messages (actual user messages)
+                user_info = {'id': sender_id, 'username': ''}
+                InstagramService.process_user(user_info, UserStatus.WAITING.value)
+                logger.info(f"Ensured user {sender_id} exists for story reply processing")
+            
             story_payload = message['reply_to']['story']
             attachment = {
                 'type': 'story_reply',
@@ -260,92 +266,115 @@ def process_message_event(db, event, sender_id, timestamp):
         if attachments:
             logger.info(f"Found {len(attachments)} attachment(s) in the message.")
             
-            # Process each attachment separately and store each one individually
-            attachment_results = []
-            fixed_response_triggered = False
+            # Filter out template media types
+            filtered_attachments = []
+            for attachment in attachments:
+                # Check both payload.media_type and attachment.type for template
+                media_type = attachment.get('payload', {}).get('media_type')
+                attachment_type = attachment.get('type', '')
+                
+                if media_type == 'template' or attachment_type == 'template':
+                    logger.info(f"Ignoring attachment with media_type '{media_type}' or type '{attachment_type}' (template)")
+                    continue
+                    
+                # Also check if the attachment payload has template-related fields
+                payload = attachment.get('payload', {})
+                if payload.get('template_type') or 'template' in str(payload).lower():
+                    logger.info(f"Ignoring template-related attachment: {payload}")
+                    continue
+                    
+                filtered_attachments.append(attachment)
             
-            for i, attachment in enumerate(attachments):
-                attachment_type = attachment.get('type', 'unknown')
-                attachment_url = attachment.get('payload', {}).get('url', 'no_url')
-                logger.info(f"Processing attachment {i+1}/{len(attachments)}: type={attachment_type}, url={attachment_url}")
+            if not filtered_attachments:
+                logger.info("All attachments were templates, skipping attachment processing")
+                # Continue to process text message if any
+            else:
+                # Process each attachment separately and store each one individually
+                attachment_results = []
+                fixed_response_triggered = False
                 
-                # Check for fixed response on first attachment only (to maintain existing behavior)
-                if i == 0:
-                    logger.info(f"Checking for fixed response on first attachment")
-                    result = InstagramService.handle_shared_content(
-                        db=db,
-                        attachment=attachment,
-                        user_id=sender_id,
-                        trigger_keyword=message.get('text')
-                    )
-                    if result is None:
-                        logger.info("Attachment handled via fixed response. Skipping further message processing.")
-                        fixed_response_triggered = True
-                        break
-                else:
-                    # For subsequent attachments, process without fixed response check
-                    logger.info(f"Processing subsequent attachment {i+1} without fixed response check")
-                    result = InstagramService.handle_shared_content(
-                        db=db,
-                        attachment=attachment,
-                        user_id=sender_id,
-                        trigger_keyword=None  # No fixed response for subsequent attachments
-                    )
+                for i, attachment in enumerate(filtered_attachments):
+                    attachment_type = attachment.get('type', 'unknown')
+                    attachment_url = attachment.get('payload', {}).get('url', 'no_url')
+                    logger.info(f"Processing attachment {i+1}/{len(filtered_attachments)}: type={attachment_type}, url={attachment_url}")
+                    
+                    # Check for fixed response on first attachment only (to maintain existing behavior)
+                    if i == 0:
+                        logger.info(f"Checking for fixed response on first attachment")
+                        result = InstagramService.handle_shared_content(
+                            db=db,
+                            attachment=attachment,
+                            user_id=sender_id,
+                            trigger_keyword=message.get('text')
+                        )
+                        if result is None:
+                            logger.info("Attachment handled via fixed response. Skipping further message processing.")
+                            fixed_response_triggered = True
+                            break
+                    else:
+                        # For subsequent attachments, process without fixed response check
+                        logger.info(f"Processing subsequent attachment {i+1} without fixed response check")
+                        result = InstagramService.handle_shared_content(
+                            db=db,
+                            attachment=attachment,
+                            user_id=sender_id,
+                            trigger_keyword=None  # No fixed response for subsequent attachments
+                        )
+                    
+                    logger.info(f"Attachment {i+1} processing result: {result}")
+                    
+                    # Store each attachment as a separate message in the database with its own analysis
+                    attachment_message_id = f"{message['mid']}_attachment_{i}"
+                    attachment_message_data = {
+                        'id': attachment_message_id,
+                        'from': {'id': sender_id},
+                        'text': result if result else f"Attachment {i+1}: {attachment_type}",
+                        'timestamp': timestamp,
+                        'is_echo': is_echo,
+                        'role': message_role,
+                        'media_type': attachment_type,
+                        'media_url': attachment_url if attachment_url != 'no_url' else None
+                    }
+                    if recipient_id:
+                        attachment_message_data['recipient'] = {'id': recipient_id}
+                    
+                    logger.info(f"Storing attachment message with ID: {attachment_message_id}")
+                    
+                    # Store this attachment message separately with its individual analysis
+                    success = InstagramService.handle_message(db, attachment_message_data)
+                    if success:
+                        logger.info(f"Successfully stored attachment {i+1} with analysis: {result}")
+                        if result:
+                            attachment_results.append(f"Image {i+1}: {result}")
+                    else:
+                        logger.error(f"Failed to store attachment {i+1} for message {message['mid']}")
                 
-                logger.info(f"Attachment {i+1} processing result: {result}")
+                if fixed_response_triggered:
+                    return True
                 
-                # Store each attachment as a separate message in the database with its own analysis
-                attachment_message_id = f"{message['mid']}_attachment_{i}"
-                attachment_message_data = {
-                    'id': attachment_message_id,
-                    'from': {'id': sender_id},
-                    'text': result if result else f"Attachment {i+1}: {attachment_type}",
-                    'timestamp': timestamp,
-                    'is_echo': is_echo,
-                    'role': message_role,
-                    'media_type': attachment_type,
-                    'media_url': attachment_url if attachment_url != 'no_url' else None
-                }
-                if recipient_id:
-                    attachment_message_data['recipient'] = {'id': recipient_id}
+                # If we have attachments, we've already stored each one individually
+                # Only store the main message if it has text content (without attachment analyses)
+                if message_data.get('text') and message_data['text'].strip():
+                    # Store the original text message without attachment analyses
+                    text_message_data = {
+                        'id': message['mid'],
+                        'from': {'id': sender_id},
+                        'text': message.get('text'),  # Original text only
+                        'timestamp': timestamp,
+                        'is_echo': is_echo,
+                        'role': message_role
+                    }
+                    if recipient_id:
+                        text_message_data['recipient'] = {'id': recipient_id}
+                    
+                    success = InstagramService.handle_message(db, text_message_data)
+                    if success:
+                        logger.info(f"Successfully stored original text message: {message.get('text')}")
+                    else:
+                        logger.error(f"Failed to store original text message")
                 
-                logger.info(f"Storing attachment message with ID: {attachment_message_id}")
-                
-                # Store this attachment message separately with its individual analysis
-                success = InstagramService.handle_message(db, attachment_message_data)
-                if success:
-                    logger.info(f"Successfully stored attachment {i+1} with analysis: {result}")
-                    if result:
-                        attachment_results.append(f"Image {i+1}: {result}")
-                else:
-                    logger.error(f"Failed to store attachment {i+1} for message {message['mid']}")
-            
-            if fixed_response_triggered:
+                logger.info(f"Processed {len(filtered_attachments)} attachments individually.")
                 return True
-            
-            # If we have attachments, we've already stored each one individually
-            # Only store the main message if it has text content (without attachment analyses)
-            if message_data.get('text') and message_data['text'].strip():
-                # Store the original text message without attachment analyses
-                text_message_data = {
-                    'id': message['mid'],
-                    'from': {'id': sender_id},
-                    'text': message.get('text'),  # Original text only
-                    'timestamp': timestamp,
-                    'is_echo': is_echo,
-                    'role': message_role
-                }
-                if recipient_id:
-                    text_message_data['recipient'] = {'id': recipient_id}
-                
-                success = InstagramService.handle_message(db, text_message_data)
-                if success:
-                    logger.info(f"Successfully stored original text message: {message.get('text')}")
-                else:
-                    logger.error(f"Failed to store original text message")
-            
-            logger.info(f"Processed {len(attachments)} attachments individually.")
-            return True
 
         # 3) Handle messages without attachments - route to standard message handling
         success = InstagramService.handle_message(db, message_data)

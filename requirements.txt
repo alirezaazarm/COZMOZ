@@ -14,3 +14,4 @@ pathlib
 streamlit
 beautifulsoup4
 accelerate
+plotly

@@ -1,6 +1,11 @@
 import logging
 import streamlit as st
 from app.services.backend import Backend # Assuming this path is correct
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from datetime import datetime, timezone, timedelta
 
 logging.basicConfig(
     handlers=[logging.FileHandler('logs.txt', encoding='utf-8'), logging.StreamHandler()],
@@ -54,10 +59,12 @@ class BaseSection:
         self.const = AppConstants()
 #===============================================================================================================================
 class AppStatusSection(BaseSection): #
-    """Handles application status settings""" #
+    """Handles application status settings and analytics""" #
     def render(self):
         try:
             self._render_toggles() #
+            st.write("---") #
+            self._render_analytics_dashboard() #
             st.write("---") #
         except RuntimeError as e: #
             st.error(f"Error managing app status: {str(e)}") #
@@ -78,6 +85,296 @@ class AppStatusSection(BaseSection): #
                 status_msg = "enabled" if new_state else "disabled" #
                 icon = self.const.ICONS['success'] if new_state else self.const.ICONS['error'] #
                 st.success(f"{icon} {key.replace('_', ' ').title()} {status_msg} successfully!") #
+
+    def _render_analytics_dashboard(self): #
+        """Render analytics dashboard with charts and statistics""" #
+        st.subheader(f"{self.const.ICONS['dashboard']} Analytics Dashboard") #
+        
+        # Create tabs for different analytics views
+        message_tab, user_tab = st.tabs([
+            f"{self.const.ICONS['chat']} Message Analytics",
+            f"{self.const.ICONS['user']} User Statistics"
+        ])
+        
+        with message_tab:
+            self._render_message_analytics()
+            
+        with user_tab:
+            self._render_user_statistics()
+
+    def _render_message_analytics(self): #
+        """Render message analytics with histogram charts""" #
+        try:
+            # Time frame and date range selectors
+            col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 1])
+            
+            with col1:
+                time_frame = st.selectbox(
+                    "Time Frame",
+                    options=["daily", "hourly"],
+                    index=0,
+                    key="message_time_frame"
+                )
+            
+            with col2:
+                # Default to last 7 days
+                default_start = datetime.now(timezone.utc) - timedelta(days=7)
+                start_date = st.date_input(
+                    "Start Date",
+                    value=default_start.date(),
+                    key="message_start_date"
+                )
+            
+            with col3:
+                start_time = st.time_input(
+                    "Start Time",
+                    value=default_start.time(),
+                    key="message_start_time"
+                )
+            
+            with col4:
+                # Default to now
+                default_end = datetime.now(timezone.utc)
+                end_date = st.date_input(
+                    "End Date",
+                    value=default_end.date(),
+                    key="message_end_date"
+                )
+                
+                end_time = st.time_input(
+                    "End Time",
+                    value=default_end.time(),
+                    key="message_end_time"
+                )
+            
+            with col5:
+                if st.button(f"{self.const.ICONS['update']} Refresh Data", key="refresh_message_data"):
+                    st.rerun()
+            
+            # Combine date and time
+            start_datetime = datetime.combine(start_date, start_time).replace(tzinfo=timezone.utc)
+            end_datetime = datetime.combine(end_date, end_time).replace(tzinfo=timezone.utc)
+            
+            # Validate date range
+            if start_datetime >= end_datetime:
+                st.error("Start date/time must be before end date/time.")
+                return
+            
+            # Fetch message statistics using the new timeframe method
+            message_stats = self.backend.get_message_statistics_by_role_within_timeframe(time_frame, start_datetime, end_datetime)
+            
+            if not message_stats:
+                st.info("No message data available for the selected time period.")
+                return
+            
+            # Prepare data for plotting
+            # Convert statistics to DataFrame
+            data_rows = []
+            for date_str, roles in message_stats.items():
+                for role, count in roles.items():
+                    data_rows.append({
+                        'Date': date_str,
+                        'Role': role,
+                        'Count': count
+                    })
+            
+            if not data_rows:
+                st.info("No message data to display.")
+                return
+                
+            df = pd.DataFrame(data_rows)
+            df['Date'] = pd.to_datetime(df['Date'])
+            df = df.sort_values('Date')
+            
+            # Create histogram chart
+            date_range_str = f"{start_datetime.strftime('%Y-%m-%d %H:%M')} to {end_datetime.strftime('%Y-%m-%d %H:%M')} UTC"
+            fig = px.bar(
+                df, 
+                x='Date', 
+                y='Count', 
+                color='Role',
+                title=f'Direct Messages by Role ({time_frame.title()} View - {date_range_str})',
+                labels={'Count': 'Number of Messages', 'Date': 'Time Period'},
+                color_discrete_map={
+                    'user': '#1f77b4',
+                    'assistant': '#ff7f0e', 
+                    'admin': '#2ca02c',
+                    'fixed_response': '#d62728'
+                }
+            )
+            
+            fig.update_layout(
+                xaxis_title="Time Period",
+                yaxis_title="Number of Messages",
+                legend_title="Message Role",
+                height=500,
+                showlegend=True
+            )
+            
+            # Format x-axis based on time frame
+            if time_frame == "hourly":
+                fig.update_xaxes(tickformat="%Y-%m-%d %H:%M")
+            else:
+                fig.update_xaxes(tickformat="%Y-%m-%d")
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Summary statistics
+            st.subheader("Summary Statistics")
+            
+            # Calculate totals by role
+            role_totals = df.groupby('Role')['Count'].sum().sort_values(ascending=False)
+            
+            cols = st.columns(len(role_totals))
+            for i, (role, total) in enumerate(role_totals.items()):
+                with cols[i]:
+                    st.metric(
+                        label=f"{role.replace('_', ' ').title()} Messages",
+                        value=f"{total:,}"
+                    )
+            
+            # Show raw data table
+            with st.expander("View Raw Data"):
+                st.dataframe(df, use_container_width=True)
+                
+        except Exception as e:
+            st.error(f"Error rendering message analytics: {str(e)}")
+
+    def _render_user_statistics(self): #
+        """Render user statistics and status counts""" #
+        try:
+            # Time window selector
+            col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
+            
+            with col1:
+                # Default to last 7 days
+                default_start = datetime.now(timezone.utc) - timedelta(days=7)
+                start_date = st.date_input(
+                    "Start Date",
+                    value=default_start.date(),
+                    key="user_stats_start_date"
+                )
+            
+            with col2:
+                start_time = st.time_input(
+                    "Start Time",
+                    value=default_start.time(),
+                    key="user_stats_start_time"
+                )
+            
+            with col3:
+                # Default to now
+                default_end = datetime.now(timezone.utc)
+                end_date = st.date_input(
+                    "End Date",
+                    value=default_end.date(),
+                    key="user_stats_end_date"
+                )
+            
+            with col4:
+                end_time = st.time_input(
+                    "End Time",
+                    value=default_end.time(),
+                    key="user_stats_end_time"
+                )
+            
+            # Combine date and time
+            start_datetime = datetime.combine(start_date, start_time).replace(tzinfo=timezone.utc)
+            end_datetime = datetime.combine(end_date, end_time).replace(tzinfo=timezone.utc)
+            
+            # Validate date range
+            if start_datetime >= end_datetime:
+                st.error("Start date/time must be before end date/time.")
+                return
+            
+            # Refresh button and time window toggle
+            col1, col2, col3 = st.columns([1, 1, 4])
+            with col1:
+                if st.button(f"{self.const.ICONS['update']} Refresh", key="refresh_user_stats"):
+                    st.rerun()
+            
+            with col2:
+                use_time_window = st.checkbox(
+                    "Use Time Window",
+                    value=True,
+                    key="use_time_window",
+                    help="Filter users by their last update time within the selected window"
+                )
+            
+            # Fetch user statistics based on time window selection
+            if use_time_window:
+                status_counts = self.backend.get_user_status_counts_within_timeframe(start_datetime, end_datetime)
+                total_users = self.backend.get_total_users_count_within_timeframe(start_datetime, end_datetime)
+                time_info = f"({start_datetime.strftime('%Y-%m-%d %H:%M')} to {end_datetime.strftime('%Y-%m-%d %H:%M')} UTC)"
+            else:
+                status_counts = self.backend.get_user_status_counts()
+                total_users = self.backend.get_total_users_count()
+                time_info = "(All time)"
+            
+            # Display total users with time info
+            st.metric(
+                label=f"Total Users {time_info}",
+                value=f"{total_users:,}"
+            )
+            
+            if not status_counts:
+                st.info("No user status data available for the selected time period.")
+                return
+            
+            # Filter out SCRAPED status
+            filtered_status_counts = {
+                status: count for status, count in status_counts.items() 
+                if status.upper() != 'SCRAPED'
+            }
+            
+            if not filtered_status_counts:
+                st.info("No user status data available (excluding SCRAPED users) for the selected time period.")
+                return
+            
+            # Create two columns for charts and metrics
+            chart_col, metrics_col = st.columns([2, 1])
+            
+            with chart_col:
+                # Create pie chart for user status distribution
+                # Prepare data for pie chart (excluding SCRAPED)
+                status_df = pd.DataFrame([
+                    {'Status': status, 'Count': count} 
+                    for status, count in filtered_status_counts.items()
+                ])
+                
+                fig = px.pie(
+                    status_df,
+                    values='Count',
+                    names='Status',
+                    title=f'User Status Distribution {time_info}',
+                    color_discrete_sequence=px.colors.qualitative.Set3
+                )
+                
+                # Show only percentages, no labels
+                fig.update_traces(textposition='inside', textinfo='percent')
+                fig.update_layout(height=400)
+                
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with metrics_col:
+                st.subheader("Status Breakdown")
+                
+                # Sort statuses by count (descending) - excluding SCRAPED
+                sorted_statuses = sorted(filtered_status_counts.items(), key=lambda x: x[1], reverse=True)
+                
+                for status, count in sorted_statuses:
+                    # Format status name for display
+                    display_status = status.replace('_', ' ').title()
+                    
+                    # Remove percentage display as requested
+                    st.metric(
+                        label=display_status,
+                        value=f"{count:,}"
+                    )
+            
+        except Exception as e:
+            st.error(f"Error rendering user statistics: {str(e)}")
+
 
 class ProductScraperSection(BaseSection):
     """Handles product scraping functionality and additional info management."""

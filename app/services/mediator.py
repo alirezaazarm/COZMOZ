@@ -3,7 +3,7 @@ from .instagram_service import InstagramService, APP_SETTINGS
 from .message_service import MessageService
 from ..models.enums import UserStatus, MessageRole
 import logging
-from datetime import timezone
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -129,11 +129,54 @@ class Mediator:
 
             # Try to send to Instagram
             try:
-                instagram_success = InstagramService.send_message(user_id, response_text)
+                mids = InstagramService.send_message(user_id, response_text)
 
-                # Update user status based on Instagram success
-                if instagram_success:
-                    self.message_service.update_user_status(user_id, UserStatus.REPLIED.value)
+                # Update user status based on Instagram success and store message with MID
+                if mids:
+                    # Store the assistant response with MID(s) only after successful Instagram send
+                    if isinstance(mids, list):
+                        # Multiple messages were sent
+                        for i, mid in enumerate(mids):
+                            if i == 0:
+                                # First message gets the full response text
+                                message_doc = {
+                                    "text": response_text,
+                                    "role": MessageRole.ASSISTANT.value,
+                                    "timestamp": datetime.now(timezone.utc),
+                                    "mid": mid
+                                }
+                            else:
+                                # Subsequent messages get part indicators
+                                message_doc = {
+                                    "text": f"[Part {i+1} of assistant response]",
+                                    "role": MessageRole.ASSISTANT.value,
+                                    "timestamp": datetime.now(timezone.utc),
+                                    "mid": mid
+                                }
+                            
+                            # Add each message part to user's direct_messages
+                            self.db.users.update_one(
+                                {"user_id": user_id},
+                                {"$push": {"direct_messages": message_doc}}
+                            )
+                    else:
+                        # Single message was sent
+                        message_doc = {
+                            "text": response_text,
+                            "role": MessageRole.ASSISTANT.value,
+                            "timestamp": datetime.now(timezone.utc),
+                            "mid": mids
+                        }
+                        
+                        # Add message to user's direct_messages
+                        self.db.users.update_one(
+                            {"user_id": user_id},
+                            {"$push": {"direct_messages": message_doc}}
+                        )
+                    
+                    # Update status to ASSISTANT_REPLIED
+                    self.message_service.update_user_status(user_id, UserStatus.ASSISTANT_REPLIED.value)
+                    logger.info(f"Successfully sent and stored assistant response for user {user_id}")
                 else:
                     self.message_service.update_user_status(user_id, UserStatus.INSTAGRAM_FAILED.value)
 

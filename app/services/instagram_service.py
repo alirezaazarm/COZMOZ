@@ -62,11 +62,13 @@ class InstagramService:
                 timeout=10
             )
             response.raise_for_status()
-            logger.info(f"Message sent successfully to {recipient_id}")
-            return True
+            response_data = response.json()
+            mid = response_data.get('message_id')
+            logger.info(f"Message sent successfully to {recipient_id}, MID: {mid}")
+            return mid  # Return MID instead of True
         except Exception as e:
             logger.error(f"Instagram send failed: {str(e)}")
-            return False
+            return None  # Return None instead of False
 
     @staticmethod
     def send_split_messages(user_id, text):
@@ -217,7 +219,8 @@ class InstagramService:
                     logger.warning(f"Message part {i+1} exceeds limit: {len(msg)} chars, truncating")
                     messages[i] = msg[:900] + "..."
 
-            # Send each message
+            # Send each message and collect MIDs
+            mids = []
             success = True
             for i, message in enumerate(messages):
                 logger.info(f"Sending message part {i+1}/{len(messages)} ({len(message)} chars)")
@@ -228,21 +231,21 @@ class InstagramService:
                     continue
 
                 # Send this part without part numbers as requested
-                part_success = InstagramService.send_message_simple(user_id, message)
+                mid = InstagramService.send_message_simple(user_id, message)
 
-                if part_success:
-                    logger.info(f"Successfully sent part {i+1}/{len(messages)}")
+                if mid:
+                    logger.info(f"Successfully sent part {i+1}/{len(messages)}, MID: {mid}")
+                    mids.append(mid)
                 else:
                     logger.error(f"Failed to send part {i+1}/{len(messages)}")
-
-                success = success and part_success
+                    success = False
 
                 # Add a larger delay between messages to avoid rate limiting
                 if i < len(messages)-1:
                     import time
                     time.sleep(2.0)  # Increased from 0.5 to 2.0 seconds
 
-            return success
+            return mids if success else None
         except Exception as e:
             logger.error(f"Failed to split and send message: {str(e)}", exc_info=True)
             # Try the original message as a fallback, truncated if necessary
@@ -258,10 +261,11 @@ class InstagramService:
 
                 truncated = truncated_text[:900] + "..." if len(truncated_text) > 900 else truncated_text
                 logger.info(f"Attempting to send truncated message ({len(truncated)} chars) as fallback")
-                return InstagramService.send_message_simple(user_id, truncated)
+                mid = InstagramService.send_message_simple(user_id, truncated)
+                return [mid] if mid else None
             except Exception as fallback_error:
                 logger.error(f"Fallback sending also failed: {str(fallback_error)}")
-                return False
+                return None
 
     @staticmethod
     def send_message_simple(user_id, text):
@@ -291,8 +295,10 @@ class InstagramService:
 
                     # Check for success
                     response.raise_for_status()
-                    logger.info(f"Message sent successfully to {user_id}")
-                    return True
+                    response_data = response.json()
+                    mid = response_data.get('message_id')
+                    logger.info(f"Message sent successfully to {user_id}, MID: {mid}")
+                    return mid
 
                 except requests.exceptions.HTTPError as http_err:
                     error_message = f"HTTP error: {http_err}"
@@ -312,7 +318,7 @@ class InstagramService:
                         continue
                     else:
                         logger.error(f"Instagram API error (non-retriable or max retries reached): {error_message}")
-                        return False
+                        return None
 
                 except requests.exceptions.ConnectionError as conn_err:
                     logger.error(f"Connection error (attempt {attempt+1}): {str(conn_err)}")
@@ -324,7 +330,7 @@ class InstagramService:
                         continue
                     else:
                         logger.error("Max retries reached for connection error")
-                        return False
+                        return None
 
                 except requests.exceptions.Timeout as timeout_err:
                     logger.error(f"Timeout error (attempt {attempt+1}): {str(timeout_err)}")
@@ -336,15 +342,15 @@ class InstagramService:
                         continue
                     else:
                         logger.error("Max retries reached for timeout error")
-                        return False
+                        return None
 
             # If we get here, all retries failed
             logger.error(f"Failed to send message after {MAX_RETRIES+1} attempts")
-            return False
+            return None
 
         except Exception as e:
             logger.error(f"Failed to send message: {str(e)}", exc_info=True)
-            return False
+            return None
 
     @staticmethod
     def send_comment_private_reply(comment_id, text):
@@ -601,29 +607,38 @@ class InstagramService:
 
             # Handle echo messages (admin or assistant replies)
             if is_echo:
-                # Check if this is a fixed response echo by looking at the most recent user message
-                user_doc = db.users.find_one({"user_id": actual_user_id})
-                is_fixed_response_echo = False
-
-                if user_doc and user_doc.get('direct_messages'):
-                    # Get the most recent message
-                    recent_messages = user_doc['direct_messages']
-                    if recent_messages:
-                        last_message = recent_messages[-1]
-                        # If the last message has fixed_response role, this echo is from a fixed response
-                        if last_message.get('role') == MessageRole.FIXED_RESPONSE.value:
-                            is_fixed_response_echo = True
-                            logger.debug(f"[handle_message] Detected fixed response echo for user {actual_user_id}")
-
-                # Skip storing echo messages from fixed responses to avoid duplication
-                if is_fixed_response_echo:
-                    logger.info(f"[handle_message] Skipping fixed response echo message to avoid duplication for user {actual_user_id}")
+                # Check if this MID already exists in our database
+                message_mid = message_data.get('id')
+                mid_exists = User.check_mid_exists(actual_user_id, message_mid)
+                
+                if mid_exists:
+                    # MID exists, this is a duplicate echo - skip processing
+                    logger.info(f"[handle_message] MID {message_mid} already exists in database, skipping duplicate echo")
                     return True
+                else:
+                    # MID doesn't exist, need to determine correct role
+                    # Check if this is from a fixed response by looking at recent messages
+                    user_doc = db.users.find_one({"user_id": actual_user_id})
+                    if user_doc and user_doc.get('direct_messages'):
+                        # Get the most recent message
+                        recent_messages = user_doc['direct_messages']
+                        if recent_messages:
+                            last_message = recent_messages[-1]
+                            # If the last message has fixed_response role, this echo is from a fixed response
+                            if last_message.get('role') == MessageRole.FIXED_RESPONSE.value:
+                                msg_role = MessageRole.FIXED_RESPONSE.value
+                                logger.info(f"[handle_message] MID {message_mid} is from fixed response, assigning fixed_response role")
+                            else:
+                                msg_role = MessageRole.ADMIN.value
+                                logger.info(f"[handle_message] MID {message_mid} not from fixed response, assigning admin role")
+                        else:
+                            msg_role = MessageRole.ADMIN.value
+                            logger.info(f"[handle_message] No previous messages, assigning admin role")
+                    else:
+                        msg_role = MessageRole.ADMIN.value
+                        logger.info(f"[handle_message] User not found or no messages, assigning admin role")
 
-                # Determine the correct role based on assistant setting
-                is_assistant_enabled = "APP_SETTINGS" in globals() and APP_SETTINGS.get('assistant', True)
-                msg_role = MessageRole.ASSISTANT.value if is_assistant_enabled else MessageRole.ADMIN.value
-                logger.debug(f"[handle_message] Echo message with role: {msg_role}, assistant enabled: {is_assistant_enabled}")
+                logger.debug(f"[handle_message] Echo message with role: {msg_role}")
 
                 # Create a message document
                 message_doc = User.create_message_document(
@@ -631,25 +646,36 @@ class InstagramService:
                     role=msg_role,
                     media_type=media_type,
                     media_url=media_url,
-                    timestamp=timestamp
+                    timestamp=timestamp,
+                    mid=message_mid
                 )
 
                 logger.debug(f"[handle_message] Created message document for echo message: {message_doc}")
 
-                # Always update status to REPLIED for echo messages
+                # Determine appropriate status based on role
+                if msg_role == MessageRole.ASSISTANT.value:
+                    new_status = UserStatus.ASSISTANT_REPLIED.value
+                elif msg_role == MessageRole.ADMIN.value:
+                    new_status = UserStatus.ADMIN_REPLIED.value
+                elif msg_role == MessageRole.FIXED_RESPONSE.value:
+                    new_status = UserStatus.FIXED_REPLIED.value
+                else:
+                    new_status = UserStatus.REPLIED.value  # fallback
+
+                # Update status based on message role
                 try:
                     result = db.users.update_one(
                         {"user_id": actual_user_id},  # Use the actual user ID
                         {
                             "$push": {"direct_messages": message_doc},
-                            "$set": {"status": UserStatus.REPLIED.value, "updated_at": datetime.now(timezone.utc)}
+                            "$set": {"status": new_status, "updated_at": datetime.now(timezone.utc)}
                         }
                     )
 
                     logger.debug(f"[handle_message] DB update result for echo message: matched={result.matched_count}, modified={result.modified_count}")
 
                     if result.modified_count > 0:
-                        logger.info(f"[handle_message] Successfully stored echo message {message_data.get('id')} for user {actual_user_id} with role {msg_role} and status REPLIED")
+                        logger.info(f"[handle_message] Successfully stored echo message {message_data.get('id')} for user {actual_user_id} with role {msg_role} and status {new_status}")
                     else:
                         logger.warning(f"[handle_message] Failed to update user document for echo message {message_data.get('id')} from user {actual_user_id}")
                         # Check if user exists
@@ -704,7 +730,8 @@ class InstagramService:
                 role=MessageRole.USER.value,
                 media_type=media_type,
                 media_url=media_url,
-                timestamp=timestamp
+                timestamp=timestamp,
+                mid=message_data.get('id')
             )
 
             # Check if assistant is enabled in app settings
@@ -836,15 +863,16 @@ class InstagramService:
                 # Send reply as a direct message if available
                 if fixed_response_actions.get('DM'):
                     dm_reply_text = fixed_response_actions['DM']
-                    dm_success = InstagramService.send_message(user_id, dm_reply_text)
-                    if dm_success:
-                        logger.info(f"Sent fixed DM reply to user {user_id} for comment {comment_data['comment_id']}")
+                    mid = InstagramService.send_message(user_id, dm_reply_text)
+                    if mid:
+                        logger.info(f"Sent fixed DM reply to user {user_id} for comment {comment_data['comment_id']}, MID: {mid}")
                         replied_in_direct = True
-                        # Store the fixed response message
+                        # Store the fixed response message with MID
                         message_doc = User.create_message_document(
                             text=dm_reply_text,
                             role=MessageRole.FIXED_RESPONSE.value,
-                            timestamp=datetime.now(timezone.utc)
+                            timestamp=datetime.now(timezone.utc),
+                            mid=mid
                         )
                         # Add the fixed response message to user's direct messages and update status
                         db.users.update_one(
@@ -855,12 +883,12 @@ class InstagramService:
                             }
                         )
                         logger.info(f"Stored fixed response DM message and set status to FIXED_REPLIED for user {user_id}")
-                    elif not dm_success:
+                    elif not mid:
                         private_reply_success = InstagramService.send_comment_private_reply(comment_data['comment_id'], dm_reply_text)
                         if private_reply_success:
                             replied_in_direct = True
                             logger.info(f"Sent private reply to comment {comment_data['comment_id']} for user {user_id}")
-                            # Store the fixed response message for private reply too
+                            # Store the fixed response message for private reply too (no MID for private replies)
                             message_doc = User.create_message_document(
                                 text=dm_reply_text,
                                 role=MessageRole.FIXED_RESPONSE.value,
@@ -1080,14 +1108,45 @@ class InstagramService:
                     response_text = actions.get('direct_response_text')
                     if response_text:
                         logger.info(f"Sending fixed DM for story {story_id} using trigger '{trig_key}' to user {user_id}")
-                        # Send the message
-                        success = InstagramService.send_message(user_id, response_text)
-                        if success:
+                        
+                        # Ensure user exists in database before storing messages
+                        user_check = db.users.find_one({"user_id": user_id})
+                        if not user_check:
+                            logger.info(f"Creating user record for story reply user: {user_id}")
+                            user_doc = User.create_user_document(
+                                user_id=user_id,
+                                username='',  # Username will be updated later if available
+                                status=UserStatus.WAITING.value
+                            )
+                            db.users.insert_one(user_doc)
+                            logger.info(f"Created new user record for story reply user: {user_id}")
+                        
+                        # First, store the user's story reply message
+                        story_details = Story.get_by_instagram_id(story_id) if story_id else {}
+                        user_message_text = f"Story replied by fixed response.\n\nstory label: {story_details.get('label', 'N/A')}\n\nstory caption: {story_details.get('caption', 'N/A')}\n\nadmin explanation: {story_details.get('admin_explanation', 'N/A')}\n\nuser message: {trigger_keyword}"
+                        
+                        user_message_doc = User.create_message_document(
+                            text=user_message_text,
+                            role=MessageRole.USER.value,
+                            timestamp=datetime.now(timezone.utc)
+                        )
+                        
+                        # Store user message first
+                        db.users.update_one(
+                            {"user_id": user_id},
+                            {"$push": {"direct_messages": user_message_doc}}
+                        )
+                        logger.info(f"Stored user story reply message for user {user_id}")
+                        
+                        # Send the fixed response message
+                        mid = InstagramService.send_message(user_id, response_text)
+                        if mid:
                             # Store the fixed response message and update user status
                             message_doc = User.create_message_document(
                                 text=response_text,
                                 role=MessageRole.FIXED_RESPONSE.value,
-                                timestamp=datetime.now(timezone.utc)
+                                timestamp=datetime.now(timezone.utc),
+                                mid=mid
                             )
                             # Update user with fixed response message and FIXED_REPLIED status
                             db.users.update_one(

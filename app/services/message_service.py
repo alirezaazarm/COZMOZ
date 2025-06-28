@@ -106,39 +106,7 @@ class MessageService:
             logger.error(f"Error updating user status: {str(e)}", exc_info=True)
             return False
 
-    def save_assistant_response(self, messages, response_text, user_id):
-        """Save the assistant's response for a user."""
-        if not messages or not response_text:
-            logger.warning("Missing data for saving assistant response")
-            return False
-
-        try:
-            # Create message document for assistant response
-            message_doc = {
-                "text": response_text,
-                "role": MessageRole.ASSISTANT.value,
-                "timestamp": datetime.now(timezone.utc)
-            }
-
-            # Add message to user's direct_messages array and update status
-            result = self.db.users.update_one(
-                {"user_id": user_id},
-                {
-                    "$push": {"direct_messages": message_doc},
-                    "$set": {"status": UserStatus.REPLIED.value, "updated_at": datetime.now(timezone.utc)}
-                }
-            )
-
-            if result.modified_count == 0:
-                logger.error("Failed to save assistant response")
-                return False
-
-            logger.info(f"Saved assistant response for user {user_id} and updated status")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error saving assistant response: {str(e)}", exc_info=True)
-            return False
+    # Removed save_assistant_response method - now handled directly in mediator with MID tracking
 
     def handle_processing_failure(self, user_id, error):
         """Handle failures in processing messages."""

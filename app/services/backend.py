@@ -14,6 +14,7 @@ import io
 from ..models.additional_info import Additionalinfo
 from ..models.admin_user import AdminUser
 from ..models.story import Story
+from ..models.user import User
 from app.utils.helpers import  expand_triggers
 
 logger = logging.getLogger(__name__)
@@ -1166,3 +1167,72 @@ class Backend:
                 logger.error(f"Error processing uploaded image in backend: {str(e)}", exc_info=True)
                 # Return a generic error message to the UI
                 return f"Error: An unexpected error occurred while processing the image."
+
+    # ------------------------------------------------------------------
+    # User Analytics and Statistics
+    # ------------------------------------------------------------------
+    def get_message_statistics_by_role(self, time_frame="daily", days_back=7):
+        """Get message statistics grouped by role and time frame"""
+        logger.info(f"Fetching message statistics by role for {time_frame} timeframe, {days_back} days back")
+        try:
+            statistics = User.get_message_statistics_by_role(time_frame, days_back)
+            logger.info(f"Successfully fetched message statistics: {len(statistics)} time periods")
+            return statistics
+        except Exception as e:
+            logger.error(f"Error fetching message statistics: {str(e)}")
+            return {}
+
+    def get_user_status_counts(self):
+        """Get count of users by status"""
+        logger.info("Fetching user status counts")
+        try:
+            status_counts = User.get_user_status_counts()
+            logger.info(f"Successfully fetched user status counts: {len(status_counts)} statuses")
+            return status_counts
+        except Exception as e:
+            logger.error(f"Error fetching user status counts: {str(e)}")
+            return {}
+
+    def get_user_status_counts_within_timeframe(self, start_date, end_date):
+        """Get count of users by status within a specific timeframe"""
+        logger.info(f"Fetching user status counts within timeframe: {start_date} to {end_date}")
+        try:
+            status_counts = User.get_user_status_counts_within_timeframe(start_date, end_date)
+            logger.info(f"Successfully fetched user status counts within timeframe: {len(status_counts)} statuses")
+            return status_counts
+        except Exception as e:
+            logger.error(f"Error fetching user status counts within timeframe: {str(e)}")
+            return {}
+
+    def get_total_users_count(self):
+        """Get total number of users"""
+        logger.info("Fetching total users count")
+        try:
+            total_count = User.get_total_users_count()
+            logger.info(f"Successfully fetched total users count: {total_count}")
+            return total_count
+        except Exception as e:
+            logger.error(f"Error fetching total users count: {str(e)}")
+            return 0
+
+    def get_total_users_count_within_timeframe(self, start_date, end_date):
+        """Get total number of users within a specific timeframe"""
+        logger.info(f"Fetching total users count within timeframe: {start_date} to {end_date}")
+        try:
+            total_count = User.get_total_users_count_within_timeframe(start_date, end_date)
+            logger.info(f"Successfully fetched total users count within timeframe: {total_count}")
+            return total_count
+        except Exception as e:
+            logger.error(f"Error fetching total users count within timeframe: {str(e)}")
+            return 0
+
+    def get_message_statistics_by_role_within_timeframe(self, time_frame, start_date, end_date):
+        """Get message statistics grouped by role and time frame within a specific date range"""
+        logger.info(f"Fetching message statistics by role for {time_frame} timeframe from {start_date} to {end_date}")
+        try:
+            statistics = User.get_message_statistics_by_role_within_timeframe(time_frame, start_date, end_date)
+            logger.info(f"Successfully fetched message statistics within timeframe: {len(statistics)} time periods")
+            return statistics
+        except Exception as e:
+            logger.error(f"Error fetching message statistics within timeframe: {str(e)}")
+            return {}
