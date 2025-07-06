@@ -20,6 +20,7 @@ except ConnectionFailure as e:
 db = client[Config.MONGODB_DB_NAME] if client else None
 
 # Collection constants - only keeping collections that are still needed
+CLIENTS_COLLECTION = 'clients'  # Collection for multi-client support (includes admins with is_admin=True)
 USERS_COLLECTION = 'users'
 APP_SETTINGS_COLLECTION = 'app_settings'
 PRODUCTS_COLLECTION = 'products'
@@ -27,7 +28,7 @@ SCHEDULER_JOBS_COLLECTION = 'scheduler_jobs'
 POSTS_COLLECTION = 'posts'
 STORIES_COLLECTION = 'stories'
 ADDITIONAL_TEXT_COLLECTION = 'additional_text'
-ADMIN_USERS_COLLECTION = 'admin_users'
+# ADMIN_USERS_COLLECTION removed - admins are now stored in CLIENTS_COLLECTION with is_admin=True
 
 # Context manager for database operations
 def with_db(func):

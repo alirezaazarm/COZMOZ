@@ -12,19 +12,20 @@ class Additionalinfo:
     """Additionalinfo model for MongoDB"""
 
     @staticmethod
-    def create_additional_text_document(title, content, file_id=None):
+    def create_additional_text_document(title, content, client_username, file_id=None):
         """Create a new additional text document structure."""
         return {
             "title": title,
             "content": content,
+            "client_username": client_username,  # Links additional info to specific client
             "file_id": file_id
         }
 
     @staticmethod
     @with_db
-    def create(title, content, file_id=None):
+    def create(title, content, client_username, file_id=None):
         """Create a new additional text entry."""
-        text_doc = Additionalinfo.create_additional_text_document(title, content, file_id)
+        text_doc = Additionalinfo.create_additional_text_document(title, content, client_username, file_id)
         try:
             result = db[ADDITIONAL_INFO_COLLECTION].insert_one(text_doc)
             if result.acknowledged:
@@ -37,11 +38,15 @@ class Additionalinfo:
 
     @staticmethod
     @with_db
-    def update(text_id, update_data):
+    def update(text_id, update_data, client_username=None):
         """Update an additional text entry by its MongoDB _id."""
         try:
+            query = {"_id": ObjectId(text_id)}
+            if client_username:
+                query["client_username"] = client_username
+                
             result = db[ADDITIONAL_INFO_COLLECTION].update_one(
-                {"_id": ObjectId(text_id)},
+                query,
                 {"$set": update_data}
             )
             return result.modified_count > 0
@@ -51,20 +56,27 @@ class Additionalinfo:
 
     @staticmethod
     @with_db
-    def get_by_id(text_id):
+    def get_by_id(text_id, client_username=None):
         """Get an additional text entry by its MongoDB _id."""
         try:
-            return db[ADDITIONAL_INFO_COLLECTION].find_one({"_id": ObjectId(text_id)})
+            query = {"_id": ObjectId(text_id)}
+            if client_username:
+                query["client_username"] = client_username
+            return db[ADDITIONAL_INFO_COLLECTION].find_one(query)
         except PyMongoError as e:
             logger.error(f"Failed to retrieve additional text: {str(e)}")
             return None
 
     @staticmethod
     @with_db
-    def delete(text_id):
+    def delete(text_id, client_username=None):
         """Delete an additional text entry by its MongoDB _id."""
         try:
-            result = db[ADDITIONAL_INFO_COLLECTION].delete_one({"_id": ObjectId(text_id)})
+            query = {"_id": ObjectId(text_id)}
+            if client_username:
+                query["client_username"] = client_username
+                
+            result = db[ADDITIONAL_INFO_COLLECTION].delete_one(query)
             return result.deleted_count > 0
         except PyMongoError as e:
             logger.error(f"Failed to delete additional text: {str(e)}")
@@ -72,17 +84,20 @@ class Additionalinfo:
 
     @staticmethod
     @with_db
-    def get_all():
+    def get_all(client_username=None):
         """Get all additional text entries."""
         try:
-            return list(db[ADDITIONAL_INFO_COLLECTION].find())
+            query = {}
+            if client_username:
+                query["client_username"] = client_username
+            return list(db[ADDITIONAL_INFO_COLLECTION].find(query))
         except PyMongoError as e:
             logger.error(f"Failed to retrieve additional text entries: {str(e)}")
             return []
 
     @staticmethod
     @with_db
-    def search(search_term):
+    def search(search_term, client_username=None):
         """Search additional text entries by title or content."""
         query = {
             "$or": [
@@ -90,6 +105,9 @@ class Additionalinfo:
                 {"content": {"$regex": search_term, "$options": "i"}}
             ]
         }
+        if client_username:
+            query["client_username"] = client_username
+            
         try:
             return list(db[ADDITIONAL_INFO_COLLECTION].find(query))
         except PyMongoError as e:
@@ -98,10 +116,13 @@ class Additionalinfo:
 
     @staticmethod
     @with_db
-    def get_with_file_ids():
+    def get_with_file_ids(client_username=None):
         """Get all additional text entries that have file_ids."""
         try:
-            return list(db[ADDITIONAL_INFO_COLLECTION].find({"file_id": {"$exists": True, "$ne": None}}))
+            query = {"file_id": {"$exists": True, "$ne": None}}
+            if client_username:
+                query["client_username"] = client_username
+            return list(db[ADDITIONAL_INFO_COLLECTION].find(query))
         except PyMongoError as e:
             logger.error(f"Failed to retrieve additional text entries with file_ids: {str(e)}")
             return []

@@ -10,9 +10,9 @@ from ..models.enums import MessageRole, UserStatus
 
 logger = logging.getLogger(__name__)
 
-webhook_bp = Blueprint('webhook', __name__)
+webhook_bp = Blueprint('hooshang_webhook', __name__)
 
-@webhook_bp.route('/webhook', methods=['GET', 'POST'])
+@webhook_bp.route('/hooshang_webhook', methods=['GET', 'POST'])
 def webhook():
     if request.method == 'GET':
         return handle_webhook_verification()
@@ -52,8 +52,29 @@ def handle_webhook_post():
 
             # Iterate over each entry
             for entry in entries:
+                # Identify the client based on the entry ID (which should be the ig_id)
+                entry_id = entry.get('id')
+                if not entry_id:
+                    logger.error("Entry missing ID - cannot identify client")
+                    failure_count += 1
+                    continue
+
+                # Find the client by ig_id
+                client_username = InstagramService.get_client_username_by_ig_id(entry_id)
+                if not client_username:
+                    # fallback: load from DB, then update in-memory mapping
+                    client_username = InstagramService.get_client_by_ig_id(entry_id)
+                    if client_username:
+                        InstagramService.set_ig_id_to_client(entry_id, client_username)
+                if not client_username:
+                    logger.error(f"No client found for ig_id: {entry_id}")
+                    failure_count += 1
+                    continue
+
+                logger.info(f"Processing entry for client: {client_username} (ig_id: {entry_id})")
+
                 messaging_events = entry.get('messaging', [])
-                logger.info(f"Processing {len(messaging_events)} messaging events")
+                logger.info(f"Processing {len(messaging_events)} messaging events for client: {client_username}")
 
                 # Handle all message events, including echoes
                 for event in messaging_events:
@@ -69,7 +90,7 @@ def handle_webhook_post():
                         timestamp = raw_ts  # assume already datetime
 
                     try:
-                        if process_message_event(db, event, event['sender']['id'], timestamp):
+                        if process_message_event(db, event, event['sender']['id'], timestamp, client_username):
                             success_count += 1
                         else:
                             failure_count += 1
@@ -80,10 +101,10 @@ def handle_webhook_post():
                 # Process comment change events if present
                 comment_events = entry.get('changes', [])
                 entry_time = entry.get('time')
-                logger.info(f"Processing {len(comment_events)} changes")
+                logger.info(f"Processing {len(comment_events)} changes for client: {client_username}")
                 for change in comment_events:
                     try:
-                        if process_comment_event(db, change, entry_time):
+                        if process_comment_event(db, change, entry_time, client_username):
                             success_count += 1
                         else:
                             failure_count += 1
@@ -110,34 +131,41 @@ def handle_webhook_post():
             logger.debug("Database operation completed")
 
 
-def process_event(db, event):
+def process_event(db, event, client_username):
     try:
         sender_id = event['sender']['id']
-        # We don't need to use the recipient_id as it's always the main account
         timestamp = datetime.fromtimestamp(event['timestamp'] / 1000, timezone.utc).replace(tzinfo=None)
 
         # Check if this is an echo message (from business account)
         is_echo = event.get('message', {}).get('is_echo', False)
 
-        # Get app settings directly from the instagram_service module to ensure we have the latest
-        from ..services.instagram_service import APP_SETTINGS
-
-        # Get the current assistant setting
-        is_assistant_enabled = APP_SETTINGS.get('assistant', True)
+        # Get client-specific app settings
+        app_settings = InstagramService.get_app_settings(client_username)
+        is_assistant_enabled = app_settings.get('assistant', True)
 
         # Explicitly check if the value is a string and convert accordingly
         if isinstance(is_assistant_enabled, str):
             is_assistant_enabled = is_assistant_enabled.lower() == 'true'
 
-        logger.info(f"Webhook - Processing event with assistant {'ENABLED' if is_assistant_enabled else 'DISABLED'}")
-        logger.debug(f"Webhook - APP_SETTINGS: {APP_SETTINGS}")
-        logger.debug(f"Processing event: sender_id={sender_id}, is_echo={is_echo}, is_assistant_enabled={is_assistant_enabled}, CONFIG.PAGE_ID={Config.PAGE_ID}")
-        logger.debug(f"Is sender business account? {sender_id == Config.PAGE_ID}")
+        # Get client credentials to check business account ID
+        client_creds = InstagramService.get_client_credentials(client_username)
+        if not client_creds:
+            logger.error(f"No credentials found for client: {client_username}")
+            return False
+
+        client_page_id = client_creds.get('ig_id')
+        if not client_page_id:
+            logger.error(f"No ig_id found for client: {client_username}")
+            return False
+
+        logger.info(f"Webhook - Processing event for client {client_username} with assistant {'ENABLED' if is_assistant_enabled else 'DISABLED'}")
+        logger.debug(f"Processing event: sender_id={sender_id}, is_echo={is_echo}, is_assistant_enabled={is_assistant_enabled}, client_page_id={client_page_id}")
+        logger.debug(f"Is sender business account? {sender_id == client_page_id}")
 
         # Echo message handling:
         if is_echo:
-            # When the echo is from our page ID
-            if sender_id == Config.PAGE_ID:
+            # When the echo is from our client's page ID
+            if sender_id == client_page_id:
                 # If assistant is enabled, skip all page echoes (bot replies)
                 if is_assistant_enabled:
                     logger.debug(f"Assistant enabled - Skipping echo message from business account (ID: {sender_id})")
@@ -147,7 +175,7 @@ def process_event(db, event):
                     logger.debug(f"Assistant disabled - Processing admin echo message (ID: {sender_id})")
                     # Process the message as an admin reply
                     if 'message' in event:
-                        process_result = process_message_event(db, event, sender_id, timestamp)
+                        process_result = process_message_event(db, event, sender_id, timestamp, client_username)
                         logger.debug(f"Process message result for admin echo: {process_result}")
                         return process_result
                     return False
@@ -160,9 +188,9 @@ def process_event(db, event):
                     logger.debug("Assistant is disabled - Processing admin echo message")
 
         if 'message' in event:
-            return process_message_event(db, event, sender_id, timestamp)
+            return process_message_event(db, event, sender_id, timestamp, client_username)
         elif 'reaction' in event:
-            return process_reaction_event(db, event, sender_id, timestamp)
+            return process_reaction_event(db, event, sender_id, timestamp, client_username)
         else:
             logger.warning(f"Unhandled event type: {list(event.keys())}")
             return False
@@ -176,30 +204,41 @@ def process_event(db, event):
         return False
 
 
-def process_message_event(db, event, sender_id, timestamp):
+def process_message_event(db, event, sender_id, timestamp, client_username):
     """
     Processes incoming Instagram messaging events, including story replies, story mentions, and other attachments.
     Delegates fixed-response logic to InstagramService.handle_shared_content and falls back to standard processing.
     Returns True if processed successfully or fixed-response triggered, False on error or failure.
     """
-    logger.debug(f"Processing message event. sender_id={sender_id}, timestamp={timestamp}")
+    logger.debug(f"Processing message event for client {client_username}. sender_id={sender_id}, timestamp={timestamp}")
     try:
         message = event['message']
         logger.debug(f"Message data from event: {message}")
 
+        # Get client credentials to check business account ID
+        client_creds = InstagramService.get_client_credentials(client_username)
+        if not client_creds:
+            logger.error(f"No credentials found for client: {client_username}")
+            return False
+
+        client_page_id = client_creds.get('ig_id')
+        if not client_page_id:
+            logger.error(f"No ig_id found for client: {client_username}")
+            return False
+
         # Check if this is an echo message from business account
         is_echo = message.get('is_echo', False)
-        is_business_account = sender_id == Config.PAGE_ID
+        is_business_account = sender_id == client_page_id
 
-        # Get latest app settings
-        from ..services.instagram_service import APP_SETTINGS
-        is_assistant_enabled = APP_SETTINGS.get('assistant', True)
+        # Get client-specific app settings
+        app_settings = InstagramService.get_app_settings(client_username)
+        is_assistant_enabled = app_settings.get('assistant', True)
 
         # Ensure boolean conversion
         if isinstance(is_assistant_enabled, str):
             is_assistant_enabled = is_assistant_enabled.lower() == 'true'
 
-        logger.debug(f"Message analysis: is_echo={is_echo}, is_business_account={is_business_account}, is_assistant_enabled={is_assistant_enabled}")
+        logger.debug(f"Message analysis for client {client_username}: is_echo={is_echo}, is_business_account={is_business_account}, is_assistant_enabled={is_assistant_enabled}")
 
         # For echo messages, extract the recipient (actual user we're talking to)
         recipient_id = None
@@ -233,8 +272,8 @@ def process_message_event(db, event, sender_id, timestamp):
             # Ensure user exists before processing story reply
             if not is_echo:  # Only for non-echo messages (actual user messages)
                 user_info = {'id': sender_id, 'username': ''}
-                InstagramService.process_user(user_info, UserStatus.WAITING.value)
-                logger.info(f"Ensured user {sender_id} exists for story reply processing")
+                InstagramService.process_user(user_info, UserStatus.WAITING.value, client_username)
+                logger.info(f"Ensured user {sender_id} exists for story reply processing for client {client_username}")
             
             story_payload = message['reply_to']['story']
             attachment = {
@@ -250,12 +289,13 @@ def process_message_event(db, event, sender_id, timestamp):
             result = InstagramService.handle_shared_content(
                 db=db,
                 attachment=attachment,
+                client_username=client_username,
                 user_id=sender_id,
                 trigger_keyword=trigger_text
             )
             # If fixed response triggered, skip further processing
             if result is None:
-                logger.info(f"Story-reply fixed response sent for user {sender_id}")
+                logger.info(f"Story-reply fixed response sent for user {sender_id} for client {client_username}")
                 return True
             if result:
                 message_data['text'] = result
@@ -304,6 +344,7 @@ def process_message_event(db, event, sender_id, timestamp):
                         result = InstagramService.handle_shared_content(
                             db=db,
                             attachment=attachment,
+                            client_username=client_username,
                             user_id=sender_id,
                             trigger_keyword=message.get('text')
                         )
@@ -317,6 +358,7 @@ def process_message_event(db, event, sender_id, timestamp):
                         result = InstagramService.handle_shared_content(
                             db=db,
                             attachment=attachment,
+                            client_username=client_username,
                             user_id=sender_id,
                             trigger_keyword=None  # No fixed response for subsequent attachments
                         )
@@ -341,7 +383,7 @@ def process_message_event(db, event, sender_id, timestamp):
                     logger.info(f"Storing attachment message with ID: {attachment_message_id}")
                     
                     # Store this attachment message separately with its individual analysis
-                    success = InstagramService.handle_message(db, attachment_message_data)
+                    success = InstagramService.handle_message(db, attachment_message_data, client_username)
                     if success:
                         logger.info(f"Successfully stored attachment {i+1} with analysis: {result}")
                         if result:
@@ -367,7 +409,7 @@ def process_message_event(db, event, sender_id, timestamp):
                     if recipient_id:
                         text_message_data['recipient'] = {'id': recipient_id}
                     
-                    success = InstagramService.handle_message(db, text_message_data)
+                    success = InstagramService.handle_message(db, text_message_data, client_username)
                     if success:
                         logger.info(f"Successfully stored original text message: {message.get('text')}")
                     else:
@@ -377,7 +419,7 @@ def process_message_event(db, event, sender_id, timestamp):
                 return True
 
         # 3) Handle messages without attachments - route to standard message handling
-        success = InstagramService.handle_message(db, message_data)
+        success = InstagramService.handle_message(db, message_data, client_username)
         if success:
             logger.info(f"Successfully processed message {message_data['id']} from user {sender_id}")
             return True
@@ -394,7 +436,7 @@ def process_message_event(db, event, sender_id, timestamp):
         return False
 
 
-def process_comment_event(db, change, entry_time=None):
+def process_comment_event(db, change, entry_time=None, client_username=None):
     try:
         if change.get('field') == 'comments':
             comment_data = change.get('value', {})
@@ -422,8 +464,14 @@ def process_comment_event(db, change, entry_time=None):
 
             # Check if this comment is from the business account (echo comment)
             from_id = from_user.get('id')
-            if from_id == Config.PAGE_ID:
-                logger.info(f"Skipping echo comment from business account (ID: {from_id})")
+            # Use client-specific page ID for echo detection
+            client_page_id = None
+            if client_username:
+                client_creds = InstagramService.get_client_credentials(client_username)
+                if client_creds:
+                    client_page_id = client_creds.get('ig_id')
+            if from_id == client_page_id:
+                logger.info(f"Skipping echo comment from business account (ID: {from_id}) for client {client_username}")
                 return True
 
             try:
@@ -436,7 +484,7 @@ def process_comment_event(db, change, entry_time=None):
                     'parent_id': parent_comment_id,
                     'timestamp': timestamp,
                     'status': 'not_replied'
-                }):
+                }, client_username=client_username):
                     return True
                 else:
                     return False
@@ -449,41 +497,4 @@ def process_comment_event(db, change, entry_time=None):
 
     except Exception as e:
         logger.error(f"Error in process_comment_event: {str(e)}", exc_info=True)
-        return False
-
-
-def process_reaction_event(db, event, sender_id, timestamp):
-    try:
-        logger.debug("Processing reaction event")
-        reaction = event['reaction']
-
-        reaction_data = {
-            'id': reaction['mid'],
-            'from': {
-                'id': sender_id,
-                'username': f"{sender_id}"
-            },
-            'content_type': 'message',
-            'content_id': reaction['mid'],
-            'reaction_type': reaction.get('emoji', 'unknown'),
-            'timestamp': timestamp
-        }
-
-        return handle_reaction(db, reaction_data)
-
-    except KeyError as ke:
-        logger.error(f"Missing required key in reaction event: {str(ke)}")
-        logger.error(f"Event data: {json.dumps(event, indent=2)}")
-        return False
-    except Exception as e:
-        logger.error(f"Error processing reaction event: {str(e)}", exc_info=True)
-        return False
-
-
-def handle_reaction(db, reaction_data):
-    try:
-        logger.info(f"Handling reaction: {reaction_data}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to handle reaction: {str(e)}")
         return False

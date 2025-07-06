@@ -5,8 +5,9 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 class MessageService:
-    def __init__(self, db):
+    def __init__(self, db, client_username):
         self.db = db
+        self.client_username = client_username
 
     def get_user_messages(self, user_id, cutoff_time=None):
         """
@@ -19,16 +20,16 @@ class MessageService:
         Returns:
             List of user messages since the last assistant/admin message
         """
-        logger.info(f"Getting batch messages for user {user_id}")
+        logger.info(f"Getting batch messages for user {user_id} (client: {self.client_username})")
         try:
-            # Find user and get their direct messages
+            # Find user and get their direct messages (client-specific)
             user = self.db.users.find_one(
-                {"user_id": user_id, "status": UserStatus.WAITING.value},
+                {"user_id": user_id, "status": UserStatus.WAITING.value, "client_username": self.client_username},
                 {"direct_messages": 1}
             )
 
             if not user or "direct_messages" not in user:
-                logger.info(f"No user found or no messages for user {user_id}")
+                logger.info(f"No user found or no messages for user {user_id} (client: {self.client_username})")
                 return []
 
             # Get all messages and ensure they're sorted by timestamp
@@ -59,7 +60,7 @@ class MessageService:
             message_count = len(user_messages)
 
             if message_count:
-                logger.info(f"Found {message_count} user messages since last assistant/admin reply for user {user_id}")
+                logger.info(f"Found {message_count} user messages since last assistant/admin reply for user {user_id} (client: {self.client_username})")
 
                 # For debugging, check if any messages are newer than cutoff_time
                 if cutoff_time is not None:
@@ -70,15 +71,15 @@ class MessageService:
                                        if msg.get("timestamp") > cutoff_time)
 
                     if newer_messages > 0:
-                        logger.debug(f"{newer_messages} messages are newer than cutoff time, but including in batch anyway")
+                        logger.debug(f"{newer_messages} messages are newer than cutoff time, but including in batch anyway (client: {self.client_username})")
 
                 return user_messages
             else:
-                logger.info(f"No user messages since last assistant/admin reply for user {user_id}")
+                logger.info(f"No user messages since last assistant/admin reply for user {user_id} (client: {self.client_username})")
                 return []
 
         except Exception as e:
-            logger.error(f"Error getting messages: {str(e)}", exc_info=True)
+            logger.error(f"Error getting messages for user {user_id} (client: {self.client_username}): {str(e)}", exc_info=True)
             raise
 
     def _normalize_timestamp(self, timestamp):
@@ -88,37 +89,37 @@ class MessageService:
         return timestamp
 
     def update_user_status(self, user_id, status):
-        logger.info(f"Updating user {user_id} status to {status}")
+        logger.info(f"Updating user {user_id} status to {status} (client: {self.client_username})")
         try:
             result = self.db.users.update_one(
-                {"user_id": user_id},
+                {"user_id": user_id, "client_username": self.client_username},
                 {"$set": {"status": status, "updated_at": datetime.now(timezone.utc)}}
             )
 
             success = result.modified_count > 0
             if success:
-                logger.info(f"Updated user {user_id} status to {status}")
+                logger.info(f"Updated user {user_id} status to {status} (client: {self.client_username})")
             else:
-                logger.warning(f"Failed to update user {user_id} status")
+                logger.warning(f"Failed to update user {user_id} status (client: {self.client_username})")
 
             return success
         except Exception as e:
-            logger.error(f"Error updating user status: {str(e)}", exc_info=True)
+            logger.error(f"Error updating user status for user {user_id} (client: {self.client_username}): {str(e)}", exc_info=True)
             return False
 
     # Removed save_assistant_response method - now handled directly in mediator with MID tracking
 
     def handle_processing_failure(self, user_id, error):
         """Handle failures in processing messages."""
-        logger.error(f"Processing failed for user {user_id}: {str(error)}")
+        logger.error(f"Processing failed for user {user_id} (client: {self.client_username}): {str(error)}")
 
         # Update user status to indicate failure
         status = UserStatus.ASSISTANT_FAILED.value
 
         try:
             self.update_user_status(user_id, status)
-            logger.info(f"Updated user {user_id} status to {status} due to failure")
+            logger.info(f"Updated user {user_id} status to {status} due to failure (client: {self.client_username})")
             return True
         except Exception as e:
-            logger.error(f"Failed to update user status after failure: {str(e)}")
+            logger.error(f"Failed to update user status after failure for user {user_id} (client: {self.client_username}): {str(e)}")
             return False

@@ -12,6 +12,7 @@ class Product:
         title,
         category,
         link,
+        client_username,
         translated_title=None,
         tags=None,
         price=None,
@@ -33,7 +34,8 @@ class Product:
             "description": description,
             "stock_status": stock_status,
             "additional_info": additional_info or {},
-            "link": link
+            "link": link,
+            "client_username": client_username  # Links product to specific client
         }
 
 
@@ -43,6 +45,7 @@ class Product:
         title,
         category,
         link,
+        client_username,
         translated_title=None,
         tags=None,
         price=None,
@@ -54,7 +57,7 @@ class Product:
     ):
         """Create a new product"""
         product_doc = Product.create_product_document(
-            title, category, link, translated_title, tags,
+            title, category, link, client_username, translated_title, tags,
             price, excerpt, sku, description, stock_status, additional_info
         )
 
@@ -69,11 +72,15 @@ class Product:
 
     @staticmethod
     @with_db
-    def update(title, update_data):
+    def update(title, update_data, client_username=None):
         """Update a product"""
         try:
+            query = {"title": title}
+            if client_username:
+                query["client_username"] = client_username
+
             result = db[PRODUCTS_COLLECTION].update_one(
-                {"title": title},
+                query,
                 {"$set": update_data}
             )
             return result.modified_count > 0
@@ -96,10 +103,14 @@ class Product:
 
     @staticmethod
     @with_db
-    def delete(title):
+    def delete(title, client_username=None):
         """Delete a product"""
         try:
-            result = db[PRODUCTS_COLLECTION].delete_one({"title": title})
+            query = {"title": title}
+            if client_username:
+                query["client_username"] = client_username
+
+            result = db[PRODUCTS_COLLECTION].delete_one(query)
             return result.deleted_count > 0
         except PyMongoError as e:
             logger.error(f"Failed to delete product: {str(e)}")
@@ -107,29 +118,42 @@ class Product:
 
     @staticmethod
     @with_db
-    def get_all():
+    def get_all(client_username=None):
         """Get all products"""
-        return list(db[PRODUCTS_COLLECTION].find())
+        query = {}
+        if client_username:
+            query["client_username"] = client_username
+        return list(db[PRODUCTS_COLLECTION].find(query))
 
     @staticmethod
     @with_db
-    def search(query, limit=10):
+    def search(query, client_username=None, limit=10):
         """Search for products by title or description"""
+        search_criteria = {
+            "$or": [
+                {"title": {"$regex": query, "$options": "i"}},
+                {"description": {"$regex": query, "$options": "i"}},
+                {"translated_title": {"$regex": query, "$options": "i"}}
+            ]
+        }
+        
+        if client_username:
+            search_criteria["client_username"] = client_username
+
         return list(db[PRODUCTS_COLLECTION].find(
-            {
-                "$or": [
-                    {"title": {"$regex": query, "$options": "i"}},
-                    {"description": {"$regex": query, "$options": "i"}},
-                    {"translated_title": {"$regex": query, "$options": "i"}}
-                ]
-            },
+            search_criteria,
             limit=limit
         ))
     
     @staticmethod
     @with_db
-    def get_file_id(title):
+    def get_file_id(title, client_username=None):
         """Get the file ID for a product"""
-        return db[PRODUCTS_COLLECTION].find_one({"title": title})["file_id"]
+        query = {"title": title}
+        if client_username:
+            query["client_username"] = client_username
+        
+        product = db[PRODUCTS_COLLECTION].find_one(query)
+        return product["file_id"] if product else None
 
 

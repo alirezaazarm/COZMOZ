@@ -2,18 +2,21 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import unquote
 import logging
-from ..models.product import Product
+from ...models.product import Product
 import json
-from .openai_service import OpenAIService
+from ..openai_service import OpenAIService
+import os
+
+CLIENT_USERNAME = os.path.splitext(os.path.basename(__file__))[0]
 
 logger = logging.getLogger(__name__)
 
-class CozmozScraper:
+class Scraper:
 
     def __init__(self):
         self.base_url = 'https://cozmoz.ir'
         self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        self.openai_service = OpenAIService()
+        self.openai_service = OpenAIService(client_username=CLIENT_USERNAME)
 
     def extract_product_links(self, max_pages=100):
         product_links = {}
@@ -135,7 +138,8 @@ class CozmozScraper:
                     description=product_info['description'],
                     stock_status=product_info['stock_status'],
                     additional_info=product_info['additional_info'],
-                    link=product_info['link']
+                    link=product_info['link'],
+                    client_username=CLIENT_USERNAME
                 )
                 if result:
                     logger.info(f"Stored product {title} in the database")
@@ -144,13 +148,13 @@ class CozmozScraper:
 
     def update_products(self):
         product_links = self.extract_product_links()
-        existing_products = Product.get_all()
+        existing_products = Product.get_all(client_username=CLIENT_USERNAME)
         existing_titles = [p['title'] for p in existing_products]
 
         for title in existing_titles:
             if existing_titles.count(title) > 1:
                 # first remove file from openai if exists file_id
-                file_id = Product.get_file_id(title)
+                file_id = Product.get_file_id(title, client_username=CLIENT_USERNAME)
                 if file_id:
                     resp = self.openai_service.delete_single_file(file_id)
                     if resp:
@@ -160,7 +164,7 @@ class CozmozScraper:
                 else:
                     logger.info(f"product {title} doesnt have file_id")
 
-                Product.delete(title)
+                Product.delete(title, client_username=CLIENT_USERNAME)
                 logger.info(f"Deleted product {title} from the database")
 
 
@@ -180,7 +184,7 @@ class CozmozScraper:
                         'stock_status': product_info['stock_status'],
                         'additional_info': product_info['additional_info'],
                         'link': product_info['link']
-                    })
+                    }, client_username=CLIENT_USERNAME)
 
 
                 else:
@@ -194,12 +198,13 @@ class CozmozScraper:
                         description=product_info['description'],
                         stock_status=product_info['stock_status'],
                         additional_info=product_info['additional_info'],
-                        link=product_info['link']
+                        link=product_info['link'],
+                        client_username=CLIENT_USERNAME
                     )
 
         for title in existing_titles:
             if title not in product_links.keys():
-                file_id = Product.get_file_id(title)
+                file_id = Product.get_file_id(title, client_username=CLIENT_USERNAME)
                 if file_id:
                     resp = self.openai_service.delete_single_file(file_id)
                     if resp:
@@ -208,7 +213,7 @@ class CozmozScraper:
                         logger.error(f"failed to remove {title} file with the id {file_id} from openai")
                 else:
                     logger.info(f"product {title} doesnt have file_id")
-                Product.delete(title)
+                Product.delete(title, client_username=CLIENT_USERNAME)
                 logger.info(f"Removed product {title} from the database as it no longer exists on the website")
 
 

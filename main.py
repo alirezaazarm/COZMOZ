@@ -7,6 +7,7 @@ from app.jobs.status_recovery_job import recover_failed_assistant_status_job
 from app.routes.webhook import webhook_bp
 from app.routes.update import update_bp
 import logging
+from app.utils.helpers import load_main_app_globals_from_db
 
 logging.basicConfig(
     handlers=[logging.FileHandler('logs.txt', encoding='utf-8'), logging.StreamHandler()],
@@ -21,6 +22,9 @@ app.config['MAX_CONTENT_LENGTH'] = 1200 * 1024 * 1024
 app.register_blueprint(webhook_bp)
 app.register_blueprint(update_bp)
 
+# Initialize all InstagramService global variables from DB at startup
+load_main_app_globals_from_db()
+
 if __name__ == '__main__':
     try:
         start_scheduler()
@@ -30,7 +34,7 @@ if __name__ == '__main__':
         scheduler.add_job(
             process_messages_job,
             IntervalTrigger(seconds=30),
-            max_instances=1,
+            max_instances=10,
             misfire_grace_time=120,
             coalesce=True
         )

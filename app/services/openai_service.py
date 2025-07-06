@@ -1,10 +1,10 @@
-from ..utils.exceptions import  PermanentError, RetryableError
+from ..utils.exceptions import PermanentError, RetryableError
 from ..models.product import Product
 from ..models.additional_info import Additionalinfo
-from ..models.appsettings import AppSettings
+from ..models.client import Client
 from ..models.database import db
-from ..config import Config
 from ..utils.helpers import get_db
+from ..config import Config
 import openai
 import time
 import re
@@ -14,10 +14,7 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-VS_ID = None
-
 def clean_sources(response_text):
-
     metadata_patterns = [
         r'\[\d+:\d+:source\]',
         r'【\d+:\d+†source】',
@@ -25,45 +22,35 @@ def clean_sources(response_text):
         r'【\d+:\d+】',
         r'\(\d+:\d+\)',
     ]
-
     for pattern in metadata_patterns:
         response_text = re.sub(pattern, "", response_text)
-
     return response_text
-
 
 class OpenAIService:
     MAX_UPLOAD_RETRIES = 5
     UPLOAD_RETRY_DELAY = 2
     BATCH_SIZE = 30
-    
-    def __init__(self):
+
+    def __init__(self, client_username=None, client=None):
+        if client is None and client_username is None:
+            raise ValueError("Must provide client_username or client object")
+        if client is None:
+            client = Client.get_by_username(client_username)
+        if not client:
+            raise ValueError(f"Client not found: {client_username}")
+        self.client_obj = client
+        api_key = Config.OPENAI_API_KEY
+        if not api_key:
+            raise ValueError(f"No OpenAI API key found for client: {client.get('username')}")
         try:
-            self.client = openai.OpenAI(api_key=Config.OPENAI_API_KEY)
-            if not self.client:
-                raise ValueError("OpenAI client failed to initialize")
+            self.client = openai.OpenAI(api_key=api_key)
         except Exception as e:
             logger.critical(f"Failed to initialize OpenAI client: {str(e)}")
             self.client = None
 
-
-    @staticmethod
-    def set_vs_id(settings):
-        """Set VS_ID from update route"""
-        global VS_ID
-
-        if settings.get('vs_id'):
-            VS_ID = settings.get('vs_id')
-            logger.info(f"openai_service - VS_ID set to {VS_ID}")
-            return True
-        else:
-            logger.info(f"appsetting to main doesnt have vs_id!")
-            return False
-    
     # ------------------------------------------------------------------
-    # Files and Vector Store
+    # Files and Vector Store (per client)
     # ------------------------------------------------------------------
-    
     def delete_single_file(self, file_id) -> bool:
         try:
             resp = self.client.files.delete(file_id)
@@ -78,25 +65,16 @@ class OpenAIService:
             return False
 
     def clear_vs(self) -> bool:
-        setting = AppSettings.get_by_key('vs_id')
-        if not setting:
-            logger.info("No vector store setting found in database")
+        vs_id = self.client_obj.get('keys', {}).get('vector_store_id')
+        if not vs_id:
+            logger.info("No vector store ID found for client")
             return True
-        # Extract the raw ID string
-        raw_value = setting.get('value')
-        if isinstance(raw_value, dict):
-            vs_id = raw_value.get('value')
-        else:
-            vs_id = raw_value
-        if not vs_id or not isinstance(vs_id, str):
-            logger.error(f"Invalid vs_id in setting: {raw_value}")
-            return False
         try:
             response = self.client.vector_stores.delete(vs_id)
             if response.deleted:
-                # Store raw string ID only
-                AppSettings.update('vs_id', '')
-                logger.info(f"Deleted vector store '{vs_id}' and unset vs_id in database")
+                # Remove vector_store_id from client
+                Client.update(self.client_obj['username'], {"keys.vector_store_id": None})
+                logger.info(f"Deleted vector store '{vs_id}' and unset vector_store_id in client")
                 return True
             logger.error(f"Vector store deletion returned deleted=False for '{vs_id}'")
             return False
@@ -105,7 +83,7 @@ class OpenAIService:
             return False
 
     def clear_files(self, model_cls) -> bool:
-        entries = model_cls.get_all()
+        entries = model_cls.get_all(client_username=self.client_obj['username'])
         success = True
         for entry in entries:
             file_id = entry.get('file_id')
@@ -114,9 +92,8 @@ class OpenAIService:
             try:
                 resp = self.client.files.delete(file_id)
                 if resp.deleted:
-                    # Use correct identifier: title for Product, id for Additionalinfo
                     identifier = entry.get('title') if model_cls is Product else str(entry.get('_id'))
-                    model_cls.update(identifier, {"file_id": None})
+                    model_cls.update(identifier, {"file_id": None}, client_username=self.client_obj['username'])
                     logger.info(f"Deleted file '{file_id}' and reset file_id for '{identifier}'")
                 else:
                     logger.error(f"Failed to delete file '{file_id}': {resp.error}")
@@ -127,7 +104,7 @@ class OpenAIService:
         return success
 
     def upload_files(self, model_cls, folder_name: str) -> bool:
-        entries = model_cls.get_all()
+        entries = model_cls.get_all(client_username=self.client_obj['username'])
         all_success = True
         for entry in entries:
             content_data = self._prepare_content(entry, folder_name)
@@ -137,7 +114,7 @@ class OpenAIService:
                 all_success = False
                 continue
             identifier = entry.get('title') if model_cls is Product else str(entry.get('_id'))
-            updated = model_cls.update(identifier, {"file_id": file_id})
+            updated = model_cls.update(identifier, {"file_id": file_id}, client_username=self.client_obj['username'])
             if not updated:
                 logger.error(f"Failed to update database for '{identifier}' with file_id '{file_id}'")
                 all_success = False
@@ -198,8 +175,8 @@ class OpenAIService:
 
     def create_vs(self) -> str | None:
         try:
-            products = Product.get_all()
-            additional = Additionalinfo.get_all()
+            products = Product.get_all(client_username=self.client_obj['username'])
+            additional = Additionalinfo.get_all(client_username=self.client_obj['username'])
             prod_ids = [p['file_id'] for p in products if p.get('file_id')]
             add_ids = [a['file_id'] for a in additional if a.get('file_id')]
             missing = [p['title'] for p in products if not p.get('file_id')]
@@ -207,10 +184,9 @@ class OpenAIService:
                 logger.error(f"Cannot create VS: missing product file_ids for {missing}")
                 return None
             file_ids = prod_ids + add_ids
-
             self.clear_vs()
             vs = self.client.vector_stores.create(
-                name='Vector Store',
+                name=f"Vector Store - {self.client_obj['username']}",
                 file_ids=file_ids[:self.BATCH_SIZE],
                 chunking_strategy={
                     'type': 'static',
@@ -219,7 +195,6 @@ class OpenAIService:
             )
             vs_id = vs.id
             logger.info(f"Created vector store {vs_id} for first batch")
-
             for i in range(self.BATCH_SIZE, len(file_ids), self.BATCH_SIZE):
                 batch = file_ids[i:i + self.BATCH_SIZE]
                 self.client.vector_stores.file_batches.create_and_poll(
@@ -231,11 +206,10 @@ class OpenAIService:
                     }
                 )
                 logger.info(f"Appended batch files {i}-{i + len(batch)} to vector store {vs_id}")
-
             final_vs = self.client.vector_stores.retrieve(vs_id)
             if final_vs.file_counts.completed == len(file_ids):
-                AppSettings.update('vs_id', f"{vs_id}")
-                logger.info(f"Stored vs_id '{vs_id}' in database")
+                Client.update(self.client_obj['username'], {"keys.vector_store_id": vs_id})
+                logger.info(f"Stored vector_store_id '{vs_id}' in client")
                 return vs_id
             logger.error(f"Vector store incomplete: {final_vs.file_counts}")
             return None
@@ -255,13 +229,12 @@ class OpenAIService:
             logger.error("Failed to create/update vector store")
             return False
         return True
-    # ------------------------------------------------------------------
-    # Chat/Assistant config
-    # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Chat/Assistant config (per client)
+    # ------------------------------------------------------------------
     def ensure_thread(self, user):
         try:
-            # In MongoDB, user is a dictionary, not an ORM object
             thread_id = user.get('thread_id')
             if thread_id:
                 try:
@@ -270,40 +243,26 @@ class OpenAIService:
                     return thread.id
                 except openai.APIError:
                     logger.error("Existing thread invalid, creating new one")
-
-            # Get vector store ID from global variable, or from AppSettings if not set
-            global VS_ID
-            if not VS_ID:
-                setting = AppSettings.get_by_key('vs_id')
-                if setting and setting.get('value'):
-                    VS_ID = setting.get('value')
-                    logger.info(f"Loaded VS_ID from AppSettings: {VS_ID}")
-                else:
-                    logger.error("No valid vector store ID found in AppSettings.")
-
+            vs_id = self.client_obj.get('keys', {}).get('vector_store_id')
+            if not vs_id:
+                logger.error("No valid vector store ID found in client.")
+                raise PermanentError("No valid vector store ID found in client.")
             thread = self.client.beta.threads.create(
-                tool_resources={"file_search": {"vector_store_ids": [VS_ID]}}
+                tool_resources={"file_search": {"vector_store_ids": [vs_id]}}
             )
             logger.debug(f"Created thread {thread.id}")
-
-            # Update user with thread ID in MongoDB
             user_id = user.get('user_id')
             if not user_id:
                 raise ValueError("User document is missing user_id field")
-
-            # Update the user document in MongoDB
             result = db.users.update_one(
                 {"user_id": user_id},
                 {"$set": {"thread_id": thread.id, "updated_at": datetime.now(timezone.utc)}}
             )
-
             if result.modified_count == 0:
                 logger.warning(f"Failed to update user {user_id} with thread ID")
             else:
                 logger.debug(f"Updated user {user_id} with thread ID {thread.id}")
-
             return thread.id
-
         except openai.APIError as e:
             logger.critical(f"OpenAI API Failure: {e.message}")
             raise RetryableError("OpenAI API unavailable")
@@ -314,30 +273,29 @@ class OpenAIService:
     def process_messages(self, thread_id, message_texts):
         logger.info(f"Processing {len(message_texts)} messages for thread_id: {thread_id}")
         try:
-            # Join all messages into a single message with separators
             if len(message_texts) > 1:
                 message_content = "\n---\n".join(message_texts)
             else:
                 message_content = message_texts[0]
-
             logger.debug(f"Message content prepared for thread_id: {thread_id}")
-
             self.client.beta.threads.messages.create(
                 thread_id=thread_id,
                 role="user",
                 content=message_content
             )
             logger.info(f"User message batch created for thread_id: {thread_id}")
-
+            assistant_id = self.client_obj.get('keys', {}).get('assistant_id')
+            if not assistant_id:
+                logger.error("No assistant_id found in client keys")
+                raise PermanentError("No assistant_id found in client keys")
             run = self.client.beta.threads.runs.create(
                 thread_id=thread_id,
-                assistant_id=Config.OPENAI_ASSISTANT_ID
+                assistant_id=assistant_id
             )
             logger.info(f"Run created with ID: {run.id} for thread_id: {thread_id}")
-
             start = time.time()
             while run.status not in ["completed", "failed", "cancelled"]:
-                if time.time() - start > 300:  # Increased from 45 to 300 seconds (5 minutes)
+                if time.time() - start > 300:
                     logger.error(f"Timeout occurred while waiting for run completion for thread_id: {thread_id}")
                     raise TimeoutError("OpenAI timeout")
                 time.sleep(5)
@@ -346,11 +304,9 @@ class OpenAIService:
                     run_id=run.id
                 )
                 logger.debug(f"Run status for thread_id: {thread_id}: {run.status}")
-
             if run.status != "completed":
                 logger.error(f"Run failed for thread_id: {thread_id}. Last error: {run.last_error}")
                 raise openai.OpenAIError(f"Run failed: {run.last_error}")
-
             logger.info(f"Run completed successfully for thread_id: {thread_id}")
             return clean_sources(self._get_assistant_response(thread_id))
         except openai.APIError as e:
@@ -369,18 +325,15 @@ class OpenAIService:
             if not messages.data:
                 logger.error(f"No messages found in thread_id: {thread_id}")
                 raise ValueError("No messages in thread")
-
             latest_message = messages.data[0]
             logger.debug(f"Latest message retrieved for thread_id: {thread_id}")
-
             text_content = next(
                 (c.text.value for c in latest_message.content if c.type == "text"),
                 None
             )
-            if not text_content.strip():
+            if not text_content or not text_content.strip():
                 logger.error(f"Empty response from assistant for thread_id: {thread_id}")
                 raise ValueError("Empty response from assistant")
-
             logger.info(f"Assistant response successfully retrieved for thread_id: {thread_id}")
             return text_content
         except openai.APIError as e:
@@ -407,9 +360,12 @@ class OpenAIService:
         if not self.client:
             logger.error("OpenAI client is not initialized.")
             return None
-
         try:
-            assistant = self.client.beta.assistants.retrieve(Config.OPENAI_ASSISTANT_ID)
+            assistant_id = self.client_obj.get('keys', {}).get('assistant_id')
+            if not assistant_id:
+                logger.error("No assistant_id found in client keys")
+                return None
+            assistant = self.client.beta.assistants.retrieve(assistant_id)
             logger.info(f"Retrieved assistant instructions successfully.")
             return assistant.instructions
         except Exception as e:
@@ -421,7 +377,11 @@ class OpenAIService:
             logger.error("OpenAI client is not initialized.")
             return None
         try:
-            assistant = self.client.beta.assistants.retrieve(Config.OPENAI_ASSISTANT_ID)
+            assistant_id = self.client_obj.get('keys', {}).get('assistant_id')
+            if not assistant_id:
+                logger.error("No assistant_id found in client keys")
+                return None
+            assistant = self.client.beta.assistants.retrieve(assistant_id)
             logger.info(f"Retrieved assistant temperature successfully.")
             return assistant.temperature
         except Exception as e:
@@ -433,7 +393,11 @@ class OpenAIService:
             logger.error("OpenAI client is not initialized.")
             return None
         try:
-            assistant = self.client.beta.assistants.retrieve(Config.OPENAI_ASSISTANT_ID)
+            assistant_id = self.client_obj.get('keys', {}).get('assistant_id')
+            if not assistant_id:
+                logger.error("No assistant_id found in client keys")
+                return None
+            assistant = self.client.beta.assistants.retrieve(assistant_id)
             logger.info(f"Retrieved assistant top_p successfully.")
             return assistant.top_p
         except Exception as e:
@@ -444,22 +408,16 @@ class OpenAIService:
         if not self.client:
             logger.error("OpenAI client is not initialized.")
             return {'success': False, 'message': 'OpenAI client is not initialized.'}
-
         try:
-            # Get the vector store ID if it exists
-            vs_id = None
-            with get_db() as db:
-                vs_setting = AppSettings.get_by_key('vs_id')
-                if vs_setting:
-                    vs_id = vs_setting['value']
-
-            # Create basic update params
+            assistant_id = self.client_obj.get('keys', {}).get('assistant_id')
+            vs_id = self.client_obj.get('keys', {}).get('vector_store_id')
+            if not assistant_id:
+                logger.error("No assistant_id found in client keys")
+                return {'success': False, 'message': 'No assistant_id found in client keys.'}
             update_params = {
-                "assistant_id": Config.OPENAI_ASSISTANT_ID,
+                "assistant_id": assistant_id,
                 "instructions": new_instructions
             }
-
-            # If we have a vector store ID, use it for file search
             if vs_id:
                 update_params["tools"] = [{"type": "file_search"}]
                 update_params["tool_resources"] = {
@@ -467,10 +425,7 @@ class OpenAIService:
                         "vector_store_ids": [vs_id]
                     }
                 }
-
-            # Update the assistant
             self.client.beta.assistants.update(**update_params)
-
             logger.info("Updated assistant instructions successfully.")
             return {
                 'success': True,
@@ -485,8 +440,12 @@ class OpenAIService:
             logger.error("OpenAI client is not initialized.")
             return {'success': False, 'message': 'OpenAI client is not initialized.'}
         try:
+            assistant_id = self.client_obj.get('keys', {}).get('assistant_id')
+            if not assistant_id:
+                logger.error("No assistant_id found in client keys")
+                return {'success': False, 'message': 'No assistant_id found in client keys.'}
             self.client.beta.assistants.update(
-                assistant_id=Config.OPENAI_ASSISTANT_ID,
+                assistant_id=assistant_id,
                 temperature=new_temperature
             )
             logger.info("Updated assistant temperature successfully.")
@@ -503,8 +462,12 @@ class OpenAIService:
             logger.error("OpenAI client is not initialized.")
             return {'success': False, 'message': 'OpenAI client is not initialized.'}
         try:
+            assistant_id = self.client_obj.get('keys', {}).get('assistant_id')
+            if not assistant_id:
+                logger.error("No assistant_id found in client keys")
+                return {'success': False, 'message': 'No assistant_id found in client keys.'}
             self.client.beta.assistants.update(
-                assistant_id=Config.OPENAI_ASSISTANT_ID,
+                assistant_id=assistant_id,
                 top_p=new_top_p
             )
             logger.info("Updated assistant top_p successfully.")
@@ -521,53 +484,34 @@ class OpenAIService:
             if not self.client:
                 logger.error("OpenAI client is not initialized.")
                 raise PermanentError("OpenAI client is not initialized.")
-
-            # Check that a VS_ID exists in memory, or load from AppSettings
-            global VS_ID
-            if not VS_ID:
-                from ..models.appsettings import AppSettings
-                setting = AppSettings.get_by_key('vs_id')
-                if setting and setting.get('value'):
-                    VS_ID = setting.get('value')
-                    logger.info(f"Loaded VS_ID from AppSettings: {VS_ID}")
-                else:
-                    logger.error("No vector store ID found in memory or AppSettings")
-                    raise PermanentError("No vector store ID found in memory or AppSettings")
-
-            # Verify the assistant is connected to this vector store
-            assistant = self.client.beta.assistants.retrieve(Config.OPENAI_ASSISTANT_ID)
-
-            # If the assistant doesn't have tools or file_search tool resources, update it
+            vs_id = self.client_obj.get('keys', {}).get('vector_store_id')
+            assistant_id = self.client_obj.get('keys', {}).get('assistant_id')
+            if not vs_id or not assistant_id:
+                logger.error("No vector store ID or assistant_id found in client keys")
+                raise PermanentError("No vector store ID or assistant_id found in client keys")
+            assistant = self.client.beta.assistants.retrieve(assistant_id)
             has_file_search = False
             has_vector_store = False
-
-            # Check if assistant has file_search tool
             if hasattr(assistant, 'tools'):
                 for tool in assistant.tools:
                     if tool.type == "file_search":
                         has_file_search = True
                         break
-
-            # Check if assistant has the vector store connected
             if hasattr(assistant, 'tool_resources') and hasattr(assistant.tool_resources, 'file_search'):
-                if VS_ID in assistant.tool_resources.file_search.vector_store_ids:
+                if vs_id in assistant.tool_resources.file_search.vector_store_ids:
                     has_vector_store = True
-
-            # If the assistant doesn't have file_search tool or vector store, update it
             if not has_file_search or not has_vector_store:
-                logger.info(f"Updating assistant to connect with vector store {VS_ID}")
+                logger.info(f"Updating assistant to connect with vector store {vs_id}")
                 self.client.beta.assistants.update(
-                    assistant_id=Config.OPENAI_ASSISTANT_ID,
+                    assistant_id=assistant_id,
                     tools=[{"type": "file_search"}],
                     tool_resources={
                         "file_search": {
-                            "vector_store_ids": [VS_ID]
+                            "vector_store_ids": [vs_id]
                         }
                     }
                 )
-                logger.info(f"Successfully connected assistant to vector store {VS_ID}")
-
-            # Create the thread
+                logger.info(f"Successfully connected assistant to vector store {vs_id}")
             thread = self.client.beta.threads.create()
             logger.info(f"Created new thread with ID: {thread.id}")
             return thread.id
@@ -576,66 +520,46 @@ class OpenAIService:
             raise PermanentError(f"Failed to create thread: {str(e)}")
 
     def send_message_to_thread(self, thread_id, message_content):
-        """Send a message to a thread and get the assistant's response"""
         try:
             if not self.client:
                 logger.error("OpenAI client is not initialized.")
                 raise PermanentError("OpenAI client is not initialized.")
-
-            # Get assistant ID from Config
-            assistant_id = Config.OPENAI_ASSISTANT_ID
-
-            # Verify the vector store exists in the database
-            with get_db() as db:
-                vs_setting = AppSettings.get_by_key('vs_id')
-                if not vs_setting:
-                    logger.error("No vector store ID found in database")
-                    raise PermanentError("No vector store is configured. Please connect to a vector store first.")
-
-            # Add message to thread
+            assistant_id = self.client_obj.get('keys', {}).get('assistant_id')
+            vs_id = self.client_obj.get('keys', {}).get('vector_store_id')
+            if not assistant_id or not vs_id:
+                logger.error("No assistant_id or vector_store_id found in client keys")
+                raise PermanentError("No assistant_id or vector_store_id found in client keys")
             self.client.beta.threads.messages.create(
                 thread_id=thread_id,
                 role="user",
                 content=message_content
             )
-
-            # Run the thread with the assistant
             run = self.client.beta.threads.runs.create(
                 thread_id=thread_id,
                 assistant_id=assistant_id
             )
-
-            # Poll for run completion
             while True:
                 run_status = self.client.beta.threads.runs.retrieve(
                     thread_id=thread_id,
                     run_id=run.id
                 )
-
                 if run_status.status == "completed":
                     break
                 elif run_status.status in ["failed", "cancelled", "expired"]:
                     logger.error(f"Run failed with status: {run_status.status}")
                     raise PermanentError(f"Assistant run failed: {run_status.status}")
-
                 time.sleep(0.5)
-
-            # Get messages
             messages = self.client.beta.threads.messages.list(
                 thread_id=thread_id,
                 order="desc",
                 limit=1
             )
-
             if not messages.data:
                 logger.error("No messages returned from assistant")
                 return "No response received from assistant"
-
-            # Return the assistant's response
             assistant_response = messages.data[0].content[0].text.value
             assistant_response = clean_sources(assistant_response)
             return assistant_response
-
         except Exception as e:
             logger.error(f"Error sending message to thread: {str(e)}", exc_info=True)
             raise PermanentError(f"Failed to get response: {str(e)}")

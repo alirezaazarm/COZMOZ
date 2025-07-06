@@ -10,13 +10,14 @@ class Post:
     """Post model for MongoDB"""
 
     @staticmethod
-    def create_post_document(post_id, caption, media_url, media_type, like_count=0, admin_explanation=None, thumbnail_url=None, timestamp=None, children=None):
+    def create_post_document(post_id, caption, media_url, media_type, client_username, like_count=0, admin_explanation=None, thumbnail_url=None, timestamp=None, children=None):
         """Helper to create a new post document structure."""
         return {
             "id": post_id,  # The unique integer from Meta
             "caption": caption,
             "media_url": media_url,
             "media_type": media_type,
+            "client_username": client_username,  # Links post to specific client
             "like_count": like_count,
             "thumbnail_url" : thumbnail_url,
             "timestamp": timestamp if timestamp else datetime.now(timezone.utc),
@@ -28,9 +29,9 @@ class Post:
 
     @staticmethod
     @with_db
-    def create(post_id, caption, media_url, media_type, like_count=0, admin_explanation=None, thumbnail_url=None, timestamp=None, children=None):
+    def create(post_id, caption, media_url, media_type, client_username, like_count=0, admin_explanation=None, thumbnail_url=None, timestamp=None, children=None):
         """Create a new post."""
-        post_doc = Post.create_post_document(post_id, caption, media_url, media_type, like_count, admin_explanation, thumbnail_url, timestamp, children)
+        post_doc = Post.create_post_document(post_id, caption, media_url, media_type, client_username, like_count, admin_explanation, thumbnail_url, timestamp, children)
         try:
             result = db[POSTS_COLLECTION].insert_one(post_doc)
             if result.acknowledged:
@@ -45,13 +46,17 @@ class Post:
 
     @staticmethod
     @with_db
-    def update(instagram_post_id, update_data):
+    def update(instagram_post_id, update_data, client_username=None):
         """Update a post by its Instagram ID.
         This can be used for labels, admin_explanation, or other direct fields.
         """
         try:
+            query = {"id": instagram_post_id}
+            if client_username:
+                query["client_username"] = client_username
+
             result = db[POSTS_COLLECTION].update_one(
-                {"id": instagram_post_id}, # Query by Instagram ID
+                query, # Query by Instagram ID and optionally client
                 {"$set": update_data}
             )
             if result.matched_count == 0:
@@ -65,10 +70,13 @@ class Post:
 
     @staticmethod
     @with_db
-    def create_or_update_from_instagram(instagram_post_data):
+    def create_or_update_from_instagram(instagram_post_data, client_username):
         """Create or update a post from Instagram API data, preserving existing fixed_responses, label, and admin_explanation."""
         instagram_id = instagram_post_data['id']
-        existing_post = db[POSTS_COLLECTION].find_one({"id": instagram_id})
+        query = {"id": instagram_id}
+        if client_username:
+            query["client_username"] = client_username
+        existing_post = db[POSTS_COLLECTION].find_one(query)
 
         # Process children data if exists
         children_data = []
@@ -119,6 +127,7 @@ class Post:
                 caption=api_data['caption'],
                 media_url=api_data['media_url'],
                 media_type=api_data['media_type'],
+                client_username=client_username,
                 like_count=api_data['like_count'],
                 thumbnail_url=api_data['thumbnail_url'],
                 timestamp=api_data['timestamp'],
@@ -145,20 +154,26 @@ class Post:
 
     @staticmethod
     @with_db
-    def get_by_instagram_id(instagram_id):
+    def get_by_instagram_id(instagram_id, client_username=None):
         """Get a post by its Instagram ID (stored in the 'id' field)."""
         try:
-            return db[POSTS_COLLECTION].find_one({"id": instagram_id})
+            query = {"id": instagram_id}
+            if client_username:
+                query["client_username"] = client_username
+            return db[POSTS_COLLECTION].find_one(query)
         except PyMongoError as e:
             logger.error(f"Failed to retrieve post by Instagram ID {instagram_id}: {str(e)}")
             return None
 
     @staticmethod
     @with_db
-    def delete_by_mongo_id(mongo_id):
+    def delete_by_mongo_id(mongo_id, client_username=None):
         """Delete a post by its MongoDB _id."""
         try:
-            result = db[POSTS_COLLECTION].delete_one({"_id": ObjectId(mongo_id)})
+            query = {"_id": ObjectId(mongo_id)}
+            if client_username:
+                query["client_username"] = client_username
+            result = db[POSTS_COLLECTION].delete_one(query)
             logger.info(f"Post with MongoDB _id {mongo_id} deleted. Count: {result.deleted_count}")
             return result.deleted_count > 0
         except PyMongoError as e:
@@ -170,11 +185,14 @@ class Post:
 
     @staticmethod
     @with_db
-    def get_all():
+    def get_all(client_username=None):
         """Get all posts."""
         try:
+            query = {}
+            if client_username:
+                query["client_username"] = client_username
             # Sort by timestamp descending (newest first)
-            return list(db[POSTS_COLLECTION].find().sort("timestamp", -1))
+            return list(db[POSTS_COLLECTION].find(query).sort("timestamp", -1))
         except PyMongoError as e:
             logger.error(f"Failed to retrieve all posts: {str(e)}")
             return []
@@ -200,6 +218,7 @@ class Post:
     def add_fixed_response(
         instagram_post_id,
         trigger_keyword,
+        client_username=None,
         comment_response_text=None,
         direct_response_text=None
     ):
@@ -216,14 +235,20 @@ class Post:
 
         try:
             # Check if a fixed response with this trigger already exists
-            post = db[POSTS_COLLECTION].find_one(
-                {"id": instagram_post_id, "fixed_responses.trigger_keyword": trigger_keyword}
-            )
+            query = {"id": instagram_post_id, "fixed_responses.trigger_keyword": trigger_keyword}
+            if client_username:
+                query["client_username"] = client_username
+            
+            post = db[POSTS_COLLECTION].find_one(query)
 
             if post:
                 # Update existing fixed response
+                update_query = {"id": instagram_post_id, "fixed_responses.trigger_keyword": trigger_keyword}
+                if client_username:
+                    update_query["client_username"] = client_username
+                    
                 result = db[POSTS_COLLECTION].update_one(
-                    {"id": instagram_post_id, "fixed_responses.trigger_keyword": trigger_keyword},
+                    update_query,
                     {"$set": {
                         "fixed_responses.$.comment_response_text": fixed_response_subdoc["comment_response_text"],
                         "fixed_responses.$.direct_response_text": fixed_response_subdoc["direct_response_text"],
@@ -237,8 +262,12 @@ class Post:
                 return result.modified_count > 0
             else:
                 # Add new fixed response to the array
+                add_query = {"id": instagram_post_id}
+                if client_username:
+                    add_query["client_username"] = client_username
+                    
                 result = db[POSTS_COLLECTION].update_one(
-                    {"id": instagram_post_id},
+                    add_query,
                     {"$push": {"fixed_responses": fixed_response_subdoc}}
                 )
                 if result.matched_count == 0:
@@ -252,20 +281,24 @@ class Post:
 
     @staticmethod
     @with_db
-    def get_fixed_responses(instagram_post_id):
+    def get_fixed_responses(instagram_post_id, client_username=None):
         """Get all fixed responses for a post by its Instagram ID."""
-        post = Post.get_by_instagram_id(instagram_post_id)
+        post = Post.get_by_instagram_id(instagram_post_id, client_username)
         if post:
             return post.get('fixed_responses', []) # Returns the array, or empty list if not found
         return []
 
     @staticmethod
     @with_db
-    def delete_fixed_response(instagram_post_id, trigger_keyword):
+    def delete_fixed_response(instagram_post_id, trigger_keyword, client_username=None):
         """Deletes a specific fixed response from a post by its Instagram ID and trigger_keyword."""
         try:
+            query = {"id": instagram_post_id}
+            if client_username:
+                query["client_username"] = client_username
+                
             result = db[POSTS_COLLECTION].update_one(
-                {"id": instagram_post_id},
+                query,
                 {"$pull": {"fixed_responses": {"trigger_keyword": trigger_keyword}}}
             )
             if result.matched_count == 0:
@@ -279,7 +312,7 @@ class Post:
 
     @staticmethod
     @with_db
-    def get_all_fixed_responses_structured():
+    def get_all_fixed_responses_structured(client_username=None):
         """
         Return all fixed responses for posts in the format:
         {
@@ -291,7 +324,11 @@ class Post:
             ...
         }
         """
-        posts_with_responses = db[POSTS_COLLECTION].find({"fixed_responses": {"$exists": True, "$ne": []}})
+        query = {"fixed_responses": {"$exists": True, "$ne": []}}
+        if client_username:
+            query["client_username"] = client_username
+            
+        posts_with_responses = db[POSTS_COLLECTION].find(query)
         result = {}
         for post_doc in posts_with_responses:
             post_insta_id = post_doc.get("id")
@@ -309,23 +346,27 @@ class Post:
     # --- Label Methods ---
     @staticmethod
     @with_db
-    def set_label(instagram_post_id, label):
+    def set_label(instagram_post_id, label, client_username=None):
         """Set the label for a post by its Instagram ID."""
-        return Post.update(instagram_post_id, {"label": str(label).strip() if label is not None else ""})
+        return Post.update(instagram_post_id, {"label": str(label).strip() if label is not None else ""}, client_username)
 
     @staticmethod
     @with_db
-    def remove_label(instagram_post_id):
+    def remove_label(instagram_post_id, client_username=None):
         """Remove the label (set to empty string) for a post by its Instagram ID."""
-        return Post.update(instagram_post_id, {"label": ""})
+        return Post.update(instagram_post_id, {"label": ""}, client_username)
 
     @staticmethod
     @with_db
-    def unset_all_labels():
+    def unset_all_labels(client_username=None):
         """Unset labels (set to empty string) from all posts."""
         try:
+            query = {"label": {"$exists": True, "$ne": ""}}
+            if client_username:
+                query["client_username"] = client_username
+                
             result = db[POSTS_COLLECTION].update_many(
-                {"label": {"$exists": True, "$ne": ""}}, # Only update posts that have a non-empty label
+                query, # Only update posts that have a non-empty label
                 {"$set": {"label": ""}}
             )
             logger.info(f"Unset labels for {result.modified_count} posts.")
@@ -337,31 +378,34 @@ class Post:
     # --- Admin Explanation Methods ---
     @staticmethod
     @with_db
-    def set_admin_explanation(instagram_post_id, explanation):
+    def set_admin_explanation(instagram_post_id, explanation, client_username=None):
         """Set the admin explanation for a post by its Instagram ID."""
-        return Post.update(instagram_post_id, {"admin_explanation": explanation.strip() if explanation else None})
+        return Post.update(instagram_post_id, {"admin_explanation": explanation.strip() if explanation else None}, client_username)
 
     @staticmethod
     @with_db
-    def get_admin_explanation(instagram_post_id):
+    def get_admin_explanation(instagram_post_id, client_username=None):
         """Get the admin explanation for a post by its Instagram ID."""
-        post = Post.get_by_instagram_id(instagram_post_id)
+        post = Post.get_by_instagram_id(instagram_post_id, client_username)
         if post:
             return post.get('admin_explanation')
         return None
 
     @staticmethod
     @with_db
-    def remove_admin_explanation(instagram_post_id):
+    def remove_admin_explanation(instagram_post_id, client_username=None):
         """Remove (nullify) the admin explanation for a post by its Instagram ID."""
-        return Post.update(instagram_post_id, {"admin_explanation": None})
+        return Post.update(instagram_post_id, {"admin_explanation": None}, client_username)
 
     @staticmethod
     @with_db
-    def get_post_ids():
+    def get_post_ids(client_username=None):
         """Get all Instagram post IDs."""
         try:
-            return [post['id'] for post in db[POSTS_COLLECTION].find({}, {"id": 1})]
+            query = {}
+            if client_username:
+                query["client_username"] = client_username
+            return [post['id'] for post in db[POSTS_COLLECTION].find(query, {"id": 1})]
         except PyMongoError as e:
             logger.error(f"Failed to retrieve all Instagram post IDs: {str(e)}")
             return []

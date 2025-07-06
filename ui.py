@@ -78,10 +78,13 @@ class AppStatusSection(BaseSection): #
 
         for key, label in settings.items(): #
             current_status = self.backend.get_app_setting(key) #
-            new_state = st.toggle(label, value=(current_status == "true"), key=f"{key}_toggle") #
-
-            if new_state != (current_status == "true"): #
-                self.backend.update_is_active(key, str(new_state).lower()) #
+            # Normalize current_status to boolean
+            current_status_bool = bool(current_status)
+            if isinstance(current_status, str):
+                current_status_bool = current_status.lower() == "true"
+            new_state = st.toggle(label, value=current_status_bool, key=f"{key}_toggle") #
+            if new_state != current_status_bool: #
+                self.backend.update_is_active(key, new_state) #
                 status_msg = "enabled" if new_state else "disabled" #
                 icon = self.const.ICONS['success'] if new_state else self.const.ICONS['error'] #
                 st.success(f"{icon} {key.replace('_', ' ').title()} {status_msg} successfully!") #
@@ -2299,137 +2302,11 @@ class InstagramSection(BaseSection): #
                 except Exception as e:
                     st.error(f"Error loading form: {str(e)}")
 
-class UserManagementSection(BaseSection):
-    """Handles admin user management functionality"""
-
-    def render(self):
-        st.subheader(f"{self.const.ICONS['user']} Admin User Management")
-
-        # Create tabs for user management
-        list_tab, add_tab, edit_tab = st.tabs(["Users List", "Add User", "Change Password"])
-
-        with list_tab:
-            self._render_users_list()
-
-        with add_tab:
-            self._render_add_user_form()
-
-        with edit_tab:
-            self._render_change_password_form()
-
-        st.write("---")
-
-    def _render_users_list(self):
-        """Display a list of all admin users"""
-        try:
-            users = self.backend.get_admin_users()
-
-            if not users:
-                st.info("No admin users found.")
-                return
-
-            # Create a table for users
-            if users:
-                st.dataframe(users, use_container_width=True)
-
-                # User actions
-                selected_user = st.selectbox(
-                    "Select user for actions:",
-                    options=[user['Username'] for user in users],
-                    key="user_action_select"
-                )
-
-                col1, col2 = st.columns(2)
-
-                # Get the current status of the selected user
-                selected_user_data = next((user for user in users if user['Username'] == selected_user), None)
-                is_active = selected_user_data['Status'] == "Active" if selected_user_data else True
-
-                with col1:
-                    if st.button(
-                        f"{self.const.ICONS['error'] if is_active else self.const.ICONS['success']} {'Deactivate' if is_active else 'Activate'} User",
-                        key="toggle_user_status",
-                        use_container_width=True
-                    ):
-                        if self.backend.update_admin_status(selected_user, not is_active):
-                            status_msg = "deactivated" if is_active else "activated"
-                            st.success(f"User {selected_user} {status_msg} successfully!")
-                            st.rerun()
-                        else:
-                            st.error(f"Failed to update user status.")
-
-                with col2:
-                    if st.button(
-                        f"{self.const.ICONS['delete']} Delete User",
-                        key="delete_user",
-                        use_container_width=True
-                    ):
-                        # Add a confirmation
-                        if st.session_state.get('confirm_delete') != selected_user:
-                            st.session_state['confirm_delete'] = selected_user
-                            st.warning(f"⚠️ Are you sure you want to delete {selected_user}? Click again to confirm.")
-                        else:
-                            if self.backend.delete_admin_user(selected_user):
-                                st.success(f"User {selected_user} deleted successfully!")
-                                st.session_state.pop('confirm_delete', None)
-                                st.rerun()
-                            else:
-                                st.error(f"Failed to delete user.")
-                                st.session_state.pop('confirm_delete', None)
-
-        except Exception as e:
-            st.error(f"Error loading users: {str(e)}")
-
-    def _render_add_user_form(self):
-        """Form to add a new admin user"""
-        with st.form("add_user_form"):
-            username = st.text_input("Username", max_chars=50)
-            password = st.text_input("Password", type="password")
-            confirm_password = st.text_input("Confirm Password", type="password")
-            is_active = st.checkbox("Active", value=True)
-
-            submitted = st.form_submit_button(f"{self.const.ICONS['add']} Add User")
-
-            if submitted:
-                if not username or not password:
-                    st.error("Username and password are required.")
-                elif password != confirm_password:
-                    st.error("Passwords don't match.")
-                else:
-                    # Create the user via backend
-                    if self.backend.create_admin_user(username, password, is_active):
-                        st.success(f"User {username} created successfully!")
-                    else:
-                        st.error(f"Failed to create user. Username may already exist.")
-
-    def _render_change_password_form(self):
-        """Form to change a user's password"""
-        # Only show for the current logged-in user
-        current_username = st.session_state.get('username')
-
-        with st.form("change_password_form"):
-            current_password = st.text_input("Current Password", type="password")
-            new_password = st.text_input("New Password", type="password")
-            confirm_password = st.text_input("Confirm New Password", type="password")
-
-            submitted = st.form_submit_button(f"{self.const.ICONS['save']} Change Password")
-
-            if submitted:
-                if not current_password or not new_password:
-                    st.error("All fields are required.")
-                elif new_password != confirm_password:
-                    st.error("New passwords don't match.")
-                else:
-                    # Update password via backend
-                    if self.backend.update_admin_password(current_username, current_password, new_password):
-                        st.success("Password updated successfully!")
-                    else:
-                        st.error("Failed to update password. Current password may be incorrect.")
 
 #===============================================================================================================================
 class AdminUI:
     """Main application container"""
-    def __init__(self):
+    def __init__(self, client_username):
         st.set_page_config(layout="wide", page_title="Admin Dashboard")
 
         # Initialize session state variables for authentication
@@ -2439,7 +2316,12 @@ class AdminUI:
             st.session_state['username'] = None
 
         try:
-            self.backend = Backend()
+            # Determine backend context: admin or client
+            username = st.session_state.get('username')
+            if username and username != 'admin':
+                self.backend = Backend(client_username=username)
+            else:
+                self.backend = Backend()
 
             # Initialize the default admin user if needed
             self.backend.ensure_default_admin()
@@ -2483,8 +2365,7 @@ class AdminUI:
             "Dashboard": AppStatusSection(self.backend),
             "Data": ProductScraperSection(self.backend),
             "GPT": OpenAIManagementSection(self.backend),
-            "Instagram": InstagramSection(self.backend),
-            "Monitoring": UserManagementSection(self.backend)
+            "Instagram": InstagramSection(self.backend)
         }
 
         # Initialize session state for the selected page if it doesn't exist
@@ -2549,6 +2430,11 @@ class AdminUI:
 
                             # Set in query params for persistence
                             st.query_params['auth_token'] = auth_token
+
+                            # After successful login, clear the toggle keys
+                            for key in ['assistant_toggle', 'fixed_responses_toggle']:
+                                if key in st.session_state:
+                                    del st.session_state[key]
 
                             st.rerun()
                         else:
@@ -2617,6 +2503,10 @@ class AdminUI:
                     del st.session_state['auth_token']
                 # Clear query params
                 st.query_params.clear()
+                # After logout, clear the toggle keys
+                for key in ['assistant_toggle', 'fixed_responses_toggle']:
+                    if key in st.session_state:
+                        del st.session_state[key]
                 st.rerun()
 
         # Add a visual divider
@@ -2641,5 +2531,5 @@ class AdminUI:
             st.error("Page not found. Please select a section from the sidebar.")
 
 if __name__ == "__main__":
-    app = AdminUI()
+    app = AdminUI(client_username="your_username")
     app.render()

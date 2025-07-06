@@ -159,3 +159,52 @@ def expand_triggers(triggers_dict):
                 expanded[ar_text_ar_nums] = response
     
     return expanded
+
+def load_main_app_globals_from_db():
+    """
+    Load all global variables in instagram_service.py from the database for all active clients.
+    This should be called once at app startup to ensure all in-memory caches are populated.
+    """
+    import logging
+    from app.models.client import Client
+    from app.models.post import Post
+    from app.models.story import Story
+    from app.services import instagram_service
+    logger = logging.getLogger(__name__)
+    try:
+        clients = Client.get_all_active()
+        logger.info(f"Initializing InstagramService globals from DB for {len(clients)} active clients.")
+        for client in clients:
+            username = client.get('username')
+            ig_id = client.get('keys', {}).get('ig_id')
+            # 1. IG_ID_TO_CLIENT
+            if ig_id and username:
+                instagram_service.IG_ID_TO_CLIENT[ig_id] = username
+            # 2. CLIENT_CREDENTIALS
+            if username:
+                instagram_service.CLIENT_CREDENTIALS[username] = client.get('keys', {})
+            # 3. APP_SETTINGS
+            if username:
+                instagram_service.APP_SETTINGS[username] = {
+                    'assistant': client.get('modules', {}).get('dm_assist', {}).get('enabled', False),
+                    'fixed_responses': client.get('modules', {}).get('fixed_response', {}).get('enabled', False)
+                }
+            # 4. COMMENT_FIXED_RESPONSES
+            if username:
+                post_fixed = Post.get_all_fixed_responses_structured(username)
+                instagram_service.COMMENT_FIXED_RESPONSES[username] = post_fixed
+            # 5. STORY_FIXED_RESPONSES
+            if username:
+                story_fixed = Story.get_all_fixed_responses_structured(username)
+                instagram_service.STORY_FIXED_RESPONSES[username] = story_fixed
+            # 6. IG_CONTENT_IDS
+            if username:
+                post_ids = Post.get_post_ids(username)
+                story_ids = Story.get_story_ids(username)
+                instagram_service.IG_CONTENT_IDS[username] = {
+                    'post_ids': post_ids,
+                    'story_ids': story_ids
+                }
+        logger.info("InstagramService global variables initialized from DB.")
+    except Exception as e:
+        logger.error(f"Failed to initialize InstagramService globals from DB: {str(e)}", exc_info=True)

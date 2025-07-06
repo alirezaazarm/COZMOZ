@@ -9,13 +9,14 @@ logger = logging.getLogger(__name__)
 class Story:
 
     @staticmethod
-    def create_story_document(story_id, media_type, caption, media_url, like_count=0, thumbnail_url=None, timestamp=None, label=None, admin_explanation=None):
+    def create_story_document(story_id, media_type, caption, media_url, client_username, like_count=0, thumbnail_url=None, timestamp=None, label=None, admin_explanation=None):
         """Helper to create a new story document structure."""
         return {
             "id": story_id,  # The unique integer from Meta
             "media_type": media_type,
             "caption": caption,
             "media_url" : media_url,
+            "client_username": client_username,  # Links story to specific client
             "like_count": like_count,
             "thumbnail_url": thumbnail_url,
             "timestamp": timestamp if timestamp else datetime.now(timezone.utc),
@@ -26,9 +27,9 @@ class Story:
 
     @staticmethod
     @with_db
-    def create(story_id, media_type, caption, media_url, like_count=0, thumbnail_url=None, timestamp=None, label=None, admin_explanation=None):
+    def create(story_id, media_type, caption, media_url, client_username, like_count=0, thumbnail_url=None, timestamp=None, label=None, admin_explanation=None):
         """Create a new story in STORIES_COLLECTION."""
-        story_doc = Story.create_story_document(story_id, media_type, caption, media_url, like_count, thumbnail_url, timestamp, label, admin_explanation)
+        story_doc = Story.create_story_document(story_id, media_type, caption, media_url, client_username, like_count, thumbnail_url, timestamp, label, admin_explanation)
         try:
             result = db[STORIES_COLLECTION].insert_one(story_doc)
             if result.acknowledged:
@@ -43,13 +44,17 @@ class Story:
 
     @staticmethod
     @with_db
-    def update(instagram_story_id, update_data):
+    def update(instagram_story_id, update_data, client_username=None):
         """Update a story by its Instagram ID in STORIES_COLLECTION.
         Used for labels, admin_explanation, or other direct fields of the story itself.
         """
         try:
+            query = {"id": instagram_story_id}
+            if client_username:
+                query["client_username"] = client_username
+
             result = db[STORIES_COLLECTION].update_one(
-                {"id": instagram_story_id}, # Query by Instagram ID
+                query, # Query by Instagram ID and optionally client
                 {"$set": update_data}
             )
             if result.matched_count == 0:
@@ -63,12 +68,15 @@ class Story:
 
     @staticmethod
     @with_db
-    def create_or_update_from_instagram(instagram_story_data):
+    def create_or_update_from_instagram(instagram_story_data, client_username):
         """Create or update a story from Instagram API data in STORIES_COLLECTION,
         preserving existing label, admin_explanation, and fixed_responses if not provided by API data.
         """
         instagram_id = instagram_story_data['id']
-        existing_story = db[STORIES_COLLECTION].find_one({"id": instagram_id})
+        query = {"id": instagram_id}
+        if client_username:
+            query["client_username"] = client_username
+        existing_story = db[STORIES_COLLECTION].find_one(query)
 
         api_data = {
             "media_type": instagram_story_data.get('media_type', ''),
@@ -101,6 +109,7 @@ class Story:
                 media_type=api_data['media_type'],
                 caption=api_data['caption'],
                 media_url=api_data['media_url'],
+                client_username=client_username,
                 like_count=api_data['like_count'],
                 thumbnail_url=api_data['thumbnail_url'],
                 timestamp=api_data['timestamp'],
@@ -126,22 +135,28 @@ class Story:
 
     @staticmethod
     @with_db
-    def get_by_instagram_id(instagram_id):
+    def get_by_instagram_id(instagram_id, client_username=None):
         """Get a story by its Instagram ID from STORIES_COLLECTION."""
         try:
-            return db[STORIES_COLLECTION].find_one({"id": instagram_id})
+            query = {"id": instagram_id}
+            if client_username:
+                query["client_username"] = client_username
+            return db[STORIES_COLLECTION].find_one(query)
         except PyMongoError as e:
             logger.error(f"Failed to retrieve story by Instagram ID {instagram_id}: {str(e)}")
             return None
 
     @staticmethod
     @with_db
-    def delete_by_mongo_id(mongo_id):
+    def delete_by_mongo_id(mongo_id, client_username=None):
         """Delete a story by its MongoDB _id from STORIES_COLLECTION.
         Fixed responses are part of the document, so they're deleted with the story.
         """
         try:
-            result = db[STORIES_COLLECTION].delete_one({"_id": ObjectId(mongo_id)})
+            query = {"_id": ObjectId(mongo_id)}
+            if client_username:
+                query["client_username"] = client_username
+            result = db[STORIES_COLLECTION].delete_one(query)
             logger.info(f"Story with MongoDB _id {mongo_id} deleted. Count: {result.deleted_count}")
             return result.deleted_count > 0
         except PyMongoError as e:
@@ -153,12 +168,15 @@ class Story:
 
     @staticmethod
     @with_db
-    def delete_by_instagram_id(instagram_id):
+    def delete_by_instagram_id(instagram_id, client_username=None):
         """Delete a story by its Instagram ID from STORIES_COLLECTION.
         Fixed responses are part of the document, so they're deleted with the story.
         """
         try:
-            result = db[STORIES_COLLECTION].delete_many({"id": instagram_id})
+            query = {"id": instagram_id}
+            if client_username:
+                query["client_username"] = client_username
+            result = db[STORIES_COLLECTION].delete_many(query)
             logger.info(f"Stories with Instagram ID {instagram_id} deleted from STORIES_COLLECTION. Count: {result.deleted_count}")
             return result.deleted_count > 0
         except PyMongoError as e:
@@ -167,10 +185,13 @@ class Story:
 
     @staticmethod
     @with_db
-    def get_all():
+    def get_all(client_username=None):
         """Get all stories from STORIES_COLLECTION."""
         try:
-            return list(db[STORIES_COLLECTION].find().sort("timestamp", -1))
+            query = {}
+            if client_username:
+                query["client_username"] = client_username
+            return list(db[STORIES_COLLECTION].find(query).sort("timestamp", -1))
         except PyMongoError as e:
             logger.error(f"Failed to retrieve all stories: {str(e)}")
             return []
@@ -194,6 +215,7 @@ class Story:
     def add_fixed_response(
         instagram_story_id,
         trigger_keyword,
+        client_username=None,
         direct_response_text=None
     ):
         """
@@ -209,14 +231,20 @@ class Story:
 
         try:
             # Check if a fixed response with this trigger already exists
-            story = db[STORIES_COLLECTION].find_one(
-                {"id": instagram_story_id, "fixed_responses.trigger_keyword": trigger_keyword}
-            )
+            query = {"id": instagram_story_id, "fixed_responses.trigger_keyword": trigger_keyword}
+            if client_username:
+                query["client_username"] = client_username
+            
+            story = db[STORIES_COLLECTION].find_one(query)
 
             if story:
                 # Update existing fixed response
+                update_query = {"id": instagram_story_id, "fixed_responses.trigger_keyword": trigger_keyword}
+                if client_username:
+                    update_query["client_username"] = client_username
+                    
                 result = db[STORIES_COLLECTION].update_one(
-                    {"id": instagram_story_id, "fixed_responses.trigger_keyword": trigger_keyword},
+                    update_query,
                     {"$set": {
                         "fixed_responses.$.direct_response_text": fixed_response_subdoc["direct_response_text"],
                         "fixed_responses.$.updated_at": fixed_response_subdoc["updated_at"]
@@ -229,8 +257,12 @@ class Story:
                 return result.modified_count > 0
             else:
                 # Add new fixed response to the array
+                add_query = {"id": instagram_story_id}
+                if client_username:
+                    add_query["client_username"] = client_username
+                    
                 result = db[STORIES_COLLECTION].update_one(
-                    {"id": instagram_story_id},
+                    add_query,
                     {"$push": {"fixed_responses": fixed_response_subdoc}}
                 )
                 if result.matched_count == 0:
@@ -244,20 +276,24 @@ class Story:
 
     @staticmethod
     @with_db
-    def get_fixed_responses(instagram_story_id):
+    def get_fixed_responses(instagram_story_id, client_username=None):
         """Get all fixed responses for a story by its Instagram ID."""
-        story = Story.get_by_instagram_id(instagram_story_id)
+        story = Story.get_by_instagram_id(instagram_story_id, client_username)
         if story:
             return story.get('fixed_responses', []) # Returns the array, or empty list if not found
         return []
 
     @staticmethod
     @with_db
-    def delete_fixed_response(instagram_story_id, trigger_keyword):
+    def delete_fixed_response(instagram_story_id, trigger_keyword, client_username=None):
         """Deletes a specific fixed response from a story by its Instagram ID and trigger_keyword."""
         try:
+            query = {"id": instagram_story_id}
+            if client_username:
+                query["client_username"] = client_username
+                
             result = db[STORIES_COLLECTION].update_one(
-                {"id": instagram_story_id},
+                query,
                 {"$pull": {"fixed_responses": {"trigger_keyword": trigger_keyword}}}
             )
             if result.matched_count == 0:
@@ -271,7 +307,7 @@ class Story:
 
     @staticmethod
     @with_db
-    def get_all_fixed_responses_structured():
+    def get_all_fixed_responses_structured(client_username=None):
         """
         Return all embedded fixed responses for stories in the format:
         {
@@ -285,9 +321,11 @@ class Story:
         Returns only stories that have fixed responses defined.
         """
         try:
-            stories_with_responses = db[STORIES_COLLECTION].find(
-                {"fixed_responses": {"$ne": [], "$exists": True}} # Ensure fixed_responses is not empty and exists
-            )
+            query = {"fixed_responses": {"$ne": [], "$exists": True}}
+            if client_username:
+                query["client_username"] = client_username
+                
+            stories_with_responses = db[STORIES_COLLECTION].find(query)
             result = {}
             for story_doc in stories_with_responses:
                 story_insta_id = story_doc.get("id")
@@ -307,23 +345,27 @@ class Story:
     # --- Label Methods (for labels stored in STORIES_COLLECTION) ---
     @staticmethod
     @with_db
-    def set_label(instagram_story_id, label):
+    def set_label(instagram_story_id, label, client_username=None):
         """Set the label for a story by its Instagram ID."""
-        return Story.update(instagram_story_id, {"label": str(label).strip() if label is not None else ""})
+        return Story.update(instagram_story_id, {"label": str(label).strip() if label is not None else ""}, client_username)
 
     @staticmethod
     @with_db
-    def remove_label(instagram_story_id):
+    def remove_label(instagram_story_id, client_username=None):
         """Remove the label (set to empty string) for a story by its Instagram ID."""
-        return Story.update(instagram_story_id, {"label": ""})
+        return Story.update(instagram_story_id, {"label": ""}, client_username)
 
     @staticmethod
     @with_db
-    def unset_all_labels():
+    def unset_all_labels(client_username=None):
         """Unset labels (set to empty string) from all stories in STORIES_COLLECTION."""
         try:
+            query = {"label": {"$exists": True, "$ne": ""}}
+            if client_username:
+                query["client_username"] = client_username
+                
             result = db[STORIES_COLLECTION].update_many(
-                {"label": {"$exists": True, "$ne": ""}},
+                query,
                 {"$set": {"label": ""}}
             )
             logger.info(f"Unset labels for {result.modified_count} stories.")
@@ -335,32 +377,35 @@ class Story:
     # --- Admin Explanation Methods (for explanations stored in STORIES_COLLECTION) ---
     @staticmethod
     @with_db
-    def set_admin_explanation(instagram_story_id, explanation):
+    def set_admin_explanation(instagram_story_id, explanation, client_username=None):
         """Set the admin explanation for a story by its Instagram ID."""
-        return Story.update(instagram_story_id, {"admin_explanation": explanation.strip() if explanation else None})
+        return Story.update(instagram_story_id, {"admin_explanation": explanation.strip() if explanation else None}, client_username)
 
     @staticmethod
     @with_db
-    def get_admin_explanation(instagram_story_id):
+    def get_admin_explanation(instagram_story_id, client_username=None):
         """Get the admin explanation for a story by its Instagram ID."""
-        story = Story.get_by_instagram_id(instagram_story_id)
+        story = Story.get_by_instagram_id(instagram_story_id, client_username)
         if story:
             return story.get('admin_explanation')
         return None
 
     @staticmethod
     @with_db
-    def remove_admin_explanation(instagram_story_id):
+    def remove_admin_explanation(instagram_story_id, client_username=None):
         """Remove (nullify) the admin explanation for a story by its Instagram ID."""
-        return Story.update(instagram_story_id, {"admin_explanation": None})
+        return Story.update(instagram_story_id, {"admin_explanation": None}, client_username)
 
 
     @staticmethod
     @with_db
-    def get_story_ids():
+    def get_story_ids(client_username=None):
         """Get all Instagram IDs of stories from STORIES_COLLECTION."""
         try:
-            return [story['id'] for story in db[STORIES_COLLECTION].find({}, {"id": 1})]
+            query = {}
+            if client_username:
+                query["client_username"] = client_username
+            return [story['id'] for story in db[STORIES_COLLECTION].find(query, {"id": 1})]
         except PyMongoError as e:
             logger.error(f"Failed to retrieve all Instagram story IDs: {str(e)}")
             return []

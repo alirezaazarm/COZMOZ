@@ -1,18 +1,17 @@
 import logging
 from datetime import datetime, timezone
-from ..models.appsettings import AppSettings
 from ..models.product import Product
 from ..models.post import Post
 from ..config import Config
 import requests
 from .instagram_service import InstagramService
-from .scraper import CozmozScraper
+import importlib
 from .openai_service import OpenAIService
 from .img_search import process_image
 from PIL import Image
 import io
 from ..models.additional_info import Additionalinfo
-from ..models.admin_user import AdminUser
+from ..models.client import Client
 from ..models.story import Story
 from ..models.user import User
 from app.utils.helpers import  expand_triggers
@@ -20,12 +19,120 @@ from app.utils.helpers import  expand_triggers
 logger = logging.getLogger(__name__)
 
 class Backend:
-    def __init__(self):
-        self.app_setting_url = Config.BASE_URL + "/update/app-settings"
+    def __init__(self, client_username=None):
+        """
+        Initialize Backend with optional client context.
+        If client_username is provided, all operations will be scoped to that client.
+        """
+        self.client_username = client_username
+        self.client_data = None
+        
+        # Load client data if username provided
+        if self.client_username:
+            self.client_data = Client.get_by_username(self.client_username)
+            if not self.client_data:
+                logger.error(f"Client '{self.client_username}' not found")
+                raise ValueError(f"Client '{self.client_username}' not found")
+            
+            if self.client_data.get('status') != 'active':
+                logger.error(f"Client '{self.client_username}' is not active")
+                raise ValueError(f"Client '{self.client_username}' is not active")
+            
+            logger.info(f"Backend initialized for client: {self.client_username}")
+        else:
+            logger.info("Backend initialized without client context (admin mode)")
+        
+        self.app_setting_url = Config.BASE_URL + "/test/hooshang_update/app-settings"
         self.headers = {"Content-Type": "application/json",  "Authorization": f"Bearer {Config.VERIFY_TOKEN}" }
-        self.scraper = CozmozScraper()
-        self.openai_service = OpenAIService()
-        logger.info("Backend initialized with configuration URLs and headers.")
+        self.scraper = self._load_scraper()
+        self.openai_service = OpenAIService(client_username=self.client_username) if self.client_username else None
+        
+    def _load_scraper(self):
+        """
+        Dynamically load the scraper for the current client if it exists.
+        Returns an instance of the scraper or None if not found.
+        """
+        if not self.client_username:
+            return None
+        module_name = f"app.services.scrapers.{self.client_username}"
+        try:
+            scraper_module = importlib.import_module(module_name)
+            return scraper_module.Scraper()
+        except ModuleNotFoundError:
+            logger.warning(f"No scraper found for client '{self.client_username}' (module: {module_name})")
+            return None
+        except AttributeError:
+            logger.error(f"Scraper class not found in module '{module_name}'")
+            return None
+
+    def _validate_client_access(self, required_module=None):
+        """
+        Validate client access and module permissions.
+        Returns True if access is granted, raises exception otherwise.
+        """
+        if not self.client_username:
+            # Admin mode - full access
+            return True
+            
+        if not self.client_data:
+            raise ValueError("Client data not loaded")
+            
+        if self.client_data.get('status') != 'active':
+            raise ValueError(f"Client '{self.client_username}' is not active")
+            
+        if required_module:
+            if not Client.is_module_enabled(self.client_username, required_module):
+                raise ValueError(f"Module '{required_module}' is not enabled for client '{self.client_username}'")
+                
+        return True
+        
+    def _get_client_credentials(self, credential_type):
+        """Get client-specific credentials"""
+        if not self.client_username:
+            return None
+            
+        return Client.get_client_credentials(self.client_username, credential_type)
+
+    @classmethod
+    def create_for_client(cls, client_username):
+        """
+        Factory method to create a Backend instance for a specific client.
+        Validates client exists and is active before creating the instance.
+        """
+        try:
+            return cls(client_username=client_username)
+        except ValueError as e:
+            logger.error(f"Failed to create Backend for client '{client_username}': {str(e)}")
+            raise
+
+    @classmethod
+    def create_admin_backend(cls):
+        """
+        Factory method to create a Backend instance for admin operations.
+        This instance has access to all clients' data.
+        """
+        return cls(client_username=None)
+
+    def get_client_info(self):
+        """Get information about the current client"""
+        if not self.client_username:
+            return None
+        return self.client_data
+
+    def get_enabled_modules(self):
+        """Get list of enabled modules for the current client"""
+        if not self.client_username:
+            return []
+        
+        modules = self.client_data.get('modules', {})
+        return [module for module, config in modules.items() if config.get('enabled', False)]
+
+    def is_module_enabled(self, module_name):
+        """Check if a specific module is enabled for the current client"""
+        if not self.client_username:
+            return True  # Admin has access to all modules
+        
+        return Client.is_module_enabled(self.client_username, module_name)
 
     # ------------------------------------------------------------------
     # Admin Authentication Methods
@@ -34,7 +141,7 @@ class Backend:
         """Authenticate an admin user by username and password"""
         logger.info(f"Authenticating admin user: {username}")
         try:
-            user = AdminUser.authenticate(username, password)
+            user = Client.authenticate_admin(username, password)
             if user:
                 logger.info(f"Admin user '{username}' authenticated successfully")
                 return True
@@ -119,13 +226,13 @@ class Backend:
             username = token_data.get('username')
 
             # Verify that the user exists in the database
-            user = AdminUser.get_by_username(username)
-            if not user:
-                logger.warning(f"Token contains invalid username: {username}")
+            user = Client.get_by_username(username)
+            if not user or not user.get('is_admin', False):
+                logger.warning(f"Token contains invalid admin username: {username}")
                 return None
 
-            if not user.get('is_active', False):
-                logger.warning(f"Token contains inactive user: {username}")
+            if user.get('status') != 'active':
+                logger.warning(f"Token contains inactive admin user: {username}")
                 return None
 
             logger.info(f"Token verified successfully for user: {username}")
@@ -139,13 +246,13 @@ class Backend:
         """Get all admin users"""
         logger.info("Fetching all admin users")
         try:
-            users = AdminUser.get_all()
+            users = Client.get_all_admins()
 
             # Format user data for display
             user_data = []
             for user in users:
                 username = user.get('username', 'Unknown')
-                is_active = user.get('is_active', False)
+                is_active = user.get('status') == 'active'
                 created_at = user.get('created_at', 'Unknown')
                 last_login = user.get('last_login', 'Never')
 
@@ -173,7 +280,7 @@ class Backend:
         """Create a new admin user"""
         logger.info(f"Creating admin user: {username}")
         try:
-            result = AdminUser.create(username, password, is_active)
+            result = Client.create_admin(username, password, is_active=is_active)
             if result:
                 logger.info(f"Admin user '{username}' created successfully")
                 return True
@@ -189,13 +296,13 @@ class Backend:
         logger.info(f"Updating password for admin user: {username}")
         try:
             # First verify the current password
-            user = AdminUser.authenticate(username, current_password)
+            user = Client.authenticate_admin(username, current_password)
             if not user:
                 logger.warning(f"Password update failed: Current password is incorrect for user '{username}'")
                 return False
 
             # Update password
-            result = AdminUser.update_password(username, new_password)
+            result = Client.update_admin_password(username, new_password)
             if result:
                 logger.info(f"Password updated successfully for admin user '{username}'")
                 return True
@@ -210,7 +317,7 @@ class Backend:
         """Update an admin user's active status"""
         logger.info(f"Updating status for admin user: {username} to {'active' if is_active else 'inactive'}")
         try:
-            result = AdminUser.update_status(username, is_active)
+            result = Client.update_admin_status(username, is_active)
             if result:
                 logger.info(f"Status updated successfully for admin user '{username}'")
                 return True
@@ -225,7 +332,7 @@ class Backend:
         """Delete an admin user"""
         logger.info(f"Deleting admin user: {username}")
         try:
-            result = AdminUser.delete(username)
+            result = Client.delete_admin(username)
             if result:
                 logger.info(f"Admin user '{username}' deleted successfully")
                 return True
@@ -240,7 +347,7 @@ class Backend:
         """Ensure there is at least one active admin user"""
         logger.info("Checking for default admin user")
         try:
-            result = AdminUser.ensure_default_admin()
+            result = Client.ensure_default_admin()
             if result:
                 logger.info("Default admin user created")
             else:
@@ -278,197 +385,190 @@ class Backend:
             return "Invalid timestamp"
 
     # ------------------------------------------------------------------
-    # Appsetting  ---> main app
+    # Appsetting  ---> main app (now client-centric)
     # ------------------------------------------------------------------
-    def app_settings_to_main(self):
-        logger.info("Sending app settings to the main server.")
+    def reload_main_app_memory(self):
+        """Trigger the main app to reload all memory from the database."""
+        logger.info("Triggering main app to reload memory from DB.")
         try:
-            # Use the MongoDB AppSettings model directly
-            settings = AppSettings.get_all()
-
-            # Make sure settings is not empty
-            if not settings:
-                logger.warning("No app settings found in database")
-                return False
-
-            # Format settings as a list of dictionaries with key-value pairs
-            setting_list = []
-            for s in settings:
-                setting_list.append({s['key']: s['value']})
-                if s['key'] == 'vs_id':
-                    self.openai_service.set_vs_id({s['key']: s['value']})
-
-            # Log the data being sent for debugging
-            logger.info(f"Sending the following app settings: {setting_list}")
-
-            # Send to main app
-            response = requests.post(self.app_setting_url, headers=self.headers, json=setting_list)
-
-            # Check response status
+            response = requests.post(
+                Config.BASE_URL + "/test/hooshang_update/reload-memory",
+                headers=self.headers
+            )
             if response.status_code == 200:
-                logger.info("App settings successfully sent to the main server.")
+                logger.info("Main app memory reload triggered successfully.")
                 return True
             else:
-                logger.error(f"Failed to send app settings. Status code: {response.status_code}")
-                logger.error(f"Response text: {response.text}")
-                logger.debug(f"Settings data: {setting_list}")
+                logger.error(f"Failed to trigger main app memory reload. Status: {response.status_code}, Response: {response.text}")
                 return False
         except Exception as e:
-            logger.error(f"Error in app_settings_to_main: {str(e)}")
-            return {"error in app_settings_to_main calling": str(e)}
+            logger.error(f"Error triggering main app memory reload: {str(e)}")
+            return False
 
     def get_app_setting(self, key):
-        logger.info(f"Fetching app setting for key: {key}.")
-        self.app_settings_to_main()
+        logger.info(f"Fetching app setting for key: {key} (from client model).")
         try:
-            # Use the MongoDB AppSettings model directly
-            setting = AppSettings.get_by_key(key)
-            self.app_settings_to_main()
-            self.send_all_fixed_responses_to_main()
-            self.send_all_ig_content_ids_to_main()
-            logger.info(f"App setting for key '{key}' fetched successfully.")
-            return setting['value'] if setting else None
+            if not self.client_username or not self.client_data:
+                logger.warning("No client context loaded for app settings.")
+                return None
+            # Map key to client model fields
+            if key == 'vs_id':
+                return self.client_data.get('keys', {}).get('vector_store_id')
+            elif key == 'assistant':
+                return self.client_data.get('modules', {}).get('dm_assist', {}).get('enabled', False)
+            elif key == 'fixed_responses':
+                return self.client_data.get('modules', {}).get('fixed_response', {}).get('enabled', False)
+            # Add more mappings as needed
+            else:
+                logger.warning(f"Unknown app setting key requested: {key}")
+                return None
         except Exception as e:
             logger.error(f"Error in get_app_setting for key '{key}': {str(e)}")
             return {"error in get_app_setting calling": str(e)}
 
     def update_is_active(self, key, value):
-        logger.info(f"Updating app setting for key: {key} with value: {value}.")
+        logger.info(f"Updating client app setting for key: {key} with value: {value}.")
+        def _to_bool(val):
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, str):
+                return val.lower() == "true"
+            return bool(val)
         try:
-            # Use the MongoDB AppSettings model directly
-            result = AppSettings.create_or_update(key, value)
-            if result:
-                logger.info(f"App setting updated for key: {key}.")
+            if not self.client_username:
+                logger.error("No client context loaded for update_is_active.")
+                return False
+            update_data = {}
+            if key == 'assistant':
+                update_data = {f"modules.dm_assist.enabled": _to_bool(value)}
+            elif key == 'fixed_responses':
+                update_data = {f"modules.fixed_response.enabled": _to_bool(value)}
+            elif key == 'vs_id':
+                update_data = {f"keys.vector_store_id": value}
             else:
-                logger.error(f"Failed to update app setting for key: {key}.")
-            self.app_settings_to_main()
-            self.send_all_fixed_responses_to_main()
-            self.send_all_ig_content_ids_to_main()
+                logger.warning(f"Unknown app setting key for update: {key}")
+                return False
+            result = Client.update(self.client_username, update_data)
+            if result:
+                logger.info(f"Client app setting updated for key: {key}.")
+                # Refresh local client_data
+                self.client_data = Client.get_by_username(self.client_username)
+            else:
+                logger.error(f"Failed to update client app setting for key: {key}.")
+            self.reload_main_app_memory()
         except Exception as e:
             logger.error(f"Error in update_is_active for key '{key}': {str(e)}")
             return {"error in update_is_active": str(e)}
-    # ------------------------------------------------------------------
-    # Fixed responses + ig content ids ---> main app
-    # ------------------------------------------------------------------
-    def send_comment_fixed_responses_to_main(self, comment_fixed_responses):
-        """
-        Send the comment fixed responses dict to the main app to update in-memory cache.
-        The dict should be structured as:
-        {
-            "POST_ID_1": {
-                "trigger1": {"comment": "Reply text", "DM": "Direct message text"},
-                "trigger2": {"comment": "Reply text", "DM": "Direct message text"},
-                ...
-            }),
-            ...
-        }
-        Use expand_triggers to ensure all numeral variants are included for each trigger.
-        """
-        # Expand triggers for each post and its triggers before sending
-        expanded_dict = {}
-        for post_id, triggers_dict in comment_fixed_responses.items():
-            expanded_post_triggers = {}
-            for trigger, responses in triggers_dict.items():
-                # expand_triggers expects a dict like {trigger: None} or {trigger: value}
-                # We need to expand the trigger and apply the responses to each variant
-                expanded_trigger_variants = expand_triggers({trigger: None})
-                for variant in expanded_trigger_variants.keys():
-                    expanded_post_triggers[variant] = responses
-            expanded_dict[post_id] = expanded_post_triggers
 
-        url = Config.BASE_URL + "/update/fixed-responses/comments"
-        logger.info(f"Sending comment fixed responses to {url}")
+    # ------------------------------------------------------------------
+    # Client dashboard ---> main app memory update
+    # ------------------------------------------------------------------
+    def get_post_fixed_responses(self, post_id): # Renamed
+        """Get fixed responses for a post for the current client"""
+        self._validate_client_access('fixed_response')
+        logger.info(f"Fetching fixed responses for post ID: {post_id} for client: {self.client_username or 'admin'}")
         try:
-            response = requests.post(url, headers=self.headers, json=expanded_dict)
-            if response.status_code == 200:
-                logger.info("Comment fixed responses successfully sent to main app.")
+            responses = Post.get_fixed_responses(post_id, client_username=self.client_username) # Use the new model method
+            if responses: 
+                logger.info(f"Fixed responses found for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return responses
+            else: 
+                logger.info(f"No fixed responses found for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return []
+        except Exception as e: 
+            logger.error(f"Error fetching fixed responses for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}")
+            return []
+
+    def create_or_update_post_fixed_response(self, post_id, trigger_keyword, comment_response_text=None, direct_response_text=None): # Renamed
+        """Create or update fixed response for a post for the current client"""
+        self._validate_client_access('fixed_response')
+        logger.info(f"Adding/updating fixed response for post ID: {post_id} with trigger: {trigger_keyword} for client: {self.client_username or 'admin'}")
+        try:
+            # Use the model method
+            result = Post.add_fixed_response(post_id, trigger_keyword, self.client_username, comment_response_text, direct_response_text)
+            self.reload_main_app_memory()
+            if result: 
+                logger.info(f"Fixed response added/updated successful for post ID: {post_id} for client: {self.client_username or 'admin'}")
                 return True
-            else:
-                logger.error(f"Failed to send comment fixed responses. Status: {response.status_code}, Response: {response.text}")
+            else: 
+                logger.warning(f"Failed to add/update fixed response for post ID: {post_id} for client: {self.client_username or 'admin'}")
                 return False
-        except Exception as e:
-            logger.error(f"Error sending comment fixed responses: {str(e)}")
+        except Exception as e: 
+            logger.error(f"Error adding/updating fixed response for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}")
             return False
 
-    def send_story_fixed_responses_to_main(self, story_fixed_responses):
-        """
-        Send the story fixed responses dict to the main app to update in-memory cache.
-        The dict should be structured as:
-        {
-            "STORY_ID_1": {
-                "trigger1": {"direct_response_text": "DM text"},
-                "trigger2": {"direct_response_text": "DM text"},
-                ...
-            },
-            ...
-        }
-        The trigger_keyword for each story will be expanded to include all numeral variants using expand_triggers.
-        """
-        expanded_dict = {}
-        for story_id, triggers_dict in story_fixed_responses.items():
-            expanded_story_triggers = {}
-            for trigger, responses in triggers_dict.items():
-                # Expand the trigger to all numeral variants
-                expanded_trigger_variants = expand_triggers({trigger: None})
-                for variant in expanded_trigger_variants.keys():
-                    expanded_story_triggers[variant] = responses
-            expanded_dict[story_id] = expanded_story_triggers
-
-        url = Config.BASE_URL + "/update/fixed-responses/stories"
-        logger.info(f"Sending story fixed responses to {url}")
+    def delete_post_fixed_response(self, post_id, trigger_keyword): # Modified to accept trigger_keyword
+        """Delete fixed response for a post for the current client"""
+        self._validate_client_access('fixed_response')
+        logger.info(f"Deleting fixed response for post ID: {post_id} with trigger: {trigger_keyword} for client: {self.client_username or 'admin'}")
         try:
-            response = requests.post(url, headers=self.headers, json=expanded_dict)
-            if response.status_code == 200:
-                logger.info("Story fixed responses successfully sent to main app.")
+            result = Post.delete_fixed_response(post_id, trigger_keyword, client_username=self.client_username) # Use the model method with trigger
+            self.reload_main_app_memory()
+            if result: 
+                logger.info(f"Fixed response deleted successfully for post ID: {post_id} for client: {self.client_username or 'admin'}")
                 return True
-            else:
-                logger.error(f"Failed to send story fixed responses. Status: {response.status_code}, Response: {response.text}")
+            else: 
+                logger.warning(f"Failed to delete fixed response for post ID: {post_id} for client: {self.client_username or 'admin'}")
                 return False
-        except Exception as e:
-            logger.error(f"Error sending story fixed responses: {str(e)}")
+        except Exception as e: 
+            logger.error(f"Error deleting fixed response for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}")
             return False
 
-    def send_all_fixed_responses_to_main(self):
-        """
-        Fetch all fixed responses from posts and stories and send them to the main app.
-        Returns a dict summarizing the result.
-        """
-        logger.info("Fetching all fixed responses from posts and stories.")
-        post_fixed = Post.get_all_fixed_responses_structured()
-        story_fixed = Story.get_all_fixed_responses_structured()
-        logger.info(f"Found {len(post_fixed)} post fixed responses and {len(story_fixed)} story fixed responses.")
-        post_result = self.send_comment_fixed_responses_to_main(post_fixed)
-        story_result = self.send_story_fixed_responses_to_main(story_fixed)
-        logger.info(f"Post fixed responses sent: {post_result}, Story fixed responses sent: {story_result}")
-        return {"post_fixed_sent": post_result, "story_fixed_sent": story_result}
-
-    def send_all_ig_content_ids_to_main(self):
-        logger.info("Fetching all IG content IDs.")
-        post_ids = Post.get_post_ids()
-        story_ids = Story.get_story_ids()
-        data = {
-            "post_ids": post_ids,
-            "story_ids": story_ids
-        }
-
-        url = Config.BASE_URL + "/update/ig-content-ids"
+    def set_post_admin_explanation(self, post_id, explanation):
+        """Set admin explanation for a post for the current client"""
+        self._validate_client_access()
+        logger.info(f"Setting admin explanation for post ID: {post_id} for client: {self.client_username or 'admin'}")
         try:
-            response = requests.post(url, headers=self.headers, json=data)
-            if response.status_code == 200:
-                logger.info("IG content IDs successfully sent to main app.")
+            result = Post.set_admin_explanation(post_id, explanation, client_username=self.client_username) # Use the model method
+            if result: 
+                logger.info(f"Admin explanation set for post ID: {post_id} for client: {self.client_username or 'admin'}")
                 return True
-            else:
-                logger.error(f"Failed to send IG content IDs. Status: {response.status_code}, Response: {response.text}")
+            else: 
+                logger.warning(f"Failed to set admin explanation for post ID: {post_id} for client: {self.client_username or 'admin'}")
                 return False
-        except Exception as e:
-            logger.error(f"Error sending IG content IDs: {str(e)}")
+        except Exception as e: 
+            logger.error(f"Error setting admin explanation for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}")
+            return False
+
+    def get_post_admin_explanation(self, post_id):
+        """Get admin explanation for a post for the current client"""
+        self._validate_client_access()
+        logger.info(f"Fetching admin explanation for post ID: {post_id} for client: {self.client_username or 'admin'}")
+        try:
+            explanation = Post.get_admin_explanation(post_id, client_username=self.client_username) # Use the model method
+            if explanation is not None: 
+                logger.info(f"Admin explanation found for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return explanation
+            else: 
+                logger.info(f"No admin explanation for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return None # Distinguish empty from not found
+        except Exception as e: 
+            logger.error(f"Error fetching admin explanation for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}")
+            return None
+
+    def remove_post_admin_explanation(self, post_id):
+        """Remove admin explanation for a post for the current client"""
+        self._validate_client_access()
+        logger.info(f"Removing admin explanation for post ID: {post_id} for client: {self.client_username or 'admin'}")
+        try:
+            result = Post.remove_admin_explanation(post_id, client_username=self.client_username) # Use the model method
+            if result: 
+                logger.info(f"Admin explanation removed for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return True
+            else: 
+                logger.warning(f"Failed to remove admin explanation for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return False
+        except Exception as e: 
+            logger.error(f"Error removing admin explanation for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}")
             return False
 
     # ------------------------------------------------------------------
     # Data : Product + additional info
     # ------------------------------------------------------------------
     def update_products(self):
-        logger.info("Scraping the site is starting...")
+        """Update products for the current client"""
+        self._validate_client_access('scraper')
+        logger.info(f"Scraping the site is starting for client: {self.client_username or 'admin'}")
         try:
             self.scraper.update_products()
             logger.info("Update products completed.")
@@ -477,17 +577,19 @@ class Backend:
             return False
 
         try:
-            self.app_settings_to_main()
+            self.reload_main_app_memory()
         except Exception as e:
             logger.error(f"Failed to send app settings: {e}")
 
         return True
 
     def get_products(self):
-        logger.info("Fetching products from the database.")
+        """Get products for the current client"""
+        self._validate_client_access()
+        logger.info(f"Fetching products from the database for client: {self.client_username or 'admin'}")
         try:
-            # Use the MongoDB Product model directly
-            products = Product.get_all()
+            # Use the MongoDB Product model directly with client filtering
+            products = Product.get_all(client_username=self.client_username)
             products_data = [
                 {
                     "Title": p['title'],
@@ -499,16 +601,17 @@ class Backend:
                 }
                 for p in products
             ]
-            logger.info(f"Successfully fetched {len(products_data)} products.")
+            logger.info(f"Successfully fetched {len(products_data)} products for client: {self.client_username or 'admin'}")
             return products_data
         except Exception as e:
             logger.error(f"Error fetching products: {e}")
             return []
 
     def get_additionalinfo(self):
-        """Return all additional text entries as a list of dicts with 'key' and 'value'."""
+        """Return all additional text entries as a list of dicts with 'key' and 'value' for the current client."""
+        self._validate_client_access()
         try:
-            entries = Additionalinfo.get_all()
+            entries = Additionalinfo.get_all(client_username=self.client_username)
             return [
                 {"key": entry["title"], "value": entry["content"]}
                 for entry in entries
@@ -518,23 +621,25 @@ class Backend:
             return []
 
     def add_additionalinfo(self, key, value):
-        """Add or update a text entry in the additional_text collection with the given key and value."""
-        logger.info(f"Adding/updating additional text: {key}")
+        """Add or update a text entry in the additional_text collection with the given key and value for the current client."""
+        self._validate_client_access()
+        logger.info(f"Adding/updating additional text: {key} for client: {self.client_username or 'admin'}")
         try:
-            # Check if an entry with this title already exists
-            existing = Additionalinfo.search(key)
+            # Check if an entry with this title already exists for this client
+            existing = Additionalinfo.search(key, client_username=self.client_username)
             if existing and len(existing) > 0:
                 # Update existing entry
                 result = Additionalinfo.update(str(existing[0]['_id']), {
                     "title": key,
-                    "content": value
+                    "content": value,
+                    "client_username": self.client_username
                 })
             else:
                 # Create new entry
-                result = Additionalinfo.create(title=key, content=value)
+                result = Additionalinfo.create(title=key, content=value, client_username=self.client_username)
 
             if result:
-                logger.info(f"Additional text '{key}' created/updated successfully.")
+                logger.info(f"Additional text '{key}' created/updated successfully for client: {self.client_username or 'admin'}")
                 return True
             else:
                 logger.error(f"Failed to create/update additional text '{key}'.")
@@ -544,21 +649,22 @@ class Backend:
             return False
 
     def delete_additionalinfo(self, key):
-        """Delete an additional text entry by title."""
+        """Delete an additional text entry by title for the current client."""
+        self._validate_client_access()
         try:
-            # Find the entry with the matching title
-            entries = Additionalinfo.search(key)
+            # Find the entry with the matching title for this client
+            entries = Additionalinfo.search(key, client_username=self.client_username)
             if not entries or len(entries) == 0:
-                logger.error(f"Additional text entry with title '{key}' not found.")
+                logger.error(f"Additional text entry with title '{key}' not found for client: {self.client_username or 'admin'}")
                 return False
 
             # delete file from openai if it has file_id
-            if entries[0]['file_id']:
+            if entries[0].get('file_id'):
                 resp = self.openai_service.delete_single_file(entries[0]['file_id'])
                 if resp:
                     result = Additionalinfo.delete(str(entries[0]['_id']))
                     if result:
-                        logger.info(f"Additional text title '{key}' deleted from DB successfully.")
+                        logger.info(f"Additional text title '{key}' deleted from DB successfully for client: {self.client_username or 'admin'}")
                         return True
                     else:
                         logger.error(f"Failed to delete additional text title '{key}' from DB.")
@@ -569,7 +675,7 @@ class Backend:
             else:
                 result = Additionalinfo.delete(str(entries[0]['_id']))
                 if result:
-                    logger.info(f"Additional text title '{key}' deleted from DB successfully.")
+                    logger.info(f"Additional text title '{key}' deleted from DB successfully for client: {self.client_username or 'admin'}")
                     return True
                 else:
                     logger.error(f"Failed to delete additional text title '{key}' from DB.")
@@ -614,7 +720,7 @@ class Backend:
 
             image_stream = io.BytesIO(image_bytes)
             pil_image = Image.open(image_stream)
-            predicted_label = process_image(pil_image) # Assumes process_image returns label or None
+            predicted_label = process_image(pil_image, self.client_username) # Assumes process_image returns label or None
 
             if not predicted_label:
                 logger.info(f"Vision model couldn't find a label for {item_type} ID {item_id}")
@@ -632,61 +738,97 @@ class Backend:
 
     # --- Post Methods ---
     def fetch_instagram_posts(self):
-        logger.info("Fetching Instagram posts.")
+        """Fetch Instagram posts for the current client"""
+        self._validate_client_access()
+        logger.info(f"Fetching Instagram posts for client: {self.client_username or 'admin'}")
         try:
-            result = InstagramService.get_posts()
+            result = InstagramService.get_posts(client_username=self.client_username)
             if result:
-                self.send_all_ig_content_ids_to_main()
-                logger.info("Instagram posts fetched/updated successfully.")
-            else: logger.warning("Failed to fetch/update Instagram posts.")
+                self.reload_main_app_memory()
+                logger.info(f"Instagram posts fetched/updated successfully for client: {self.client_username or 'admin'}")
+            else: 
+                logger.warning(f"Failed to fetch/update Instagram posts for client: {self.client_username or 'admin'}")
             return result
-        except Exception as e: logger.error(f"Failed to fetch Instagram posts: {str(e)}", exc_info=True); return False
+        except Exception as e: 
+            logger.error(f"Failed to fetch Instagram posts for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return False
 
     def get_posts(self):
-        logger.info("Fetching stored Instagram posts.")
+        """Get stored Instagram posts for the current client"""
+        self._validate_client_access()
+        logger.info(f"Fetching stored Instagram posts for client: {self.client_username or 'admin'}")
         try:
-            posts = Post.get_all()
+            posts = Post.get_all(client_username=self.client_username)
             post_data = [
                 {"id": post.get('id'), "media_url": post.get('media_url'), "thumbnail_url": post.get('thumbnail_url'),
                  "caption": post.get('caption'), "label": post.get('label', ''), "media_type": post.get('media_type')}
                 for post in posts if post.get('id') # Ensure id exists
             ]
-            logger.info(f"Successfully fetched {len(post_data)} Instagram posts.")
+            logger.info(f"Successfully fetched {len(post_data)} Instagram posts for client: {self.client_username or 'admin'}")
             return post_data
-        except Exception as e: logger.error(f"Error fetching stored Instagram posts: {str(e)}", exc_info=True); return []
+        except Exception as e: 
+            logger.error(f"Error fetching stored Instagram posts for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return []
 
     def set_post_label(self, post_id, label):
-        logger.info(f"Setting label '{label}' for post ID: {post_id}.")
-        if not post_id: logger.error("Cannot set post label: post_id is missing."); return False
+        """Set label for a post for the current client"""
+        self._validate_client_access('vision')
+        logger.info(f"Setting label '{label}' for post ID: {post_id} for client: {self.client_username or 'admin'}")
+        if not post_id: 
+            logger.error("Cannot set post label: post_id is missing.")
+            return False
         try:
-            success = Post.set_label(post_id, label)
-            if success: logger.info(f"Label update successful for post ID: {post_id}."); return True
-            else: logger.warning(f"Could not set label for post ID {post_id}."); return False
-        except Exception as e: logger.error(f"Error setting label for post ID {post_id}: {str(e)}", exc_info=True); return False
+            success = Post.set_label(post_id, label, client_username=self.client_username)
+            if success: 
+                logger.info(f"Label update successful for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return True
+            else: 
+                logger.warning(f"Could not set label for post ID {post_id} for client: {self.client_username or 'admin'}")
+                return False
+        except Exception as e: 
+            logger.error(f"Error setting label for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return False
 
     def remove_post_label(self, post_id):
-        logger.info(f"Removing label for post ID: {post_id}.")
-        if not post_id: logger.error("Cannot remove post label: post_id is missing."); return False
+        """Remove label for a post for the current client"""
+        self._validate_client_access('vision')
+        logger.info(f"Removing label for post ID: {post_id} for client: {self.client_username or 'admin'}")
+        if not post_id: 
+            logger.error("Cannot remove post label: post_id is missing.")
+            return False
         try:
-            success = Post.remove_label(post_id) # This sets label to ""
-            if success: logger.info(f"Label removed for post ID: {post_id}."); return True
-            else: logger.warning(f"Could not remove label for post ID {post_id}."); return False
-        except Exception as e: logger.error(f"Error removing label for post ID {post_id}: {str(e)}", exc_info=True); return False
+            success = Post.remove_label(post_id, client_username=self.client_username) # This sets label to ""
+            if success: 
+                logger.info(f"Label removed for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return True
+            else: 
+                logger.warning(f"Could not remove label for post ID {post_id} for client: {self.client_username or 'admin'}")
+                return False
+        except Exception as e: 
+            logger.error(f"Error removing label for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return False
 
     def unset_all_post_labels(self):
-        logger.info("Unsetting labels from all posts.")
+        """Unset labels from all posts for the current client"""
+        self._validate_client_access('vision')
+        logger.info(f"Unsetting labels from all posts for client: {self.client_username or 'admin'}")
         try:
-            updated_count = Post.unset_all_labels()
-            logger.info(f"Successfully unset labels from {updated_count} posts.")
+            updated_count = Post.unset_all_labels(client_username=self.client_username)
+            logger.info(f"Successfully unset labels from {updated_count} posts for client: {self.client_username or 'admin'}")
             return updated_count
-        except Exception as e: logger.error(f"Error unsetting all post labels: {str(e)}", exc_info=True); return 0
+        except Exception as e: 
+            logger.error(f"Error unsetting all post labels for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return 0
 
     def set_single_post_label_by_model(self, post_id):
-        logger.info(f"Processing post ID {post_id} for automatic labeling.")
+        """Set label for a single post using AI model for the current client"""
+        self._validate_client_access('vision')
+        logger.info(f"Processing post ID {post_id} for automatic labeling for client: {self.client_username or 'admin'}")
         try:
-            post = Post.get_by_instagram_id(post_id)
+            post = Post.get_by_instagram_id(post_id, client_username=self.client_username)
             if not post:
-                logger.warning(f"Post with ID {post_id} not found."); return {"success": False, "message": "Post not found"}
+                logger.warning(f"Post with ID {post_id} not found for client: {self.client_username or 'admin'}")
+                return {"success": False, "message": "Post not found"}
 
             predicted_label, error_msg = self._process_media_for_labeling(post_id, post.get('media_url'), post.get('thumbnail_url'), "post")
             if error_msg:
@@ -695,25 +837,27 @@ class Backend:
             if predicted_label:
                 label_set_success = self.set_post_label(post_id, predicted_label)
                 if label_set_success:
-                    logger.info(f"Post ID {post_id} automatically labeled as '{predicted_label}'")
+                    logger.info(f"Post ID {post_id} automatically labeled as '{predicted_label}' for client: {self.client_username or 'admin'}")
                     return {"success": True, "label": predicted_label}
                 else:
                     return {"success": False, "message": "Failed to set label in database"}
             return {"success": False, "message": "Model couldn't determine a label"} # Should be caught by _process_media_for_labeling
 
         except Exception as e:
-            logger.error(f"Error in set_single_post_label_by_model for post ID {post_id}: {str(e)}", exc_info=True)
+            logger.error(f"Error in set_single_post_label_by_model for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
             return {"success": False, "message": f"Unexpected error: {str(e)}"}
 
     def set_post_labels_by_model(self):
-        logger.info("Starting automatic labeling of posts by model.")
+        """Set labels for all unlabeled posts using AI model for the current client"""
+        self._validate_client_access('vision')
+        logger.info(f"Starting automatic labeling of posts by model for client: {self.client_username or 'admin'}")
         processed_count, labeled_count, errors = 0, 0, []
-        all_posts = Post.get_all()
+        all_posts = Post.get_all(client_username=self.client_username)
         if not all_posts:
             return {'success': True, 'processed': 0, 'labeled': 0, 'message': 'No posts found.'}
 
         unlabeled_posts = [p for p in all_posts if not p.get('label')]
-        logger.info(f"Found {len(unlabeled_posts)} posts without labels.")
+        logger.info(f"Found {len(unlabeled_posts)} posts without labels for client: {self.client_username or 'admin'}")
         if not unlabeled_posts:
             return {'success': True, 'processed': 0, 'labeled': 0, 'message': 'All posts are already labeled.'}
 
@@ -730,7 +874,7 @@ class Backend:
                 if self.set_post_label(post_id, predicted_label): labeled_count += 1
                 else: errors.append(f"Failed to set label for post ID {post_id} after prediction '{predicted_label}'.")
 
-        message = f"Processed {processed_count} unlabeled posts. Set labels for {labeled_count} posts."
+        message = f"Processed {processed_count} unlabeled posts. Set labels for {labeled_count} posts for client: {self.client_username or 'admin'}"
         if errors: message += f" Encountered {len(errors)} errors. First few: {'; '.join(errors[:3])}"
         logger.info(message)
         return {'success': not errors, 'processed': processed_count, 'labeled': labeled_count, 'message': message, 'errors': errors}
@@ -764,82 +908,40 @@ class Backend:
             return labeled_posts
         except Exception as e: logger.error(f"Error preparing post labels for download: {str(e)}", exc_info=True); return {"error": str(e)}
 
-    def get_post_fixed_responses(self, post_id): # Renamed
-        logger.info(f"Fetching fixed responses for post ID: {post_id}")
-        try:
-            responses = Post.get_fixed_responses(post_id) # Use the new model method
-            if responses: logger.info(f"Fixed responses found for post ID: {post_id}"); return responses
-            else: logger.info(f"No fixed responses found for post ID: {post_id}"); return []
-        except Exception as e: logger.error(f"Error fetching fixed responses for post ID {post_id}: {str(e)}"); return []
-
-    def create_or_update_post_fixed_response(self, post_id, trigger_keyword, comment_response_text=None, direct_response_text=None): # Renamed
-        logger.info(f"Adding/updating fixed response for post ID: {post_id} with trigger: {trigger_keyword}")
-        try:
-            # Use the model method
-            result = Post.add_fixed_response(post_id, trigger_keyword, comment_response_text, direct_response_text)
-            self.send_all_fixed_responses_to_main()
-            if result: logger.info(f"Fixed response added/updated successful for post ID: {post_id}"); return True
-            else: logger.warning(f"Failed to add/update fixed response for post ID: {post_id}"); return False
-        except Exception as e: logger.error(f"Error adding/updating fixed response for post ID {post_id}: {str(e)}"); return False
-
-    def delete_post_fixed_response(self, post_id, trigger_keyword): # Modified to accept trigger_keyword
-        logger.info(f"Deleting fixed response for post ID: {post_id} with trigger: {trigger_keyword}")
-        try:
-            result = Post.delete_fixed_response(post_id, trigger_keyword) # Use the model method with trigger
-            self.send_all_fixed_responses_to_main()
-            if result: logger.info(f"Fixed response deleted successfully for post ID: {post_id}"); return True
-            else: logger.warning(f"Failed to delete fixed response for post ID: {post_id}"); return False
-        except Exception as e: logger.error(f"Error deleting fixed response for post ID {post_id}: {str(e)}"); return False
-
-    def set_post_admin_explanation(self, post_id, explanation):
-        logger.info(f"Setting admin explanation for post ID: {post_id}")
-        try:
-            result = Post.set_admin_explanation(post_id, explanation) # Use the model method
-            if result: logger.info(f"Admin explanation set for post ID: {post_id}"); return True
-            else: logger.warning(f"Failed to set admin explanation for post ID: {post_id}"); return False
-        except Exception as e: logger.error(f"Error setting admin explanation for post ID {post_id}: {str(e)}"); return False
-
-    def get_post_admin_explanation(self, post_id):
-        logger.info(f"Fetching admin explanation for post ID: {post_id}")
-        try:
-            explanation = Post.get_admin_explanation(post_id) # Use the model method
-            if explanation is not None: logger.info(f"Admin explanation found for post ID: {post_id}"); return explanation
-            else: logger.info(f"No admin explanation for post ID: {post_id}"); return None # Distinguish empty from not found
-        except Exception as e: logger.error(f"Error fetching admin explanation for post ID {post_id}: {str(e)}"); return None
-
-    def remove_post_admin_explanation(self, post_id):
-        logger.info(f"Removing admin explanation for post ID: {post_id}")
-        try:
-            result = Post.remove_admin_explanation(post_id) # Use the model method
-            if result: logger.info(f"Admin explanation removed for post ID: {post_id}"); return True
-            else: logger.warning(f"Failed to remove admin explanation for post ID: {post_id}"); return False
-        except Exception as e: logger.error(f"Error removing admin explanation for post ID {post_id}: {str(e)}"); return False
-
     # --- Story Methods (Paired with Post Methods) ---
     def fetch_instagram_stories(self):
-        logger.info("Fetching Instagram stories.")
+        """Fetch Instagram stories for the current client"""
+        self._validate_client_access()
+        logger.info(f"Fetching Instagram stories for client: {self.client_username or 'admin'}")
         try:
             # InstagramService.get_stories should ideally call Story.create_or_update_from_instagram
-            result = InstagramService.get_stories()
+            result = InstagramService.get_stories(client_username=self.client_username)
             if result:
-                logger.info("Instagram stories fetched/updated successfully.")
-                self.send_all_ig_content_ids_to_main()
-            else: logger.warning("Failed to fetch/update Instagram stories.")
+                logger.info(f"Instagram stories fetched/updated successfully for client: {self.client_username or 'admin'}")
+                self.reload_main_app_memory()
+            else: 
+                logger.warning(f"Failed to fetch/update Instagram stories for client: {self.client_username or 'admin'}")
             return result
-        except Exception as e: logger.error(f"Failed to fetch Instagram stories: {str(e)}", exc_info=True); return False
+        except Exception as e: 
+            logger.error(f"Failed to fetch Instagram stories for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return False
 
     def get_stories(self):
-        logger.info("Fetching stored Instagram stories.")
+        """Get stored Instagram stories for the current client"""
+        self._validate_client_access()
+        logger.info(f"Fetching stored Instagram stories for client: {self.client_username or 'admin'}")
         try:
-            stories = Story.get_all() # Fetches from DB
+            stories = Story.get_all(client_username=self.client_username) # Fetches from DB
             story_data = [
                 {"id": story.get('id'), "media_url": story.get('media_url'), "thumbnail_url": story.get('thumbnail_url'),
                  "caption": story.get('caption'), "label": story.get('label', ''), "media_type": story.get('media_type')}
                 for story in stories if story.get('id') # Ensure id exists
             ]
-            logger.info(f"Successfully fetched {len(story_data)} Instagram stories from DB.")
+            logger.info(f"Successfully fetched {len(story_data)} Instagram stories from DB for client: {self.client_username or 'admin'}")
             return story_data
-        except Exception as e: logger.error(f"Error fetching stored Instagram stories: {str(e)}", exc_info=True); return []
+        except Exception as e: 
+            logger.error(f"Error fetching stored Instagram stories for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return []
 
     def set_story_label(self, story_id, label):
         logger.info(f"Setting label '{label}' for story ID: {story_id}.")
@@ -968,7 +1070,7 @@ class Backend:
         try:
             # Use the model method. Note: No comment_response_text for stories.
             result = Story.add_fixed_response(story_id, trigger_keyword, direct_response_text)
-            self.send_all_fixed_responses_to_main()
+            self.reload_main_app_memory()
             if result: logger.info(f"Fixed response added/updated successful for story ID: {story_id}"); return True
             else: logger.warning(f"Failed to add/update fixed response for story ID: {story_id}"); return False
         except Exception as e: logger.error(f"Error adding/updating fixed response for story ID {story_id}: {str(e)}"); return False
@@ -977,7 +1079,7 @@ class Backend:
         logger.info(f"Deleting fixed response for story ID: {story_id} with trigger: {trigger_keyword}")
         try:
             result = Story.delete_fixed_response(story_id, trigger_keyword) # Use the model method with trigger
-            self.send_all_fixed_responses_to_main()
+            self.reload_main_app_memory()
             if result: logger.info(f"Fixed response deleted successfully for story ID: {story_id}"); return True
             else: logger.warning(f"Failed to delete fixed response for story ID: {story_id}"); return False
         except Exception as e: logger.error(f"Error deleting fixed response for story ID {story_id}: {str(e)}"); return False
@@ -1010,16 +1112,18 @@ class Backend:
     # Openai management
     # ------------------------------------------------------------------
     def get_vs_id(self):
-        """Get the store IDs from the database."""
-        logger.info("Fetching current vector store ID.")
+        """Get the vector store ID from the client model."""
+        logger.info("Fetching current vector store ID from client model.")
         try:
-            # Use the MongoDB AppSettings model directly
-            vs_id = AppSettings.get_by_key('vs_id')
+            if not self.client_username or not self.client_data:
+                logger.warning("No client context loaded for get_vs_id.")
+                return None
+            vs_id = self.client_data.get('keys', {}).get('vector_store_id')
             if vs_id:
-                logger.info(f"Current vector store ID: {vs_id['value']}")
-                return [vs_id['value']]
+                logger.info(f"Current vector store ID: {vs_id}")
+                return [vs_id]
             else:
-                logger.info("No vector store ID found in database.")
+                logger.info("No vector store ID found in client model.")
                 return None
         except Exception as e:
             logger.error(f"Error fetching vector store ID: {str(e)}")
@@ -1156,7 +1260,7 @@ class Backend:
                 pil_image = Image.open(image_stream)
 
                 # Call the existing process_image function (already imported in backend.py)
-                analysis_result = process_image(pil_image)
+                analysis_result = process_image(pil_image, self.client_username)
                 logger.info(f"Image processing result: {analysis_result}")
                 return analysis_result
 
@@ -1172,67 +1276,75 @@ class Backend:
     # User Analytics and Statistics
     # ------------------------------------------------------------------
     def get_message_statistics_by_role(self, time_frame="daily", days_back=7):
-        """Get message statistics grouped by role and time frame"""
-        logger.info(f"Fetching message statistics by role for {time_frame} timeframe, {days_back} days back")
+        """Get message statistics grouped by role and time frame for the current client"""
+        self._validate_client_access()
+        logger.info(f"Fetching message statistics by role for {time_frame} timeframe, {days_back} days back for client: {self.client_username or 'admin'}")
         try:
-            statistics = User.get_message_statistics_by_role(time_frame, days_back)
-            logger.info(f"Successfully fetched message statistics: {len(statistics)} time periods")
+            # Note: User model methods need to be updated to support client filtering
+            statistics = User.get_message_statistics_by_role(time_frame, days_back, client_username=self.client_username)
+            logger.info(f"Successfully fetched message statistics: {len(statistics)} time periods for client: {self.client_username or 'admin'}")
             return statistics
         except Exception as e:
-            logger.error(f"Error fetching message statistics: {str(e)}")
+            logger.error(f"Error fetching message statistics for client {self.client_username or 'admin'}: {str(e)}")
             return {}
 
     def get_user_status_counts(self):
-        """Get count of users by status"""
-        logger.info("Fetching user status counts")
+        """Get count of users by status for the current client (optionally filtered by client_username)"""
+        self._validate_client_access()
+        logger.info(f"Fetching user status counts for client: {self.client_username or 'admin'}")
         try:
-            status_counts = User.get_user_status_counts()
-            logger.info(f"Successfully fetched user status counts: {len(status_counts)} statuses")
+            status_counts = User.get_user_status_counts(client_username=self.client_username)
+            logger.info(f"Successfully fetched user status counts: {len(status_counts)} statuses for client: {self.client_username or 'admin'}")
             return status_counts
         except Exception as e:
-            logger.error(f"Error fetching user status counts: {str(e)}")
+            logger.error(f"Error fetching user status counts for client {self.client_username or 'admin'}: {str(e)}")
             return {}
 
     def get_user_status_counts_within_timeframe(self, start_date, end_date):
-        """Get count of users by status within a specific timeframe"""
-        logger.info(f"Fetching user status counts within timeframe: {start_date} to {end_date}")
+        """Get count of users by status within a specific timeframe for the current client"""
+        self._validate_client_access()
+        logger.info(f"Fetching user status counts within timeframe: {start_date} to {end_date} for client: {self.client_username or 'admin'}")
         try:
-            status_counts = User.get_user_status_counts_within_timeframe(start_date, end_date)
-            logger.info(f"Successfully fetched user status counts within timeframe: {len(status_counts)} statuses")
+            status_counts = User.get_user_status_counts_within_timeframe(start_date, end_date, client_username=self.client_username)
+            logger.info(f"Successfully fetched user status counts within timeframe: {len(status_counts)} statuses for client: {self.client_username or 'admin'}")
             return status_counts
         except Exception as e:
-            logger.error(f"Error fetching user status counts within timeframe: {str(e)}")
+            logger.error(f"Error fetching user status counts within timeframe for client {self.client_username or 'admin'}: {str(e)}")
             return {}
 
     def get_total_users_count(self):
-        """Get total number of users"""
-        logger.info("Fetching total users count")
+        """Get total number of users for the current client (optionally filtered by client_username)"""
+        self._validate_client_access()
+        logger.info(f"Fetching total users count for client: {self.client_username or 'admin'}")
         try:
-            total_count = User.get_total_users_count()
-            logger.info(f"Successfully fetched total users count: {total_count}")
+            total_count = User.get_total_users_count(client_username=self.client_username)
+            logger.info(f"Successfully fetched total users count: {total_count} for client: {self.client_username or 'admin'}")
             return total_count
         except Exception as e:
-            logger.error(f"Error fetching total users count: {str(e)}")
+            logger.error(f"Error fetching total users count for client {self.client_username or 'admin'}: {str(e)}")
             return 0
 
     def get_total_users_count_within_timeframe(self, start_date, end_date):
-        """Get total number of users within a specific timeframe"""
-        logger.info(f"Fetching total users count within timeframe: {start_date} to {end_date}")
+        """Get total number of users within a specific timeframe for the current client"""
+        self._validate_client_access()
+        logger.info(f"Fetching total users count within timeframe: {start_date} to {end_date} for client: {self.client_username or 'admin'}")
         try:
-            total_count = User.get_total_users_count_within_timeframe(start_date, end_date)
-            logger.info(f"Successfully fetched total users count within timeframe: {total_count}")
+            total_count = User.get_total_users_count_within_timeframe(start_date, end_date, client_username=self.client_username)
+            logger.info(f"Successfully fetched total users count within timeframe: {total_count} for client: {self.client_username or 'admin'}")
             return total_count
         except Exception as e:
-            logger.error(f"Error fetching total users count within timeframe: {str(e)}")
+            logger.error(f"Error fetching total users count within timeframe for client {self.client_username or 'admin'}: {str(e)}")
             return 0
 
     def get_message_statistics_by_role_within_timeframe(self, time_frame, start_date, end_date):
-        """Get message statistics grouped by role and time frame within a specific date range"""
-        logger.info(f"Fetching message statistics by role for {time_frame} timeframe from {start_date} to {end_date}")
+        """Get message statistics grouped by role and time frame within a specific date range for the current client"""
+        self._validate_client_access()
+        logger.info(f"Fetching message statistics by role for {time_frame} timeframe from {start_date} to {end_date} for client: {self.client_username or 'admin'}")
         try:
-            statistics = User.get_message_statistics_by_role_within_timeframe(time_frame, start_date, end_date)
-            logger.info(f"Successfully fetched message statistics within timeframe: {len(statistics)} time periods")
+            statistics = User.get_message_statistics_by_role_within_timeframe(time_frame, start_date, end_date, client_username=self.client_username)
+            logger.info(f"Successfully fetched message statistics within timeframe: {len(statistics)} time periods for client: {self.client_username or 'admin'}")
             return statistics
         except Exception as e:
-            logger.error(f"Error fetching message statistics within timeframe: {str(e)}")
+            logger.error(f"Error fetching message statistics within timeframe for client {self.client_username or 'admin'}: {str(e)}")
             return {}
+
