@@ -133,14 +133,11 @@ def expand_triggers(triggers_dict):
     expanded = {}
     for trigger, response in triggers_dict.items():
         expanded[trigger] = response
-        
         # Convert English numbers to Farsi and Arabic numerals
         fa_nums = en_to_fa_number(trigger)
         ar_nums = en_to_ar_number(trigger)
-        
         # Convert Farsi text to Arabic equivalent
         ar_text = fa_to_ar_text(trigger)
-        
         # Add variants if they're different from original
         if fa_nums != trigger:
             expanded[fa_nums] = response
@@ -148,7 +145,6 @@ def expand_triggers(triggers_dict):
             expanded[ar_nums] = response
         if ar_text != trigger and ar_text != fa_nums and ar_text != ar_nums:
             expanded[ar_text] = response
-            
         # Also convert the Arabic text version's numerals
         if ar_text != trigger:
             ar_text_fa_nums = en_to_fa_number(ar_text)
@@ -157,7 +153,9 @@ def expand_triggers(triggers_dict):
                 expanded[ar_text_fa_nums] = response
             if ar_text_ar_nums != ar_text and ar_text_ar_nums != ar_text_fa_nums and ar_text_ar_nums not in expanded:
                 expanded[ar_text_ar_nums] = response
-    
+
+        # Debug printout for this trigger
+        # print(f"expand_triggers: trigger='{trigger}' expanded_keys={list(expanded.keys())}")
     return expanded
 
 def load_main_app_globals_from_db():
@@ -192,11 +190,17 @@ def load_main_app_globals_from_db():
             # 4. COMMENT_FIXED_RESPONSES
             if username:
                 post_fixed = Post.get_all_fixed_responses_structured(username)
-                instagram_service.COMMENT_FIXED_RESPONSES[username] = post_fixed
+                expanded_post_fixed = {}
+                for post_id, triggers_dict in post_fixed.items():
+                    expanded_post_fixed[post_id] = expand_triggers(triggers_dict)
+                instagram_service.COMMENT_FIXED_RESPONSES[username] = expanded_post_fixed
             # 5. STORY_FIXED_RESPONSES
             if username:
                 story_fixed = Story.get_all_fixed_responses_structured(username)
-                instagram_service.STORY_FIXED_RESPONSES[username] = story_fixed
+                expanded_story_fixed = {}
+                for story_id, triggers_dict in story_fixed.items():
+                    expanded_story_fixed[story_id] = expand_triggers(triggers_dict)
+                instagram_service.STORY_FIXED_RESPONSES[username] = expanded_story_fixed
             # 6. IG_CONTENT_IDS
             if username:
                 post_ids = Post.get_post_ids(username)

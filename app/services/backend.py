@@ -14,7 +14,7 @@ from ..models.additional_info import Additionalinfo
 from ..models.client import Client
 from ..models.story import Story
 from ..models.user import User
-from app.utils.helpers import  expand_triggers
+from ..utils.exceptions import PermanentError, RetryableError
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class Backend:
         else:
             logger.info("Backend initialized without client context (admin mode)")
         
-        self.app_setting_url = Config.BASE_URL + "/test/hooshang_update/app-settings"
+        self.app_setting_url = Config.BASE_URL + "/hooshang_update/app-settings"
         self.headers = {"Content-Type": "application/json",  "Authorization": f"Bearer {Config.VERIFY_TOKEN}" }
         self.scraper = self._load_scraper()
         self.openai_service = OpenAIService(client_username=self.client_username) if self.client_username else None
@@ -392,7 +392,7 @@ class Backend:
         logger.info("Triggering main app to reload memory from DB.")
         try:
             response = requests.post(
-                Config.BASE_URL + "/test/hooshang_update/reload-memory",
+                Config.BASE_URL + "/hooshang_update/reload-memory",
                 headers=self.headers
             )
             if response.status_code == 200:
@@ -660,6 +660,9 @@ class Backend:
 
             # delete file from openai if it has file_id
             if entries[0].get('file_id'):
+                if not self.openai_service:
+                    logger.error("OpenAI service not initialized")
+                    return False
                 resp = self.openai_service.delete_single_file(entries[0]['file_id'])
                 if resp:
                     result = Additionalinfo.delete(str(entries[0]['_id']))
@@ -687,6 +690,9 @@ class Backend:
 
     def rebuild_files_and_vs(self):
         try:
+            if not self.openai_service:
+                logger.error("OpenAI service not initialized")
+                return False
             clear_success = self.openai_service.rebuild_all()
             if clear_success:
                 logger.info("Additional info files and vector store rebuilt successfully")
@@ -880,9 +886,11 @@ class Backend:
         return {'success': not errors, 'processed': processed_count, 'labeled': labeled_count, 'message': message, 'errors': errors}
 
     def download_post_labels(self):
-        logger.info("Preparing posts organized by labels for download.")
+        """Prepare posts organized by labels for download for the current client"""
+        self._validate_client_access()
+        logger.info(f"Preparing posts organized by labels for download for client: {self.client_username or 'admin'}")
         try:
-            posts = Post.get_all()
+            posts = Post.get_all(client_username=self.client_username)
             if not posts: return {}
             labeled_posts = {}
             for post in posts:
@@ -904,7 +912,7 @@ class Backend:
                             if label not in labeled_posts: labeled_posts[label] = []
                             labeled_posts[label].append(child_url)
                             
-            logger.info(f"Successfully prepared posts by label, found {len(labeled_posts)} unique labels.")
+            logger.info(f"Successfully prepared posts by label, found {len(labeled_posts)} unique labels for client: {self.client_username or 'admin'}")
             return labeled_posts
         except Exception as e: logger.error(f"Error preparing post labels for download: {str(e)}", exc_info=True); return {"error": str(e)}
 
@@ -944,35 +952,43 @@ class Backend:
             return []
 
     def set_story_label(self, story_id, label):
-        logger.info(f"Setting label '{label}' for story ID: {story_id}.")
+        """Set label for a story for the current client"""
+        self._validate_client_access('vision')
+        logger.info(f"Setting label '{label}' for story ID: {story_id} for client: {self.client_username or 'admin'}")
         if not story_id: logger.error("Cannot set story label: story_id is missing."); return False
         try:
-            success = Story.set_label(story_id, label)
-            if success: logger.info(f"Label update successful for story ID: {story_id}."); return True
-            else: logger.warning(f"Could not set label for story ID {story_id}."); return False
+            success = Story.set_label(story_id, label, client_username=self.client_username)
+            if success: logger.info(f"Label update successful for story ID: {story_id}"); return True
+            else: logger.warning(f"Could not set label for story ID {story_id}"); return False
         except Exception as e: logger.error(f"Error setting label for story ID {story_id}: {str(e)}", exc_info=True); return False
 
     def remove_story_label(self, story_id):
-        logger.info(f"Removing label for story ID: {story_id}.")
+        """Remove label for a story for the current client"""
+        self._validate_client_access('vision')
+        logger.info(f"Removing label for story ID: {story_id} for client: {self.client_username or 'admin'}")
         if not story_id: logger.error("Cannot remove story label: story_id is missing."); return False
         try:
-            success = Story.remove_label(story_id)
-            if success: logger.info(f"Label removed for story ID: {story_id}."); return True
-            else: logger.warning(f"Could not remove label for story ID {story_id}."); return False
+            success = Story.remove_label(story_id, client_username=self.client_username)
+            if success: logger.info(f"Label removed for story ID: {story_id}"); return True
+            else: logger.warning(f"Could not remove label for story ID {story_id}"); return False
         except Exception as e: logger.error(f"Error removing label for story ID {story_id}: {str(e)}", exc_info=True); return False
 
     def unset_all_story_labels(self):
-        logger.info("Unsetting labels from all stories.")
+        """Unset labels from all stories for the current client"""
+        self._validate_client_access('vision')
+        logger.info(f"Unsetting labels from all stories for client: {self.client_username or 'admin'}")
         try:
-            updated_count = Story.unset_all_labels()
-            logger.info(f"Successfully unset labels from {updated_count} stories.")
+            updated_count = Story.unset_all_labels(client_username=self.client_username)
+            logger.info(f"Successfully unset labels from {updated_count} stories for client: {self.client_username or 'admin'}")
             return updated_count
         except Exception as e: logger.error(f"Error unsetting all story labels: {str(e)}", exc_info=True); return 0
 
     def set_single_story_label_by_model(self, story_id):
-        logger.info(f"Processing story ID {story_id} for automatic labeling.")
+        """Set label for a single story using AI model for the current client"""
+        self._validate_client_access('vision')
+        logger.info(f"Processing story ID {story_id} for automatic labeling for client: {self.client_username or 'admin'}")
         try:
-            story = Story.get_by_instagram_id(story_id)
+            story = Story.get_by_instagram_id(story_id, client_username=self.client_username)
             if not story:
                 logger.warning(f"Story with ID {story_id} not found."); return {"success": False, "message": "Story not found"}
 
@@ -1004,14 +1020,16 @@ class Backend:
             return {"success": False, "message": f"Unexpected error: {str(e)}"}
 
     def set_story_labels_by_model(self):
-        logger.info("Starting automatic labeling of stories by model.")
+        """Set labels for all unlabeled stories using AI model for the current client"""
+        self._validate_client_access('vision')
+        logger.info(f"Starting automatic labeling of stories by model for client: {self.client_username or 'admin'}")
         processed_count, labeled_count, errors = 0, 0, []
-        all_stories = Story.get_all()
+        all_stories = Story.get_all(client_username=self.client_username)
         if not all_stories:
             return {'success': True, 'processed': 0, 'labeled': 0, 'message': 'No stories found.'}
 
         unlabeled_stories = [s for s in all_stories if not s.get('label')]
-        logger.info(f"Found {len(unlabeled_stories)} stories without labels.")
+        logger.info(f"Found {len(unlabeled_stories)} stories without labels for client: {self.client_username or 'admin'}")
         if not unlabeled_stories:
             return {'success': True, 'processed': 0, 'labeled': 0, 'message': 'All stories are already labeled.'}
 
@@ -1035,15 +1053,17 @@ class Backend:
                 if self.set_story_label(story_id, predicted_label): labeled_count += 1
                 else: errors.append(f"Failed to set label for story ID {story_id} after prediction '{predicted_label}'.")
 
-        message = f"Processed {processed_count} unlabeled stories. Set labels for {labeled_count} stories."
+        message = f"Processed {processed_count} unlabeled stories. Set labels for {labeled_count} stories for client: {self.client_username or 'admin'}"
         if errors: message += f" Encountered {len(errors)} errors. First few: {'; '.join(errors[:3])}"
         logger.info(message)
         return {'success': not errors, 'processed': processed_count, 'labeled': labeled_count, 'message': message, 'errors': errors}
 
     def download_story_labels(self):
-        logger.info("Preparing stories organized by labels for download.")
+        """Prepare stories organized by labels for download for the current client"""
+        self._validate_client_access()
+        logger.info(f"Preparing stories organized by labels for download for client: {self.client_username or 'admin'}")
         try:
-            stories = Story.get_all()
+            stories = Story.get_all(client_username=self.client_username)
             if not stories: return {}
             labeled_stories = {}
             for story in stories:
@@ -1053,57 +1073,74 @@ class Backend:
                 if not image_url: continue
                 if label not in labeled_stories: labeled_stories[label] = []
                 labeled_stories[label].append(image_url)
-            logger.info(f"Successfully prepared stories by label, found {len(labeled_stories)} unique labels.")
+            logger.info(f"Successfully prepared stories by label, found {len(labeled_stories)} unique labels for client: {self.client_username or 'admin'}")
             return labeled_stories
         except Exception as e: logger.error(f"Error preparing story labels for download: {str(e)}", exc_info=True); return {"error": str(e)}
 
     def get_story_fixed_responses(self, story_id): # Renamed
-        logger.info(f"Fetching fixed responses for story ID: {story_id}")
+        """Get fixed responses for a story for the current client"""
+        self._validate_client_access('fixed_response')
+        logger.info(f"Fetching fixed responses for story ID: {story_id} for client: {self.client_username or 'admin'}")
         try:
-            responses = Story.get_fixed_responses(story_id) # Use the new model method
+            responses = Story.get_fixed_responses(story_id, client_username=self.client_username) # Use the new model method
             if responses: logger.info(f"Fixed responses found for story ID: {story_id}"); return responses
             else: logger.info(f"No fixed responses found for story ID: {story_id}"); return []
         except Exception as e: logger.error(f"Error fetching fixed responses for story ID {story_id}: {str(e)}"); return []
 
     def create_or_update_story_fixed_response(self, story_id, trigger_keyword, direct_response_text=None):
-        logger.info(f"Adding/updating fixed response for story ID: {story_id} with trigger: {trigger_keyword}")
+        """Create or update fixed response for a story for the current client"""
+        self._validate_client_access('fixed_response')
+        logger.info(f"Adding/updating fixed response for story ID: {story_id} with trigger: {trigger_keyword} for client: {self.client_username or 'admin'}")
         try:
             # Use the model method. Note: No comment_response_text for stories.
-            result = Story.add_fixed_response(story_id, trigger_keyword, direct_response_text)
+            result = Story.add_fixed_response(
+                story_id,
+                trigger_keyword,
+                client_username=self.client_username,
+                direct_response_text=direct_response_text
+            )
             self.reload_main_app_memory()
             if result: logger.info(f"Fixed response added/updated successful for story ID: {story_id}"); return True
             else: logger.warning(f"Failed to add/update fixed response for story ID: {story_id}"); return False
         except Exception as e: logger.error(f"Error adding/updating fixed response for story ID {story_id}: {str(e)}"); return False
 
     def delete_story_fixed_response(self, story_id, trigger_keyword):
-        logger.info(f"Deleting fixed response for story ID: {story_id} with trigger: {trigger_keyword}")
+        """Delete fixed response for a story for the current client"""
+        self._validate_client_access('fixed_response')
+        logger.info(f"Deleting fixed response for story ID: {story_id} with trigger: {trigger_keyword} for client: {self.client_username or 'admin'}")
         try:
-            result = Story.delete_fixed_response(story_id, trigger_keyword) # Use the model method with trigger
+            result = Story.delete_fixed_response(story_id, trigger_keyword, client_username=self.client_username) # Use the model method with trigger
             self.reload_main_app_memory()
             if result: logger.info(f"Fixed response deleted successfully for story ID: {story_id}"); return True
             else: logger.warning(f"Failed to delete fixed response for story ID: {story_id}"); return False
         except Exception as e: logger.error(f"Error deleting fixed response for story ID {story_id}: {str(e)}"); return False
 
     def set_story_admin_explanation(self, story_id, explanation):
-        logger.info(f"Setting admin explanation for story ID: {story_id}")
+        """Set admin explanation for a story for the current client"""
+        self._validate_client_access()
+        logger.info(f"Setting admin explanation for story ID: {story_id} for client: {self.client_username or 'admin'}")
         try:
-            result = Story.set_admin_explanation(story_id, explanation) # Use the model method
+            result = Story.set_admin_explanation(story_id, explanation, client_username=self.client_username) # Use the model method
             if result: logger.info(f"Admin explanation set for story ID: {story_id}"); return True
             else: logger.warning(f"Failed to set admin explanation for story ID: {story_id}"); return False
         except Exception as e: logger.error(f"Error setting admin explanation for story ID {story_id}: {str(e)}"); return False
 
     def get_story_admin_explanation(self, story_id):
-        logger.info(f"Fetching admin explanation for story ID: {story_id}")
+        """Get admin explanation for a story for the current client"""
+        self._validate_client_access()
+        logger.info(f"Fetching admin explanation for story ID: {story_id} for client: {self.client_username or 'admin'}")
         try:
-            explanation = Story.get_admin_explanation(story_id) # Use the model method
+            explanation = Story.get_admin_explanation(story_id, client_username=self.client_username) # Use the model method
             if explanation is not None: logger.info(f"Admin explanation found for story ID: {story_id}"); return explanation
             else: logger.info(f"No admin explanation for story ID: {story_id}"); return None
         except Exception as e: logger.error(f"Error fetching admin explanation for story ID {story_id}: {str(e)}"); return None
 
     def remove_story_admin_explanation(self, story_id):
-        logger.info(f"Removing admin explanation for story ID: {story_id}")
+        """Remove admin explanation for a story for the current client"""
+        self._validate_client_access()
+        logger.info(f"Removing admin explanation for story ID: {story_id} for client: {self.client_username or 'admin'}")
         try:
-            result = Story.remove_admin_explanation(story_id) # Use the model method
+            result = Story.remove_admin_explanation(story_id, client_username=self.client_username) # Use the model method
             if result: logger.info(f"Admin explanation removed for story ID: {story_id}"); return True
             else: logger.warning(f"Failed to remove admin explanation for story ID: {story_id}"); return False
         except Exception as e: logger.error(f"Error removing admin explanation for story ID {story_id}: {str(e)}"); return False
@@ -1133,6 +1170,9 @@ class Backend:
         """Get the current instructions for the assistant."""
         logger.info("Fetching assistant instructions.")
         try:
+            if not self.openai_service:
+                logger.error("OpenAI service not initialized")
+                return None
             instructions = self.openai_service.get_assistant_instructions()
             if instructions:
                 logger.info("Assistant instructions retrieved successfully.")
@@ -1147,6 +1187,9 @@ class Backend:
         """Get the current temperature setting for the assistant."""
         logger.info("Fetching assistant temperature.")
         try:
+            if not self.openai_service:
+                logger.error("OpenAI service not initialized")
+                return None
             temperature = self.openai_service.get_assistant_temperature()
             if temperature is not None:
                 logger.info("Assistant temperature retrieved successfully.")
@@ -1161,6 +1204,9 @@ class Backend:
         """Get the current top_p setting for the assistant."""
         logger.info("Fetching assistant top_p.")
         try:
+            if not self.openai_service:
+                logger.error("OpenAI service not initialized")
+                return None
             top_p = self.openai_service.get_assistant_top_p()
             if top_p is not None:
                 logger.info("Assistant top_p retrieved successfully.")
@@ -1175,6 +1221,9 @@ class Backend:
         """Update the instructions for the assistant."""
         logger.info("Updating assistant instructions.")
         try:
+            if not self.openai_service:
+                logger.error("OpenAI service not initialized")
+                return {'success': False, 'message': 'OpenAI service not initialized'}
             result = self.openai_service.update_assistant_instructions(new_instructions)
             if result['success']:
                 logger.info("Assistant instructions updated successfully.")
@@ -1191,6 +1240,9 @@ class Backend:
         """Update the temperature setting for the assistant."""
         logger.info("Updating assistant temperature.")
         try:
+            if not self.openai_service:
+                logger.error("OpenAI service not initialized")
+                return {'success': False, 'message': 'OpenAI service not initialized'}
             result = self.openai_service.update_assistant_temperature(new_temperature)
             if result['success']:
                 logger.info("Assistant temperature updated successfully.")
@@ -1206,6 +1258,9 @@ class Backend:
         """Update the top_p setting for the assistant."""
         logger.info("Updating assistant top_p.")
         try:
+            if not self.openai_service:
+                logger.error("OpenAI service not initialized")
+                return {'success': False, 'message': 'OpenAI service not initialized'}
             result = self.openai_service.update_assistant_top_p(new_top_p)
             if result['success']:
                 logger.info("Assistant top_p updated successfully.")
@@ -1224,6 +1279,9 @@ class Backend:
         """
         logger.info("Creating new chat thread.")
         try:
+            if not self.openai_service:
+                logger.error("OpenAI service not initialized")
+                raise PermanentError("OpenAI service not initialized")
             thread_id = self.openai_service.create_thread()
             logger.info(f"Chat thread created successfully with ID: {thread_id}")
             return thread_id
@@ -1238,6 +1296,9 @@ class Backend:
         """
         logger.info(f"Sending message to thread {thread_id}.")
         try:
+            if not self.openai_service:
+                logger.error("OpenAI service not initialized")
+                raise PermanentError("OpenAI service not initialized")
             response = self.openai_service.send_message_to_thread(thread_id, user_message)
             logger.info(f"Message sent to thread {thread_id} successfully.")
             return response
