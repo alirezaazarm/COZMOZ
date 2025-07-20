@@ -5,7 +5,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from datetime import datetime, timezone, timedelta
 import logging
 from ..models.client import Client
-from ..services.instagram_service import InstagramService
+from ..models.enums import ModuleType
 
 logger = logging.getLogger(__name__)
 
@@ -24,14 +24,12 @@ def process_messages_job():
 
         for client in active_clients:
             client_username = client.get('username')
-            app_settings = InstagramService.get_app_settings(client_username)
-            assistant_enabled = app_settings.get('assistant', False)
-            if isinstance(assistant_enabled, str):
-                assistant_enabled = assistant_enabled.lower() == 'true'
-            if not assistant_enabled:
-                logger.info(f"Assistant is disabled for client '{client_username}'. Skipping.")
+            # Check if dm_assist module is enabled for this client
+            dm_assist_enabled = client.get("modules", {}).get(ModuleType.DM_ASSIST.value, {}).get("enabled", False)
+            if not dm_assist_enabled:
+                logger.info(f"DM Assist is disabled for client '{client_username}'. Skipping.")
                 continue
-            logger.info(f"Assistant is enabled for client '{client_username}'. Processing pending messages.")
+            logger.info(f"DM Assist is enabled for client '{client_username}'. Processing pending messages.")
             with get_db() as db:
                 mediator = Mediator(db, client_username=client_username)
                 mediator.process_pending_messages(cutoff_time)

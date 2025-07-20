@@ -1,7 +1,7 @@
 from .openai_service import OpenAIService
 from .instagram_service import InstagramService, APP_SETTINGS
 from .message_service import MessageService
-from ..models.enums import UserStatus, MessageRole
+from ..models.enums import UserStatus, MessageRole, ModuleType
 import logging
 from datetime import datetime, timezone
 
@@ -19,7 +19,7 @@ class Mediator:
 
         # Check if assistant is disabled in app settings (client-specific)
         app_settings = InstagramService.get_app_settings(self.client_username)
-        if not app_settings.get('assistant', True):
+        if not app_settings.get(ModuleType.DM_ASSIST.value, True):
             logger.info(f"Assistant is disabled in app settings for client {self.client_username}. Skipping message processing.")
             return
 

@@ -156,4 +156,19 @@ class Product:
         product = db[PRODUCTS_COLLECTION].find_one(query)
         return product["file_id"] if product else None
 
+    @staticmethod
+    @with_db
+    def deduplicate_for_client(client_username):
+        """Remove duplicate products for a client, keeping only the first occurrence of each unique link."""
+        products = list(db[PRODUCTS_COLLECTION].find({"client_username": client_username}))
+        seen_links = set()
+        for product in products:
+            link = product.get("link")
+            _id = product.get("_id")
+            if link in seen_links:
+                db[PRODUCTS_COLLECTION].delete_one({"_id": _id})
+                logger.info(f"Removed duplicate product with link '{link}' for client '{client_username}' (_id={_id})")
+            else:
+                seen_links.add(link)
+
 

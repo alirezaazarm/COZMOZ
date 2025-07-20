@@ -216,4 +216,16 @@ class Scraper:
                 Product.delete(title, client_username=CLIENT_USERNAME)
                 logger.info(f"Removed product {title} from the database as it no longer exists on the website")
 
+        # Remove duplicate product links for the client, keeping only the first occurrence
+        Product.deduplicate_for_client(CLIENT_USERNAME)
+        
+        # Log the update and deduplication action for the client
+        from app.models.client import Client
+        Client.append_log(
+            CLIENT_USERNAME,
+            action="update_products",
+            status="success",
+            details="Products updated and deduplicated."
+        )
+
 

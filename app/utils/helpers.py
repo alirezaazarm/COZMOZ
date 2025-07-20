@@ -178,31 +178,34 @@ def load_main_app_globals_from_db():
             # 1. IG_ID_TO_CLIENT
             if ig_id and username:
                 instagram_service.IG_ID_TO_CLIENT[ig_id] = username
+
             # 2. CLIENT_CREDENTIALS
-            if username:
                 instagram_service.CLIENT_CREDENTIALS[username] = client.get('keys', {})
-            # 3. APP_SETTINGS
-            if username:
-                instagram_service.APP_SETTINGS[username] = {
-                    'assistant': client.get('modules', {}).get('dm_assist', {}).get('enabled', False),
-                    'fixed_responses': client.get('modules', {}).get('fixed_response', {}).get('enabled', False)
-                }
+
+            # 3. APP_SETTINGS (fill all modules)
+                from app.models.enums import ModuleType
+                client_modules = client.get('modules', {}) or {}
+                app_settings = {}
+                for module in ModuleType:
+                    module_name = module.value
+                    app_settings[module_name] = client_modules.get(module_name, {}).get('enabled', False)
+                instagram_service.APP_SETTINGS[username] = app_settings
+                
             # 4. COMMENT_FIXED_RESPONSES
-            if username:
                 post_fixed = Post.get_all_fixed_responses_structured(username)
                 expanded_post_fixed = {}
                 for post_id, triggers_dict in post_fixed.items():
                     expanded_post_fixed[post_id] = expand_triggers(triggers_dict)
                 instagram_service.COMMENT_FIXED_RESPONSES[username] = expanded_post_fixed
+
             # 5. STORY_FIXED_RESPONSES
-            if username:
                 story_fixed = Story.get_all_fixed_responses_structured(username)
                 expanded_story_fixed = {}
                 for story_id, triggers_dict in story_fixed.items():
                     expanded_story_fixed[story_id] = expand_triggers(triggers_dict)
                 instagram_service.STORY_FIXED_RESPONSES[username] = expanded_story_fixed
+                
             # 6. IG_CONTENT_IDS
-            if username:
                 post_ids = Post.get_post_ids(username)
                 story_ids = Story.get_story_ids(username)
                 instagram_service.IG_CONTENT_IDS[username] = {

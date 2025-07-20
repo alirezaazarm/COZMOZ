@@ -607,20 +607,28 @@ class Backend:
             logger.error(f"Error fetching products: {e}")
             return []
 
-    def get_additionalinfo(self):
+    def get_additionalinfo(self, content_format="markdown"):
         """Return all additional text entries as a list of dicts with 'key' and 'value' for the current client."""
         self._validate_client_access()
         try:
-            entries = Additionalinfo.get_all(client_username=self.client_username)
-            return [
-                {"key": entry["title"], "value": entry["content"]}
-                for entry in entries
-            ]
+            # Default to markdown format if no format specified
+            entries = Additionalinfo.get_by_format(content_format, client_username=self.client_username)
+            
+            result = []
+            for entry in entries:
+                item = {
+                    "id": str(entry["_id"]),
+                    "key": entry["title"], 
+                    "value": entry["content"],
+                    "content_format": entry.get("content_format", "markdown")
+                }
+                result.append(item)
+            return result
         except Exception as e:
-            logger.error(f"Error fetching all additional text entries: {str(e)}")
+            logger.error(f"Error fetching additional text entries: {str(e)}")
             return []
 
-    def add_additionalinfo(self, key, value):
+    def add_additionalinfo(self, key, value, content_format="markdown"):
         """Add or update a text entry in the additional_text collection with the given key and value for the current client."""
         self._validate_client_access()
         logger.info(f"Adding/updating additional text: {key} for client: {self.client_username or 'admin'}")
@@ -632,11 +640,12 @@ class Backend:
                 result = Additionalinfo.update(str(existing[0]['_id']), {
                     "title": key,
                     "content": value,
+                    "content_format": content_format,
                     "client_username": self.client_username
                 })
             else:
                 # Create new entry
-                result = Additionalinfo.create(title=key, content=value, client_username=self.client_username)
+                result = Additionalinfo.create(title=key, content=value, client_username=self.client_username, content_format=content_format)
 
             if result:
                 logger.info(f"Additional text '{key}' created/updated successfully for client: {self.client_username or 'admin'}")
@@ -646,6 +655,126 @@ class Backend:
                 return False
         except Exception as e:
             logger.error(f"Error creating/updating additional text '{key}': {str(e)}")
+            return False
+
+    def get_additionalinfo_json(self):
+        """Return all JSON format additional text entries for the current client."""
+        self._validate_client_access()
+        try:
+            entries = Additionalinfo.get_by_format("json", client_username=self.client_username)
+            result = []
+            for entry in entries:
+                # Parse JSON content into key-value pairs
+                json_data = Additionalinfo.parse_json_content(entry["content"])
+                item = {
+                    "id": str(entry["_id"]),
+                    "title": entry["title"],
+                    "json_data": json_data,
+                    "content": entry["content"]
+                }
+                result.append(item)
+            return result
+        except Exception as e:
+            logger.error(f"Error fetching JSON additional text entries: {str(e)}")
+            return []
+
+    def add_additionalinfo_json(self, title, key_value_pairs):
+        """Add or update a JSON format additional text entry for the current client."""
+        self._validate_client_access()
+        logger.info(f"Adding/updating JSON additional text: {title} for client: {self.client_username or 'admin'}")
+        try:
+            # Convert key-value pairs to JSON content
+            json_content = Additionalinfo.create_json_content(key_value_pairs)
+            
+            # Check if an entry with this title already exists for this client
+            existing = Additionalinfo.search(title, client_username=self.client_username)
+            if existing and len(existing) > 0:
+                # Update existing entry
+                result = Additionalinfo.update(str(existing[0]['_id']), {
+                    "title": title,
+                    "content": json_content,
+                    "content_format": "json",
+                    "client_username": self.client_username
+                })
+            else:
+                # Create new entry
+                result = Additionalinfo.create(title=title, content=json_content, client_username=self.client_username, content_format="json")
+
+            if result:
+                logger.info(f"JSON additional text '{title}' created/updated successfully for client: {self.client_username or 'admin'}")
+                return True
+            else:
+                logger.error(f"Failed to create/update JSON additional text '{title}'.")
+                return False
+        except Exception as e:
+            logger.error(f"Error creating/updating JSON additional text '{title}': {str(e)}")
+            return False
+
+    def update_additionalinfo_json_by_id(self, entry_id, title, key_value_pairs):
+        """Update a JSON format additional text entry by ID for the current client."""
+        self._validate_client_access()
+        logger.info(f"Updating JSON additional text ID: {entry_id} for client: {self.client_username or 'admin'}")
+        try:
+            # Convert key-value pairs to JSON content
+            json_content = Additionalinfo.create_json_content(key_value_pairs)
+            
+            # Update entry by ID
+            result = Additionalinfo.update(entry_id, {
+                "title": title,
+                "content": json_content,
+                "content_format": "json",
+                "client_username": self.client_username
+            }, client_username=self.client_username)
+
+            if result:
+                logger.info(f"JSON additional text ID '{entry_id}' updated successfully for client: {self.client_username or 'admin'}")
+                return True
+            else:
+                logger.error(f"Failed to update JSON additional text ID '{entry_id}'.")
+                return False
+        except Exception as e:
+            logger.error(f"Error updating JSON additional text ID '{entry_id}': {str(e)}")
+            return False
+
+    def delete_additionalinfo_by_id(self, entry_id):
+        """Delete an additional text entry by ID for the current client."""
+        self._validate_client_access()
+        logger.info(f"Deleting additional text ID: {entry_id} for client: {self.client_username or 'admin'}")
+        try:
+            # Get the entry first to check if it has a file_id
+            entry = Additionalinfo.get_by_id(entry_id, client_username=self.client_username)
+            if not entry:
+                logger.error(f"Additional text entry with ID '{entry_id}' not found for client: {self.client_username or 'admin'}")
+                return False
+
+            # Delete file from openai if it has file_id
+            if entry.get('file_id'):
+                if not self.openai_service:
+                    logger.error("OpenAI service not initialized")
+                    return False
+                resp = self.openai_service.delete_single_file(entry['file_id'])
+                if resp:
+                    result = Additionalinfo.delete(entry_id, client_username=self.client_username)
+                    if result:
+                        logger.info(f"Additional text ID '{entry_id}' deleted from DB successfully for client: {self.client_username or 'admin'}")
+                        return True
+                    else:
+                        logger.error(f"Failed to delete additional text ID '{entry_id}' from DB.")
+                        return False
+                else:
+                    logger.error(f"Failed to delete file '{entry['file_id']}' from openai.")
+                    return False
+            else:
+                result = Additionalinfo.delete(entry_id, client_username=self.client_username)
+                if result:
+                    logger.info(f"Additional text ID '{entry_id}' deleted from DB successfully for client: {self.client_username or 'admin'}")
+                    return True
+                else:
+                    logger.error(f"Failed to delete additional text ID '{entry_id}' from DB.")
+                    return False
+
+        except Exception as e:
+            logger.error(f"Error deleting additional text entry ID '{entry_id}': {str(e)}")
             return False
 
     def delete_additionalinfo(self, key):

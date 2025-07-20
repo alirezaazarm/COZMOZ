@@ -3,7 +3,6 @@ from ..models.product import Product
 from ..models.additional_info import Additionalinfo
 from ..models.client import Client
 from ..models.database import db
-from ..utils.helpers import get_db
 from ..config import Config
 import openai
 import time
@@ -11,6 +10,9 @@ import re
 import logging
 import json
 from datetime import datetime, timezone
+from ..models.enums import ModuleType
+from app.services.instagram_service import APP_SETTINGS
+from ..repositories.orderbook_repository import OrderbookRepository
 
 logger = logging.getLogger(__name__)
 
@@ -30,23 +32,22 @@ class OpenAIService:
     MAX_UPLOAD_RETRIES = 5
     UPLOAD_RETRY_DELAY = 2
     BATCH_SIZE = 30
+    # Shared OpenAI client for all instances (API key is constant)
+    openai_client = openai.OpenAI(api_key=Config.OPENAI_API_KEY)
 
-    def __init__(self, client_username=None, client=None):
-        if client is None and client_username is None:
-            raise ValueError("Must provide client_username or client object")
-        if client is None:
-            client = Client.get_by_username(client_username)
-        if not client:
+    def __init__(self, client_username=None):
+        """
+        OpenAIService is initialized with a client_username, which is used to fetch user-specific data
+        from your own database/models. The OpenAI client is shared and constant for all users.
+        """
+        if not client_username:
+            raise ValueError("Must provide client_username")
+        self.client_username = client_username
+        self.client_obj = Client.get_by_username(client_username)
+        if not self.client_obj:
             raise ValueError(f"Client not found: {client_username}")
-        self.client_obj = client
-        api_key = Config.OPENAI_API_KEY
-        if not api_key:
-            raise ValueError(f"No OpenAI API key found for client: {client.get('username')}")
-        try:
-            self.client = openai.OpenAI(api_key=api_key)
-        except Exception as e:
-            logger.critical(f"Failed to initialize OpenAI client: {str(e)}")
-            self.client = None
+        # Use the shared OpenAI client
+        self.client = self.__class__.openai_client
 
     # ------------------------------------------------------------------
     # Files and Vector Store (per client)
@@ -58,22 +59,24 @@ class OpenAIService:
                 logger.info(f"File with the ID {file_id} has deleted successfully")
                 return True
             else:
-                logger.error(f"Failed to delete file '{file_id}': {resp.error}")
+                logger.error(f"Failed to delete file '{file_id}': {getattr(resp, 'error', None)}")
                 return False
         except Exception as e:
             logger.error(f"Error deleting file '{file_id}': {e}")
             return False
 
     def clear_vs(self) -> bool:
+        assert self.client_obj is not None, "client_obj should never be None here"
         vs_id = self.client_obj.get('keys', {}).get('vector_store_id')
         if not vs_id:
             logger.info("No vector store ID found for client")
             return True
         try:
+            # Requires openai>=1.74.0
             response = self.client.vector_stores.delete(vs_id)
             if response.deleted:
                 # Remove vector_store_id from client
-                Client.update(self.client_obj['username'], {"keys.vector_store_id": None})
+                Client.update(self.client_username, {"keys.vector_store_id": None})
                 logger.info(f"Deleted vector store '{vs_id}' and unset vector_store_id in client")
                 return True
             logger.error(f"Vector store deletion returned deleted=False for '{vs_id}'")
@@ -85,27 +88,58 @@ class OpenAIService:
     def clear_files(self, model_cls) -> bool:
         entries = model_cls.get_all(client_username=self.client_obj['username'])
         success = True
+        
+        # Get all entry titles to match against OpenAI files
+        entry_titles = set()
         for entry in entries:
-            file_id = entry.get('file_id')
-            if not file_id:
-                continue
-            try:
-                resp = self.client.files.delete(file_id)
-                if resp.deleted:
-                    identifier = entry.get('title') if model_cls is Product else str(entry.get('_id'))
-                    model_cls.update(identifier, {"file_id": None}, client_username=self.client_obj['username'])
-                    logger.info(f"Deleted file '{file_id}' and reset file_id for '{identifier}'")
-                else:
-                    logger.error(f"Failed to delete file '{file_id}': {resp.error}")
+            title = entry.get('title')
+            if title:
+                entry_titles.add(f"{title}.json")  # Files are uploaded with .json extension
+        
+        # Get all files from OpenAI and find matches by filename
+        try:
+            openai_files = self.client.files.list(purpose='assistants')
+            files_to_delete = []
+            
+            for file_obj in openai_files.data:
+                filename = getattr(file_obj, 'filename', '')
+                if filename in entry_titles:
+                    files_to_delete.append(file_obj.id)
+                    logger.info(f"Found file to delete: {filename} (ID: {file_obj.id})")
+            
+            # Delete all matching files from OpenAI
+            for file_id in files_to_delete:
+                try:
+                    resp = self.client.files.delete(file_id)
+                    if resp.deleted:
+                        logger.info(f"Deleted file '{file_id}' from OpenAI")
+                    else:
+                        logger.error(f"Failed to delete file '{file_id}': {getattr(resp, 'error', None)}")
+                        success = False
+                except Exception as e:
+                    logger.error(f"Error deleting file '{file_id}': {e}")
                     success = False
+            
+        except Exception as e:
+            logger.error(f"Error listing files from OpenAI: {e}")
+            success = False
+        
+        # Reset file_id in database entries to None
+        for entry in entries:
+            try:
+                identifier = entry.get('title') if model_cls is Product else str(entry.get('_id'))
+                model_cls.update(identifier, {"file_id": None}, client_username=self.client_obj['username'])
+                logger.info(f"Reset file_id for '{identifier}'")
             except Exception as e:
-                logger.error(f"Error deleting file '{file_id}': {e}")
+                logger.error(f"Error resetting file_id for entry '{identifier}': {e}")
                 success = False
+                
         return success
 
     def upload_files(self, model_cls, folder_name: str) -> bool:
-        entries = model_cls.get_all(client_username=self.client_obj['username'])
+        entries = model_cls.get_all(client_username=self.client_username)
         all_success = True
+        import io
         for entry in entries:
             content_data = self._prepare_content(entry, folder_name)
             content = json.dumps(content_data, ensure_ascii=False)
@@ -114,7 +148,7 @@ class OpenAIService:
                 all_success = False
                 continue
             identifier = entry.get('title') if model_cls is Product else str(entry.get('_id'))
-            updated = model_cls.update(identifier, {"file_id": file_id}, client_username=self.client_obj['username'])
+            updated = model_cls.update(identifier, {"file_id": file_id}, client_username=self.client_username)
             if not updated:
                 logger.error(f"Failed to update database for '{identifier}' with file_id '{file_id}'")
                 all_success = False
@@ -132,20 +166,27 @@ class OpenAIService:
                 'excerpt': entry.get('excerpt'),
                 'link': entry.get('link')
             }
-        else:
-            return {
-                'title': entry['title'],
-                'category': folder_name,
-                'content': entry['content']
-            }
+        else: # additionalinfo
+            if entry["content_format"] == "json":
+                return entry["content"]
+            
+            else: #markdown
+                return {
+                    'title': entry['title'],
+                    'category': folder_name,
+                    'content': entry['content']
+                }
 
     def _retry_upload(self, entry, content: str) -> str | None:
         retry = 0
         file_id = None
+        import io
         while retry < self.MAX_UPLOAD_RETRIES:
             try:
+                # OpenAI expects file as (filename, fileobj) or (filename, fileobj, content_type)
+                file_bytes = io.BytesIO(content.encode('utf-8'))
                 resp = self.client.files.create(
-                    file=(f"{entry['title']}.json", content, 'application/json'),
+                    file=(f"{entry['title']}.json", file_bytes, 'application/json'),
                     purpose='assistants'
                 )
                 file_id = resp.id
@@ -168,15 +209,15 @@ class OpenAIService:
             if resp.status == 'processed':
                 return
             if resp.status == 'error':
-                raise Exception(f"File {file_id} processing error: {resp.error}")
+                raise Exception(f"File {file_id} processing error: {getattr(resp, 'error', None)}")
             time.sleep(interval)
             waited += interval
         raise TimeoutError(f"Timeout waiting for file {file_id} to process")
 
     def create_vs(self) -> str | None:
         try:
-            products = Product.get_all(client_username=self.client_obj['username'])
-            additional = Additionalinfo.get_all(client_username=self.client_obj['username'])
+            products = Product.get_all(client_username=self.client_username)
+            additional = Additionalinfo.get_all(client_username=self.client_username)
             prod_ids = [p['file_id'] for p in products if p.get('file_id')]
             add_ids = [a['file_id'] for a in additional if a.get('file_id')]
             missing = [p['title'] for p in products if not p.get('file_id')]
@@ -185,12 +226,13 @@ class OpenAIService:
                 return None
             file_ids = prod_ids + add_ids
             self.clear_vs()
+            # Requires openai>=1.74.0
             vs = self.client.vector_stores.create(
-                name=f"Vector Store - {self.client_obj['username']}",
+                name=f"Vector Store - {self.client_username}",
                 file_ids=file_ids[:self.BATCH_SIZE],
                 chunking_strategy={
                     'type': 'static',
-                    'static': {'max_chunk_size_tokens': 4000, 'chunk_overlap_tokens': 2000}
+                    'static': {'max_chunk_size_tokens': 1000, 'chunk_overlap_tokens': 500}
                 }
             )
             vs_id = vs.id
@@ -202,13 +244,13 @@ class OpenAIService:
                     file_ids=batch,
                     chunking_strategy={
                         'type': 'static',
-                        'static': {'max_chunk_size_tokens': 4000, 'chunk_overlap_tokens': 2000}
+                        'static': {'max_chunk_size_tokens': 1000, 'chunk_overlap_tokens': 500}
                     }
                 )
                 logger.info(f"Appended batch files {i}-{i + len(batch)} to vector store {vs_id}")
             final_vs = self.client.vector_stores.retrieve(vs_id)
             if final_vs.file_counts.completed == len(file_ids):
-                Client.update(self.client_obj['username'], {"keys.vector_store_id": vs_id})
+                Client.update(self.client_username, {"keys.vector_store_id": vs_id})
                 logger.info(f"Stored vector_store_id '{vs_id}' in client")
                 return vs_id
             logger.error(f"Vector store incomplete: {final_vs.file_counts}")
@@ -217,17 +259,30 @@ class OpenAIService:
             logger.error(f"Error in create_vs: {e}")
             return None
 
-    def rebuild_all(self) -> bool:
+    def rebuild_all(self) -> bool:        
         ok1 = self.clear_files(Product)
+        Client.append_log(self.client_username, 'clear_files_product', 'success' if ok1 else 'failure')
         ok2 = self.clear_files(Additionalinfo)
+        Client.append_log(self.client_username, 'clear_files_additionalinfo', 'success' if ok2 else 'failure')
         ok3 = self.upload_files(Product, 'products')
+        Client.append_log(self.client_username, 'upload_files_product', 'success' if ok3 else 'failure')
         ok4 = self.upload_files(Additionalinfo, 'info')
+        Client.append_log(self.client_username, 'upload_files_additionalinfo', 'success' if ok4 else 'failure')
         if not (ok1 and ok2 and ok3 and ok4):
-            logger.warning("Some clear or upload steps failed")
+            Client.append_log(self.client_username, 'rebuild_all', 'failure', details='One or more clear/upload steps failed')
+            # Disable DM_ASSIST module if any step failed
+            Client.disable_module(self.client_username, ModuleType.DM_ASSIST.value)
+            Client.append_log(self.client_username, 'disable_dm_assist', 'success', details='Disabled DM_ASSIST due to rebuild_all failure')
+        else:
+            Client.append_log(self.client_username, 'rebuild_all', 'success')
         vs_id = self.create_vs()
         if not vs_id:
-            logger.error("Failed to create/update vector store")
+            Client.append_log(self.client_username, 'create_vs', 'failure')
+            # Disable DM_ASSIST module if vector store creation failed
+            Client.disable_module(self.client_username, ModuleType.DM_ASSIST.value)
+            Client.append_log(self.client_username, 'disable_dm_assist', 'success', details='Disabled DM_ASSIST due to create_vs failure')
             return False
+        Client.append_log(self.client_username, 'create_vs', 'success')
         return True
 
     # ------------------------------------------------------------------
@@ -308,6 +363,10 @@ class OpenAIService:
                 logger.error(f"Run failed for thread_id: {thread_id}. Last error: {run.last_error}")
                 raise openai.OpenAIError(f"Run failed: {run.last_error}")
             logger.info(f"Run completed successfully for thread_id: {thread_id}")
+            # Handle tool/function calls if present
+            tool_response = self.handle_tool_calls(thread_id, run)
+            if tool_response is not None:
+                return tool_response
             return clean_sources(self._get_assistant_response(thread_id))
         except openai.APIError as e:
             logger.error(f"OpenAI API Error for thread_id: {thread_id}: {e.message}")
@@ -327,10 +386,11 @@ class OpenAIService:
                 raise ValueError("No messages in thread")
             latest_message = messages.data[0]
             logger.debug(f"Latest message retrieved for thread_id: {thread_id}")
-            text_content = next(
-                (c.text.value for c in latest_message.content if c.type == "text"),
-                None
-            )
+            text_content = None
+            for c in latest_message.content:
+                if getattr(c, 'type', None) == "text" and hasattr(c, 'text') and hasattr(c.text, 'value'):
+                    text_content = c.text.value
+                    break
             if not text_content or not text_content.strip():
                 logger.error(f"Empty response from assistant for thread_id: {thread_id}")
                 raise ValueError("Empty response from assistant")
@@ -404,27 +464,83 @@ class OpenAIService:
             logger.error(f"Failed to retrieve assistant top_p: {str(e)}")
             return None
 
+    def _build_tools_and_resources(self):
+        """
+        Build the tools and tool_resources for the assistant based on client config.
+        Always includes file_search if vector store is present.
+        Adds orderbook functions if the orderbook module is enabled (from APP_SETTINGS).
+        Returns: (tools, tool_resources)
+        """
+        tools = []
+        tool_resources = {}
+        vs_id = self.client_obj.get('keys', {}).get('vector_store_id')
+        if vs_id:
+            tools.append({"type": "file_search"})
+            tool_resources["file_search"] = {"vector_store_ids": [vs_id]}
+        # Check if orderbook module is enabled in APP_SETTINGS
+        orderbook_enabled = False
+        app_settings = APP_SETTINGS.get(self.client_username, {})
+        # The helpers.py loader sets app_settings[ModuleType.ORDERBOOK.value] = True/False
+        if app_settings.get(ModuleType.ORDERBOOK.value, False):
+            orderbook_enabled = True
+        if orderbook_enabled:
+            # Add create_order function
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "create_order",
+                    "description": "ثبت سفارش جدید",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "tx_id": {"type": "integer", "description": "شماره ارجاع(یا مرجع) تراکنش"},
+                            "first_name": {"type": "string", "description": "نام سفارش دهنده"},
+                            "last_name": {"type": "string", "description": "نام خانوادگی سفارش دهنده"},
+                            "address": {"type": "string", "description": "آدرس (نشانی) سفارش دهنده"},
+                            "phone": {"type": "string", "description": "شماره تلفن سفارش دهنده"},
+                            "product": {"type": "string", "description": "عنوان محصول خریداری شده"},
+                            "price": {"type": "string", "description": "قیمت محصول خریداری شده"},
+                            "count": {"type": "string", "description": "تعداد سفارش از محصول موردنظر"}
+                        },
+                        "required": ["tx_id", "first_name", "last_name", "address", "phone", "product", "price", "count"]
+                    }
+                }
+            })
+            # Add check_order function
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "check_order",
+                    "description": "پیگیری سفارش با شماره ارجاع(یا مرجع) تراکنش",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "tx_id": {"type": "integer", "description": "شماره ارجاع(یا مرجع) تراکنش"}                           
+                        },
+                        "required": ["tx_id"]
+                    }
+                }
+            })
+        return tools, tool_resources if tool_resources else None
+
     def update_assistant_instructions(self, new_instructions):
         if not self.client:
             logger.error("OpenAI client is not initialized.")
             return {'success': False, 'message': 'OpenAI client is not initialized.'}
         try:
             assistant_id = self.client_obj.get('keys', {}).get('assistant_id')
-            vs_id = self.client_obj.get('keys', {}).get('vector_store_id')
             if not assistant_id:
                 logger.error("No assistant_id found in client keys")
                 return {'success': False, 'message': 'No assistant_id found in client keys.'}
+            tools, tool_resources = self._build_tools_and_resources()
             update_params = {
                 "assistant_id": assistant_id,
                 "instructions": new_instructions
             }
-            if vs_id:
-                update_params["tools"] = [{"type": "file_search"}]
-                update_params["tool_resources"] = {
-                    "file_search": {
-                        "vector_store_ids": [vs_id]
-                    }
-                }
+            if tools:
+                update_params["tools"] = tools
+            if tool_resources:
+                update_params["tool_resources"] = tool_resources
             self.client.beta.assistants.update(**update_params)
             logger.info("Updated assistant instructions successfully.")
             return {
@@ -490,28 +606,25 @@ class OpenAIService:
                 logger.error("No vector store ID or assistant_id found in client keys")
                 raise PermanentError("No vector store ID or assistant_id found in client keys")
             assistant = self.client.beta.assistants.retrieve(assistant_id)
-            has_file_search = False
-            has_vector_store = False
+            # Always update tools if needed
+            tools, tool_resources = self._build_tools_and_resources()
+            needs_update = False
             if hasattr(assistant, 'tools'):
-                for tool in assistant.tools:
-                    if tool.type == "file_search":
-                        has_file_search = True
-                        break
-            if hasattr(assistant, 'tool_resources') and hasattr(assistant.tool_resources, 'file_search'):
-                if vs_id in assistant.tool_resources.file_search.vector_store_ids:
-                    has_vector_store = True
-            if not has_file_search or not has_vector_store:
-                logger.info(f"Updating assistant to connect with vector store {vs_id}")
+                # Check if all required tools are present
+                current_tool_types = set(getattr(tool, 'type', None) for tool in assistant.tools)
+                required_tool_types = set(t["type"] for t in tools) if tools else set()
+                if current_tool_types != required_tool_types:
+                    needs_update = True
+            else:
+                needs_update = True
+            if needs_update:
+                logger.info(f"Updating assistant to connect with vector store {vs_id} and add function tools if needed")
                 self.client.beta.assistants.update(
                     assistant_id=assistant_id,
-                    tools=[{"type": "file_search"}],
-                    tool_resources={
-                        "file_search": {
-                            "vector_store_ids": [vs_id]
-                        }
-                    }
+                    tools=tools,
+                    tool_resources=tool_resources
                 )
-                logger.info(f"Successfully connected assistant to vector store {vs_id}")
+                logger.info(f"Successfully updated assistant tools for {assistant_id}")
             thread = self.client.beta.threads.create()
             logger.info(f"Created new thread with ID: {thread.id}")
             return thread.id
@@ -563,3 +676,78 @@ class OpenAIService:
         except Exception as e:
             logger.error(f"Error sending message to thread: {str(e)}", exc_info=True)
             raise PermanentError(f"Failed to get response: {str(e)}")
+
+    def handle_tool_calls(self, thread_id, run):
+        """
+        Handles OpenAI assistant tool/function calls for create_order and check_order.
+        Returns a string response if a tool call was handled, otherwise None.
+        """
+        try:
+            # Get messages for the thread, look for tool_calls in the latest message
+            messages = self.client.beta.threads.messages.list(
+                thread_id=thread_id, order="desc", limit=1
+            )
+            if not messages.data:
+                return None
+            latest_message = messages.data[0]
+            # Check for tool_calls in the message content
+            for c in getattr(latest_message, 'content', []):
+                if getattr(c, 'type', None) == "tool_calls" and hasattr(c, 'tool_calls'):
+                    for tool_call in c.tool_calls:
+                        function_name = getattr(tool_call, 'function_name', None)
+                        arguments = getattr(tool_call, 'arguments', None)
+                        if function_name == "create_order":
+                            return self._handle_create_order(arguments)
+                        elif function_name == "check_order":
+                            return self._handle_check_order(arguments)
+            return None
+        except Exception as e:
+            logger.error(f"Error handling tool calls: {str(e)}")
+            return None
+
+    def _handle_create_order(self, arguments):
+        """
+        Handles the create_order function call from the assistant.
+        """
+        try:
+            args = json.loads(arguments) if isinstance(arguments, str) else arguments
+            # Add now date/time
+            now = datetime.now(timezone.utc)
+            orderbook_repo = OrderbookRepository()
+            order = orderbook_repo.create_order(
+                tx_id=args["tx_id"],
+                status="created",
+                first_name=args["first_name"],
+                last_name=args["last_name"],
+                address=args["address"],
+                phone=args["phone"],
+                product=args["product"],
+                price=args["price"],
+                date=now,
+                count=args["count"],
+                client_username=self.client_username
+            )
+            if order:
+                return f"Order created successfully. Reference: {order.get('tx_id')}"
+            else:
+                return "Failed to create order."
+        except Exception as e:
+            logger.error(f"Error in _handle_create_order: {str(e)}")
+            return "Error creating order."
+
+    def _handle_check_order(self, arguments):
+        """
+        Handles the check_order function call from the assistant.
+        """
+        try:
+            args = json.loads(arguments) if isinstance(arguments, str) else arguments
+            orderbook_repo = OrderbookRepository()
+            order = orderbook_repo.get_order_by_tx_id(args["tx_id"], self.client_username)
+            if order:
+                # Return order status and summary
+                return f"Order status: {order.get('status')}, Product: {order.get('product')}, Price: {order.get('price')}, Count: {order.get('count')}"
+            else:
+                return "Order not found."
+        except Exception as e:
+            logger.error(f"Error in _handle_check_order: {str(e)}")
+            return "Error checking order."

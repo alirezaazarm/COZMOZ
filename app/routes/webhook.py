@@ -6,7 +6,7 @@ import json
 from ..services.instagram_service import InstagramService
 from ..utils.helpers import get_db
 from ..config import Config
-from ..models.enums import MessageRole, UserStatus
+from ..models.enums import MessageRole, UserStatus, ModuleType
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +36,6 @@ def handle_webhook_verification():
     return "Invalid verification token", 403
 
 def handle_webhook_post():
-    import datetime
-    from datetime import timezone
-
     logger.info("Webhook POST received")
     data = request.json
     logger.debug(f"Raw payload:\n{json.dumps(data, indent=2)}")
@@ -85,7 +82,7 @@ def handle_webhook_post():
                     # Convert raw timestamp (milliseconds) to datetime with tzinfo
                     raw_ts = event.get('timestamp')
                     if isinstance(raw_ts, int):
-                        timestamp = datetime.datetime.fromtimestamp(raw_ts / 1000.0, tz=timezone.utc)
+                        timestamp = datetime.fromtimestamp(raw_ts / 1000.0, tz=timezone.utc)
                     else:
                         timestamp = raw_ts  # assume already datetime
 
@@ -141,7 +138,7 @@ def process_event(db, event, client_username):
 
         # Get client-specific app settings
         app_settings = InstagramService.get_app_settings(client_username)
-        is_assistant_enabled = app_settings.get('assistant', True)
+        is_assistant_enabled = app_settings.get(ModuleType.DM_ASSIST.value, True)
 
         # Explicitly check if the value is a string and convert accordingly
         if isinstance(is_assistant_enabled, str):
@@ -232,7 +229,7 @@ def process_message_event(db, event, sender_id, timestamp, client_username):
 
         # Get client-specific app settings
         app_settings = InstagramService.get_app_settings(client_username)
-        is_assistant_enabled = app_settings.get('assistant', True)
+        is_assistant_enabled = app_settings.get(ModuleType.DM_ASSIST.value, True)
 
         # Ensure boolean conversion
         if isinstance(is_assistant_enabled, str):

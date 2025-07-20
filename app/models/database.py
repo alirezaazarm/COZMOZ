@@ -30,6 +30,22 @@ STORIES_COLLECTION = 'stories'
 ADDITIONAL_TEXT_COLLECTION = 'additional_text'
 # ADMIN_USERS_COLLECTION removed - admins are now stored in CLIENTS_COLLECTION with is_admin=True
 
+def ensure_products_unique_index():
+    """Ensure a unique index exists on (link, client_username) in the products collection."""
+    if db is not None:
+        try:
+            db[PRODUCTS_COLLECTION].create_index(
+                [("link", 1), ("client_username", 1)],
+                unique=True,
+                name="unique_link_client"
+            )
+            logger.info("Ensured unique index on (link, client_username) for products collection.")
+        except Exception as e:
+            logger.error(f"Failed to create unique index: {e}")
+
+# Ensure the unique index is created at import time
+ensure_products_unique_index()
+
 # Context manager for database operations
 def with_db(func):
     """Decorator to provide database connection to functions"""

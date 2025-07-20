@@ -28,11 +28,19 @@ class ClientStatus(Enum):
     EXPIRED = "expired"   # Client's subscription has expired
 
 class ModuleType(Enum):
-    """Enumeration for available modules."""
-    INSTAGRAM_DM = "instagram_dm"           # Instagram direct messaging
-    FACEBOOK_COMMENTS = "facebook_comments" # Facebook comments management
-    AI_ASSISTANT = "ai_assistant"           # AI assistant functionality
-    PRODUCT_CATALOG = "product_catalog"     # Product catalog management
-    ANALYTICS = "analytics"                 # Analytics and reporting
-    SCHEDULER = "scheduler"                 # Post scheduling
-    AUTO_REPLY = "auto_reply"              # Automated replies
+    """Enumeration for available client modules."""
+    FIXED_RESPONSE = "fixed_response"         # Fixed response automation
+    DM_ASSIST = "dm_assist"                   # Direct message assistant
+    COMMENT_ASSIST = "comment_assist"         # Comment assistant
+    VISION = "vision"                         # Vision/image analysis
+    SCRAPER = "scraper"                       # Web/IG scraper
+    ORDERBOOK = "orderbook"                   # Orderbook management
+
+class OrderStatus(Enum):
+    """Enumeration for order status."""
+    PENDING = "pending"         # Order is pending and awaiting to confirm by admin
+    PREPARING = "preparing"     # Order is being prepared
+    SENT = "sent"               # Order has been sent
+    REJECTED = "rejected"       # Order has been rejected by admin
+    REFUNDED = "refunded"       # Order has been refunded
+    RETURNED = "returned"       # Order has been returned

@@ -71,21 +71,12 @@ class Client:
             
             # Modules (these modules don't have settings, only enabled status)
             "modules": modules or {
-                "fixed_response": {
-                    "enabled": True
-                },
-                "dm_assist": {
-                    "enabled": True
-                },
-                "comment_assist": {
-                    "enabled": True
-                },
-                "vision": {
-                    "enabled": True
-                },
-                "scraper": {
-                    "enabled": True
-                }
+                ModuleType.FIXED_RESPONSE.value: {"enabled": True},
+                ModuleType.DM_ASSIST.value: {"enabled": True},
+                ModuleType.COMMENT_ASSIST.value: {"enabled": True},
+                ModuleType.VISION.value: {"enabled": True},
+                ModuleType.SCRAPER.value: {"enabled": True},
+                ModuleType.ORDERBOOK.value: {"enabled": True}
             },
             
             # Notes
@@ -125,7 +116,9 @@ class Client:
                 "billing_cycle": "monthly",
                 "next_billing_date": None,
                 "payment_status": "active"
-            }
+            },
+            # Logs for audit trail
+            "logs": []
         }
         return document
 
@@ -734,4 +727,24 @@ class Client:
             return False
         except PyMongoError as e:
             logger.error(f"Failed to ensure default admin: {str(e)}")
+            return False
+
+    @staticmethod
+    @with_db
+    def append_log(username, action, status, details=None):
+        """Append a log entry to the client's logs array."""
+        try:
+            log_entry = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "action": action,
+                "status": status,
+                "details": details
+            }
+            result = db[CLIENTS_COLLECTION].update_one(
+                {"username": username},
+                {"$push": {"logs": log_entry}, "$set": {"updated_at": datetime.now(timezone.utc)}}
+            )
+            return result.modified_count > 0
+        except PyMongoError as e:
+            logger.error(f"Failed to append log for client {username}: {str(e)}")
             return False

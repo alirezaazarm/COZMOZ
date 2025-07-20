@@ -183,18 +183,12 @@ class ClientAdminUI:
             
             # Modules Section
             st.subheader("Modules")
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                fixed_response_enabled = st.checkbox("Fixed Response", value=True)
-                dm_assist_enabled = st.checkbox("DM Assist", value=True)
-            
-            with col2:
-                comment_assist_enabled = st.checkbox("Comment Assist", value=True)
-                vision_enabled = st.checkbox("Vision", value=True)
-            
-            with col3:
-                scraper_enabled = st.checkbox("Scraper", value=True)
+            module_types = [m for m in ModuleType]
+            module_cols = st.columns(len(module_types))
+            module_enabled = {}
+            for idx, module in enumerate(module_types):
+                with module_cols[idx]:
+                    module_enabled[module.value] = st.checkbox(module.name.replace("_", " ").title(), value=True)
             
             # Notes
             notes = st.text_area(
@@ -219,23 +213,7 @@ class ClientAdminUI:
                     try:
                         with st.spinner("Creating client..."):
                             # Prepare modules (these modules don't have settings, only enabled status)
-                            modules = {
-                                "fixed_response": {
-                                    "enabled": fixed_response_enabled
-                                },
-                                "dm_assist": {
-                                    "enabled": dm_assist_enabled
-                                },
-                                "comment_assist": {
-                                    "enabled": comment_assist_enabled
-                                },
-                                "vision": {
-                                    "enabled": vision_enabled
-                                },
-                                "scraper": {
-                                    "enabled": scraper_enabled
-                                }
-                            }
+                            modules = {k: {"enabled": v} for k, v in module_enabled.items()}
                             
                             # Create client with new structure (default status: inactive)
                             result = Client.create_with_credentials(
@@ -404,33 +382,14 @@ class ClientAdminUI:
                         with col3:
                             st.write("**Modules (Editable):**")
                             modules = client.get('modules', {})
-                            
-                            # These modules don't have settings, only enabled status
-                            edit_fixed_response = st.checkbox(
-                                "Fixed Response",
-                                value=modules.get('fixed_response', {}).get('enabled', False),
-                                key=f"edit_fixed_response_{client['username']}"
-                            )
-                            edit_dm_assist = st.checkbox(
-                                "DM Assist",
-                                value=modules.get('dm_assist', {}).get('enabled', False),
-                                key=f"edit_dm_assist_{client['username']}"
-                            )
-                            edit_comment_assist = st.checkbox(
-                                "Comment Assist",
-                                value=modules.get('comment_assist', {}).get('enabled', False),
-                                key=f"edit_comment_assist_{client['username']}"
-                            )
-                            edit_vision = st.checkbox(
-                                "Vision",
-                                value=modules.get('vision', {}).get('enabled', False),
-                                key=f"edit_vision_{client['username']}"
-                            )
-                            edit_scraper = st.checkbox(
-                                "Scraper",
-                                value=modules.get('scraper', {}).get('enabled', False),
-                                key=f"edit_scraper_{client['username']}"
-                            )
+                            module_types = [m for m in ModuleType]
+                            edit_module_enabled = {}
+                            for module in module_types:
+                                edit_module_enabled[module.value] = st.checkbox(
+                                    module.name.replace("_", " ").title(),
+                                    value=modules.get(module.value, {}).get('enabled', False),
+                                    key=f"edit_{module.value}_{client['username']}"
+                                )
                             
                             st.write("**Notes:**")
                             edit_notes = st.text_area(
@@ -485,23 +444,7 @@ class ClientAdminUI:
                                             "email": edit_email
                                         },
                                         "keys": keys_data,
-                                        "modules": {
-                                            "fixed_response": {
-                                                "enabled": edit_fixed_response
-                                            },
-                                            "dm_assist": {
-                                                "enabled": edit_dm_assist
-                                            },
-                                            "comment_assist": {
-                                                "enabled": edit_comment_assist
-                                            },
-                                            "vision": {
-                                                "enabled": edit_vision
-                                            },
-                                            "scraper": {
-                                                "enabled": edit_scraper
-                                            }
-                                        },
+                                        "modules": {k: {"enabled": v} for k, v in edit_module_enabled.items()},
                                         "status": edit_status,
                                         "notes": edit_notes,
                                         # Keep legacy fields for backward compatibility

@@ -2,6 +2,7 @@ from .database import db, with_db
 import logging
 from pymongo.errors import PyMongoError
 from bson import ObjectId
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -12,20 +13,21 @@ class Additionalinfo:
     """Additionalinfo model for MongoDB"""
 
     @staticmethod
-    def create_additional_text_document(title, content, client_username, file_id=None):
+    def create_additional_text_document(title, content, client_username, file_id=None, content_format="markdown"):
         """Create a new additional text document structure."""
         return {
             "title": title,
             "content": content,
+            "content_format": content_format,  # "markdown" or "json"
             "client_username": client_username,  # Links additional info to specific client
             "file_id": file_id
         }
 
     @staticmethod
     @with_db
-    def create(title, content, client_username, file_id=None):
+    def create(title, content, client_username, file_id=None, content_format="markdown"):
         """Create a new additional text entry."""
-        text_doc = Additionalinfo.create_additional_text_document(title, content, client_username, file_id)
+        text_doc = Additionalinfo.create_additional_text_document(title, content, client_username, file_id, content_format)
         try:
             result = db[ADDITIONAL_INFO_COLLECTION].insert_one(text_doc)
             if result.acknowledged:
@@ -35,6 +37,48 @@ class Additionalinfo:
         except PyMongoError as e:
             logger.error(f"Failed to create additional text: {str(e)}")
             return None
+
+    @staticmethod
+    @with_db
+    def get_by_format(content_format, client_username=None):
+        """Get all additional text entries by content format."""
+        try:
+            query = {"content_format": content_format}
+            if client_username:
+                query["client_username"] = client_username
+            return list(db[ADDITIONAL_INFO_COLLECTION].find(query))
+        except PyMongoError as e:
+            logger.error(f"Failed to retrieve additional text entries by format: {str(e)}")
+            return []
+
+    @staticmethod
+    def validate_json_content(content):
+        """Validate if content is valid JSON."""
+        try:
+            json.loads(content)
+            return True
+        except (json.JSONDecodeError, TypeError):
+            return False
+
+    @staticmethod
+    def parse_json_content(content):
+        """Parse JSON content into key-value pairs."""
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict):
+                return data
+            else:
+                return {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    @staticmethod
+    def create_json_content(key_value_pairs):
+        """Create JSON content from key-value pairs."""
+        try:
+            return json.dumps(key_value_pairs, indent=2, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return {}
 
     @staticmethod
     @with_db

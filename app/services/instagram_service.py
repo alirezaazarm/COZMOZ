@@ -7,10 +7,9 @@ from datetime import datetime, timezone
 from PIL import Image
 from io import BytesIO
 from ..models.user import User
-from ..models.enums import UserStatus, MessageRole
+from ..models.enums import UserStatus, MessageRole, ModuleType
 from ..models.post import Post
 from ..models.story import Story
-from ..models.client import Client
 from .img_search import process_image
 
 logger = logging.getLogger(__name__)
@@ -595,7 +594,7 @@ class InstagramService:
         logger.info(f"InstagramService - New APP_SETTINGS for {client_username}: {APP_SETTINGS[client_username]}")
 
         # Explicitly log the assistant status to verify
-        assistant_enabled = APP_SETTINGS[client_username].get('assistant', True)
+        assistant_enabled = APP_SETTINGS[client_username].get(ModuleType.DM_ASSIST.value, True)
         logger.info(f"InstagramService - Assistant for {client_username} is now {'ENABLED' if assistant_enabled else 'DISABLED'}")
 
         # After successfully sending app settings
@@ -867,7 +866,7 @@ class InstagramService:
 
             # Check if assistant is enabled in app settings for this client
             client_settings = InstagramService.get_app_settings(client_username)
-            is_assistant_enabled = client_settings.get('assistant', True)
+            is_assistant_enabled = client_settings.get(ModuleType.DM_ASSIST.value, True)
 
             # Store message in database with appropriate status
             try:
@@ -904,7 +903,7 @@ class InstagramService:
         """Process and handle an Instagram comment for a specific client, using in-memory fixed responses if available."""
         # Check client-specific fixed_responses setting
         client_settings = InstagramService.get_app_settings(client_username)
-        if not client_settings.get('fixed_responses', True):
+        if not client_settings.get(ModuleType.FIXED_RESPONSE.value, True):
             logger.info(f"Fixed responses are disabled for client {client_username}.")
             return False
         try:
@@ -1251,7 +1250,7 @@ class InstagramService:
             ig_content_ids = InstagramService.get_ig_content_ids(client_username)
 
             # Only proceed if fixed responses enabled
-            if app_settings.get('fixed_responses', True) and \
+            if app_settings.get(ModuleType.FIXED_RESPONSE.value, True) and \
                attachment_type in ['story', 'story_reply', 'story_mention', 'share'] and story_id and trigger_keyword and user_id:
 
                 logger.debug(f"Checking fixed responses for story_id='{story_id}', trigger_text='{trigger_keyword}' (client: {client_username})")
