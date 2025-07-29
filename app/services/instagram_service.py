@@ -122,6 +122,10 @@ class InstagramService:
             return mid  # Return MID instead of True
         except Exception as e:
             logger.error(f"Instagram send failed: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Instagram send failed: {str(e)}, response: {e.response.text}")
+            else:
+                logger.error(f"Instagram send failed: {str(e)}")
             return None  # Return None instead of False
 
     @staticmethod

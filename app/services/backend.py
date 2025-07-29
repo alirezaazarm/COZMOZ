@@ -822,13 +822,21 @@ class Backend:
             if not self.openai_service:
                 logger.error("OpenAI service not initialized")
                 return False
-            clear_success = self.openai_service.rebuild_all()
-            if clear_success:
-                logger.info("Additional info files and vector store rebuilt successfully")
-                return True
+            
+            scraper_update_products_success = self.update_products()
+            if scraper_update_products_success:
+                logger.info("Scraper successfully scraped the website")
+                clear_success = self.openai_service.rebuild_all()
+                if clear_success:
+                    logger.info("Additional info + products files and vector store rebuilt successfully")
+                    return True
+                else:
+                    logger.error("Failed to rebuild additional info files and vector store")
+                    return False
             else:
-                logger.error("Failed to rebuild additional info files and vector store")
+                logger.error("the Sraper Failed to scrape the website")
                 return False
+            
         except Exception as e:
             logger.error(f"Error in update_additionalinfo_files_and_vs: {str(e)}")
             return False

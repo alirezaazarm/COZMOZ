@@ -429,6 +429,12 @@ class ProductScraperSection(BaseSection):
         try:
             products = self.backend.get_products()
             if products:
+                # Convert to DataFrame if not already
+                if not isinstance(products, pd.DataFrame):
+                    products = pd.DataFrame(products)
+                # Convert 'Price' column to string if it contains dicts
+                if 'Price' in products.columns:
+                    products['Price'] = products['Price'].apply(lambda x: str(x) if isinstance(x, dict) else x)
                 st.dataframe(
                     products,
                     column_config={

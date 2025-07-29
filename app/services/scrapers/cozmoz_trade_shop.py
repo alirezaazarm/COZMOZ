@@ -63,25 +63,47 @@ class Scraper:
             return None
 
     def price_mapping(self, soup):
-        prices = soup.find('p', class_='price').find_all('span', class_='woocommerce-Price-amount')
-        price_list = []
-        for p in prices:
-            price_list.append(p.text)
-        if len(price_list) > 0:
-            if soup.find('table', class_='variations'):
-                var_name = soup.find('table', class_='variations').find('th', class_='label').text.strip()
-                vars = soup.find('table', class_='variations').find('select').find_all('option')
-                variations = []
-                for i in range(1, len(vars)):
-                    variations.append((vars[i].text.strip() + ' ' + var_name))
-                mape_price = {}
-                mape_price[variations[0]] = price_list[0]
-                mape_price[variations[-1]] = price_list[-1]
-                return mape_price
-            else:
-                return price_list[0]
+        variations_form = soup.find('div', class_='product-summary-wrap').find(class_='variations_form')
+        if variations_form:
+            data_variations = variations_form.get('data-product_variations', False)
+            if data_variations:
+                persian_data = json.loads(data_variations)
+                variation_dict = {}
+                for variation in persian_data:
+                    attribute_parts = []
+                    for key, value in variation['attributes'].items():
+                        if value: # Check if value is not empty
+                            decoded_key = unquote(key.split('_')[-1])
+                            decoded_value = unquote(value.replace('\xa0', ' '))
+                            attribute_parts.append(f"{decoded_key} {decoded_value}")
+
+                    attribute_value = ' '.join(attribute_parts)
+
+                    price = variation.get('display_price')
+                    if price is not None:
+                        variation_dict[attribute_value] = str(price).replace('\xa0', ' ') + ' ' +'تومان'
+                    else:
+                        variation_dict[attribute_value] = 'N/A'
+                return variation_dict
         else:
-            return 'N/A'
+            # Handle the case where variations_form is not found
+            prices = soup.find('p', class_='price').find_all('span', class_='woocommerce-Price-amount')
+            price_list = [p.text.replace('\xa0', ' ') for p in prices] # Replace \xa0 here
+            if len(price_list) > 0:
+                if soup.find('table', class_='variations'):
+                    var_name = soup.find('table', class_='variations').find('th', class_='label').text.strip()
+                    vars = soup.find('table', class_='variations').find('select').find_all('option')
+                    variations = [vars[i].text.strip() + ' ' + var_name for i in range(1,len(vars))]
+                    mape_price = {}
+                    if variations:
+                        mape_price[variations[0]] = price_list[0]
+                        if len(variations) > 1:
+                            mape_price[variations[-1]] = price_list[-1]
+                    return mape_price
+                else:
+                    return price_list[0]
+            else:
+                return 'N/A'
 
     def extract_category(self,soup):
         if soup.find('span', class_='posted_in') :
@@ -106,7 +128,7 @@ class Scraper:
                 'title': soup.find('h1', class_='page-title').text.strip() if soup.find('h1', class_='page-title') else 'N/A',
                 'category': self.extract_category(soup) if self.extract_category(soup) else 'N/A',
                 'tags': soup.find('span', class_='tagged_as').text.split(':')[-1].strip() if soup.find('span', class_='tagged_as') else 'N/A',
-                'price': json.dumps(self.price_mapping(soup), ensure_ascii=False) if isinstance(self.price_mapping(soup), dict) else self.price_mapping(soup),
+                'price': self.price_mapping(soup) if self.price_mapping(soup) else 'N/A',
                 'excerpt': soup.find('div', class_='woocommerce-product-details__short-description').text.strip() if soup.find('div', class_='woocommerce-product-details__short-description') else 'N/A',
                 'sku': soup.find('span', class_='sku').text.strip() if soup.find('span', class_='sku') else 'N/A',
                 'description': self.extract_description(soup) if self.extract_description(soup) else 'N/A',
@@ -147,14 +169,13 @@ class Scraper:
                     logger.error(f"Failed to store product {title} in the database")
 
     def update_products(self):
-        product_links = self.extract_product_links()
-        existing_products = Product.get_all(client_username=CLIENT_USERNAME)
-        existing_titles = [p['title'] for p in existing_products]
+        try:
+            product_links = self.extract_product_links()
+            existing_products = Product.get_all(client_username=CLIENT_USERNAME)
 
-        for title in existing_titles:
-            if existing_titles.count(title) > 1:
-                # first remove file from openai if exists file_id
-                file_id = Product.get_file_id(title, client_username=CLIENT_USERNAME)
+            for product in existing_products:
+                title = product['title']
+                file_id = product.get('file_id')
                 if file_id:
                     resp = self.openai_service.delete_single_file(file_id)
                     if resp:
@@ -167,28 +188,10 @@ class Scraper:
                 Product.delete(title, client_username=CLIENT_USERNAME)
                 logger.info(f"Deleted product {title} from the database")
 
-
-
-        for title, link in product_links.items():
-            product_info = self.scrape(link)
-            if product_info:
-
-                if title in existing_titles:
-                    Product.update(title, {
-                        'category': product_info['category'],
-                        'tags': product_info['tags'],
-                        'price': product_info['price'],
-                        'excerpt': product_info['excerpt'],
-                        'sku': product_info['sku'],
-                        'description': product_info['description'],
-                        'stock_status': product_info['stock_status'],
-                        'additional_info': product_info['additional_info'],
-                        'link': product_info['link']
-                    }, client_username=CLIENT_USERNAME)
-
-
-                else:
-                    Product.create(
+            for title, link in product_links.items():
+                product_info = self.scrape(link)
+                if product_info:
+                    result = Product.create(
                         title=product_info['title'],
                         category=product_info['category'],
                         tags=product_info['tags'],
@@ -201,31 +204,41 @@ class Scraper:
                         link=product_info['link'],
                         client_username=CLIENT_USERNAME
                     )
-
-        for title in existing_titles:
-            if title not in product_links.keys():
-                file_id = Product.get_file_id(title, client_username=CLIENT_USERNAME)
-                if file_id:
-                    resp = self.openai_service.delete_single_file(file_id)
-                    if resp:
-                        logger.info(f"{title} file with the id:{file_id} has removed from openai")
-                    else:
-                        logger.error(f"failed to remove {title} file with the id {file_id} from openai")
+                    if not result:
+                        logger.error(f"Failed to create product {title}")
+                        return False
                 else:
-                    logger.info(f"product {title} doesnt have file_id")
-                Product.delete(title, client_username=CLIENT_USERNAME)
-                logger.info(f"Removed product {title} from the database as it no longer exists on the website")
+                    logger.error(f"Failed to scrape product from link: {link}")
+                    return False
 
-        # Remove duplicate product links for the client, keeping only the first occurrence
-        Product.deduplicate_for_client(CLIENT_USERNAME)
-        
-        # Log the update and deduplication action for the client
-        from app.models.client import Client
-        Client.append_log(
-            CLIENT_USERNAME,
-            action="update_products",
-            status="success",
-            details="Products updated and deduplicated."
-        )
+            # Remove duplicate product links for the client, keeping only the first occurrence
+            Product.deduplicate_for_client(CLIENT_USERNAME)
+
+            # Log the update and deduplication action for the client
+            from ...models import Client
+            Client.append_log(
+                CLIENT_USERNAME,
+                action="update_products",
+                status="success",
+                details="Products updated and deduplicated."
+            )
+            
+            logger.info("Products update completed successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error during products update: {e}")
+            # Log the failure
+            try:
+                from ...models import Client
+                Client.append_log(
+                    CLIENT_USERNAME,
+                    action="update_products",
+                    status="failed",
+                    details=f"Products update failed: {str(e)}"
+                )
+            except Exception as log_error:
+                logger.error(f"Failed to log error: {log_error}")
+            return False
 
 
