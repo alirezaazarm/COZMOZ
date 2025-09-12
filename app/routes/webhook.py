@@ -3,24 +3,126 @@ from pymongo.errors import PyMongoError
 from datetime import datetime, timezone
 import logging
 import json
-from ..services.instagram_service import InstagramService
+import requests
+from ..services.platforms.instagram import InstagramService
+from ..services.platforms.telegram import TelegramService
 from ..utils.helpers import get_db
+from ..utils.helpers import (
+    get_client_username_by_ig_id,
+    get_client_by_ig_id,
+    set_ig_id_to_client,
+    get_app_settings,
+    get_client_credentials,
+)
 from ..config import Config
 from ..models.enums import MessageRole, UserStatus, ModuleType
 
 logger = logging.getLogger(__name__)
 
-webhook_bp = Blueprint('hooshang_webhook', __name__)
+instagram_webhook_bp = Blueprint('instagram_webhook', __name__)
+telegram_webhook_bp = Blueprint('telegram_webhook', __name__)
 
-@webhook_bp.route('/hooshang_webhook', methods=['GET', 'POST'])
-def webhook():
-    if request.method == 'GET':
-        return handle_webhook_verification()
-    elif request.method == 'POST':
-        return handle_webhook_post()
+@instagram_webhook_bp.route('/instagram', methods=['GET'])
+def instagram_webhook_verify():
+    """Instagram webhook verification endpoint (GET)."""
+    return verify_instagram_webhook()
 
 
-def handle_webhook_verification():
+@instagram_webhook_bp.route('/instagram', methods=['POST'])
+def instagram_webhook():
+    """Instagram webhook endpoint (POST)."""
+    return handle_instagram_webhook_post()
+@telegram_webhook_bp.route('/telegram/<client_username>', methods=['POST'])
+def telegram_webhook(client_username):
+    """Telegram webhook endpoint per client. Configure Telegram bot webhook URL to point here."""
+    try:
+        data = request.get_json(silent=True) or {}
+        with get_db() as db:
+            ok = TelegramService.handle_update(db, data, client_username)
+            if ok:
+                return jsonify({"ok": True}), 200
+            return jsonify({"ok": False}), 200  # Telegram requires 200 even on soft failure
+    except Exception as e:
+        logger.error(f"Telegram webhook error for {client_username}: {str(e)}", exc_info=True)
+        # Return 200 to avoid Telegram retry storm, but include ok False
+        return jsonify({"ok": False}), 200
+
+@telegram_webhook_bp.route('/telegram/<client_username>/set', methods=['POST'])
+def telegram_set_webhook(client_username):
+    """Programmatically set Telegram webhook for a client using stored bot token."""
+    try:
+        # Determine target URL
+        body = request.get_json(silent=True) or {}
+        override_url = body.get('url') or request.args.get('url')
+        target_url = override_url or f"{Config.BASE_URL}/telegram/{client_username}"
+
+        # Get bot token from client credentials
+        creds = TelegramService.get_client_credentials(client_username)
+        token = creds.get('telegram_access_token') if creds else None
+        if not token:
+            logger.error(f"No Telegram token for client: {client_username}")
+            return jsonify({"ok": False, "error": "missing_token"}), 400
+
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/setWebhook",
+            json={"url": target_url},
+            timeout=20
+        )
+        data = resp.json() if resp.content else {"ok": False}
+        status = 200 if data.get('ok') else 400
+        return jsonify({"ok": data.get('ok', False), "result": data}), status
+    except Exception as e:
+        logger.error(f"Failed to set Telegram webhook for {client_username}: {str(e)}", exc_info=True)
+        return jsonify({"ok": False, "error": "exception"}), 500
+
+@telegram_webhook_bp.route('/telegram/<client_username>/info', methods=['GET'])
+def telegram_webhook_info(client_username):
+    """Get Telegram webhook info for a client's bot."""
+    try:
+        creds = TelegramService.get_client_credentials(client_username)
+        token = creds.get('telegram_access_token') if creds else None
+        if not token:
+            return jsonify({"ok": False, "error": "missing_token"}), 400
+        resp = requests.get(
+            f"https://api.telegram.org/bot{token}/getWebhookInfo",
+            timeout=20
+        )
+        data = resp.json() if resp.content else {"ok": False}
+        status = 200 if data.get('ok') else 400
+        return jsonify({"ok": data.get('ok', False), "result": data}), status
+    except Exception as e:
+        logger.error(f"Failed to get Telegram webhook info for {client_username}: {str(e)}", exc_info=True)
+        return jsonify({"ok": False, "error": "exception"}), 500
+
+@telegram_webhook_bp.route('/telegram/<client_username>/delete', methods=['POST'])
+def telegram_delete_webhook(client_username):
+    """Delete Telegram webhook for a client's bot."""
+    try:
+        body = request.get_json(silent=True) or {}
+        drop = body.get('drop_pending_updates')
+        if drop is None:
+            drop = request.args.get('drop_pending_updates', 'true').lower() == 'true'
+
+        creds = TelegramService.get_client_credentials(client_username)
+        token = creds.get('telegram_access_token') if creds else None
+        if not token:
+            return jsonify({"ok": False, "error": "missing_token"}), 400
+
+        params = {"drop_pending_updates": bool(drop)}
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/deleteWebhook",
+            data=params,
+            timeout=20
+        )
+        data = resp.json() if resp.content else {"ok": False}
+        status = 200 if data.get('ok') else 400
+        return jsonify({"ok": data.get('ok', False), "result": data}), status
+    except Exception as e:
+        logger.error(f"Failed to delete Telegram webhook for {client_username}: {str(e)}", exc_info=True)
+        return jsonify({"ok": False, "error": "exception"}), 500
+
+
+def verify_instagram_webhook():
     hub_verify_token = request.args.get('hub.verify_token')
     hub_challenge = request.args.get('hub.challenge')
 
@@ -35,7 +137,7 @@ def handle_webhook_verification():
     logger.warning("Invalid verification token attempt")
     return "Invalid verification token", 403
 
-def handle_webhook_post():
+def handle_instagram_webhook_post():
     logger.info("Webhook POST received")
     data = request.json
     logger.debug(f"Raw payload:\n{json.dumps(data, indent=2)}")
@@ -57,12 +159,12 @@ def handle_webhook_post():
                     continue
 
                 # Find the client by ig_id
-                client_username = InstagramService.get_client_username_by_ig_id(entry_id)
+                client_username = get_client_username_by_ig_id(entry_id)
                 if not client_username:
                     # fallback: load from DB, then update in-memory mapping
-                    client_username = InstagramService.get_client_by_ig_id(entry_id)
+                    client_username = get_client_by_ig_id(entry_id)
                     if client_username:
-                        InstagramService.set_ig_id_to_client(entry_id, client_username)
+                        set_ig_id_to_client(entry_id, client_username)
                 if not client_username:
                     logger.error(f"No client found for ig_id: {entry_id}")
                     failure_count += 1
@@ -87,7 +189,7 @@ def handle_webhook_post():
                         timestamp = raw_ts  # assume already datetime
 
                     try:
-                        if process_message_event(db, event, event['sender']['id'], timestamp, client_username):
+                        if process_instagram_message_event(db, event, event['sender']['id'], timestamp, client_username):
                             success_count += 1
                         else:
                             failure_count += 1
@@ -101,7 +203,7 @@ def handle_webhook_post():
                 logger.info(f"Processing {len(comment_events)} changes for client: {client_username}")
                 for change in comment_events:
                     try:
-                        if process_comment_event(db, change, entry_time, client_username):
+                        if process_instagram_comment_event(db, change, entry_time, client_username):
                             success_count += 1
                         else:
                             failure_count += 1
@@ -128,7 +230,7 @@ def handle_webhook_post():
             logger.debug("Database operation completed")
 
 
-def process_event(db, event, client_username):
+def process_instagram_event(db, event, client_username):
     try:
         sender_id = event['sender']['id']
         timestamp = datetime.fromtimestamp(event['timestamp'] / 1000, timezone.utc).replace(tzinfo=None)
@@ -137,7 +239,7 @@ def process_event(db, event, client_username):
         is_echo = event.get('message', {}).get('is_echo', False)
 
         # Get client-specific app settings
-        app_settings = InstagramService.get_app_settings(client_username)
+        app_settings = get_app_settings(client_username)
         is_assistant_enabled = app_settings.get(ModuleType.DM_ASSIST.value, True)
 
         # Explicitly check if the value is a string and convert accordingly
@@ -145,7 +247,7 @@ def process_event(db, event, client_username):
             is_assistant_enabled = is_assistant_enabled.lower() == 'true'
 
         # Get client credentials to check business account ID
-        client_creds = InstagramService.get_client_credentials(client_username)
+        client_creds = get_client_credentials(client_username)
         if not client_creds:
             logger.error(f"No credentials found for client: {client_username}")
             return False
@@ -172,7 +274,7 @@ def process_event(db, event, client_username):
                     logger.debug(f"Assistant disabled - Processing admin echo message (ID: {sender_id})")
                     # Process the message as an admin reply
                     if 'message' in event:
-                        process_result = process_message_event(db, event, sender_id, timestamp, client_username)
+                        process_result = process_instagram_message_event(db, event, sender_id, timestamp, client_username)
                         logger.debug(f"Process message result for admin echo: {process_result}")
                         return process_result
                     return False
@@ -185,9 +287,11 @@ def process_event(db, event, client_username):
                     logger.debug("Assistant is disabled - Processing admin echo message")
 
         if 'message' in event:
-            return process_message_event(db, event, sender_id, timestamp, client_username)
+            return process_instagram_message_event(db, event, sender_id, timestamp, client_username)
         elif 'reaction' in event:
-            return process_reaction_event(db, event, sender_id, timestamp, client_username)
+            # Reactions handling can be added later if needed; ignore for now
+            logger.info("Ignoring reaction event for Instagram")
+            return True
         else:
             logger.warning(f"Unhandled event type: {list(event.keys())}")
             return False
@@ -201,7 +305,7 @@ def process_event(db, event, client_username):
         return False
 
 
-def process_message_event(db, event, sender_id, timestamp, client_username):
+def process_instagram_message_event(db, event, sender_id, timestamp, client_username):
     """
     Processes incoming Instagram messaging events, including story replies, story mentions, and other attachments.
     Delegates fixed-response logic to InstagramService.handle_shared_content and falls back to standard processing.
@@ -213,7 +317,7 @@ def process_message_event(db, event, sender_id, timestamp, client_username):
         logger.debug(f"Message data from event: {message}")
 
         # Get client credentials to check business account ID
-        client_creds = InstagramService.get_client_credentials(client_username)
+        client_creds = get_client_credentials(client_username)
         if not client_creds:
             logger.error(f"No credentials found for client: {client_username}")
             return False
@@ -228,7 +332,7 @@ def process_message_event(db, event, sender_id, timestamp, client_username):
         is_business_account = sender_id == client_page_id
 
         # Get client-specific app settings
-        app_settings = InstagramService.get_app_settings(client_username)
+        app_settings = get_app_settings(client_username)
         is_assistant_enabled = app_settings.get(ModuleType.DM_ASSIST.value, True)
 
         # Ensure boolean conversion
@@ -433,7 +537,7 @@ def process_message_event(db, event, sender_id, timestamp, client_username):
         return False
 
 
-def process_comment_event(db, change, entry_time=None, client_username=None):
+def process_instagram_comment_event(db, change, entry_time=None, client_username=None):
     try:
         if change.get('field') == 'comments':
             comment_data = change.get('value', {})
@@ -464,7 +568,7 @@ def process_comment_event(db, change, entry_time=None, client_username=None):
             # Use client-specific page ID for echo detection
             client_page_id = None
             if client_username:
-                client_creds = InstagramService.get_client_credentials(client_username)
+                client_creds = get_client_credentials(client_username)
                 if client_creds:
                     client_page_id = client_creds.get('ig_id')
             if from_id == client_page_id:

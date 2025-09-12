@@ -1,4 +1,5 @@
 from .database import db, STORIES_COLLECTION, with_db # FIXED_RESPONSES_COLLECTION removed
+from .enums import Platform
 import logging
 from pymongo.errors import PyMongoError
 from bson import ObjectId
@@ -9,7 +10,7 @@ logger = logging.getLogger(__name__)
 class Story:
 
     @staticmethod
-    def create_story_document(story_id, media_type, caption, media_url, client_username, like_count=0, thumbnail_url=None, timestamp=None, label=None, admin_explanation=None):
+    def create_story_document(story_id, media_type, caption, media_url, client_username, platform, like_count=0, thumbnail_url=None, timestamp=None, label=None, admin_explanation=None):
         """Helper to create a new story document structure."""
         return {
             "id": story_id,  # The unique integer from Meta
@@ -17,6 +18,7 @@ class Story:
             "caption": caption,
             "media_url" : media_url,
             "client_username": client_username,  # Links story to specific client
+            "platform": platform.value,
             "like_count": like_count,
             "thumbnail_url": thumbnail_url,
             "timestamp": timestamp if timestamp else datetime.now(timezone.utc),
@@ -27,9 +29,9 @@ class Story:
 
     @staticmethod
     @with_db
-    def create(story_id, media_type, caption, media_url, client_username, like_count=0, thumbnail_url=None, timestamp=None, label=None, admin_explanation=None):
+    def create(story_id, media_type, caption, media_url, client_username, platform, like_count=0, thumbnail_url=None, timestamp=None, label=None, admin_explanation=None):
         """Create a new story in STORIES_COLLECTION."""
-        story_doc = Story.create_story_document(story_id, media_type, caption, media_url, client_username, like_count, thumbnail_url, timestamp, label, admin_explanation)
+        story_doc = Story.create_story_document(story_id, media_type, caption, media_url, client_username, platform, like_count, thumbnail_url, timestamp, label, admin_explanation)
         try:
             result = db[STORIES_COLLECTION].insert_one(story_doc)
             if result.acknowledged:
@@ -68,7 +70,7 @@ class Story:
 
     @staticmethod
     @with_db
-    def create_or_update_from_instagram(instagram_story_data, client_username):
+    def create_or_update_from_instagram(instagram_story_data, client_username, platform=Platform.INSTAGRAM):
         """Create or update a story from Instagram API data in STORIES_COLLECTION,
         preserving existing label, admin_explanation, and fixed_responses if not provided by API data.
         """
@@ -110,6 +112,7 @@ class Story:
                 caption=api_data['caption'],
                 media_url=api_data['media_url'],
                 client_username=client_username,
+                platform=platform,
                 like_count=api_data['like_count'],
                 thumbnail_url=api_data['thumbnail_url'],
                 timestamp=api_data['timestamp'],

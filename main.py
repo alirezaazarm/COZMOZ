@@ -4,7 +4,7 @@ from app.jobs.scheduler import scheduler, start_scheduler, shutdown_hook
 from app.jobs.message_job import process_messages_job
 from app.jobs.post_story_job import fetch_posts_job, fetch_stories_job
 from app.jobs.status_recovery_job import recover_failed_assistant_status_job
-from app.routes.webhook import webhook_bp
+from app.routes.webhook import instagram_webhook_bp, telegram_webhook_bp
 from app.routes.update import update_bp
 import logging
 from app.utils.helpers import load_main_app_globals_from_db
@@ -19,7 +19,8 @@ werkzeug_logger.setLevel(logging.ERROR)
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 1200 * 1024 * 1024
-app.register_blueprint(webhook_bp)
+app.register_blueprint(instagram_webhook_bp)
+app.register_blueprint(telegram_webhook_bp)
 app.register_blueprint(update_bp)
 
 # Initialize all InstagramService global variables from DB at startup

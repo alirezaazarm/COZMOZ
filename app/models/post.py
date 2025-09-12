@@ -1,4 +1,5 @@
 from .database import db, POSTS_COLLECTION, with_db
+from .enums import Platform
 import logging
 from pymongo.errors import PyMongoError
 from bson import ObjectId
@@ -10,7 +11,7 @@ class Post:
     """Post model for MongoDB"""
 
     @staticmethod
-    def create_post_document(post_id, caption, media_url, media_type, client_username, like_count=0, admin_explanation=None, thumbnail_url=None, timestamp=None, children=None):
+    def create_post_document(post_id, caption, media_url, media_type, client_username, platform, like_count=0, admin_explanation=None, thumbnail_url=None, timestamp=None, children=None):
         """Helper to create a new post document structure."""
         return {
             "id": post_id,  # The unique integer from Meta
@@ -18,6 +19,7 @@ class Post:
             "media_url": media_url,
             "media_type": media_type,
             "client_username": client_username,  # Links post to specific client
+            "platform": platform.value,
             "like_count": like_count,
             "thumbnail_url" : thumbnail_url,
             "timestamp": timestamp if timestamp else datetime.now(timezone.utc),
@@ -29,9 +31,9 @@ class Post:
 
     @staticmethod
     @with_db
-    def create(post_id, caption, media_url, media_type, client_username, like_count=0, admin_explanation=None, thumbnail_url=None, timestamp=None, children=None):
+    def create(post_id, caption, media_url, media_type, client_username, platform, like_count=0, admin_explanation=None, thumbnail_url=None, timestamp=None, children=None):
         """Create a new post."""
-        post_doc = Post.create_post_document(post_id, caption, media_url, media_type, client_username, like_count, admin_explanation, thumbnail_url, timestamp, children)
+        post_doc = Post.create_post_document(post_id, caption, media_url, media_type, client_username, platform, like_count, admin_explanation, thumbnail_url, timestamp, children)
         try:
             result = db[POSTS_COLLECTION].insert_one(post_doc)
             if result.acknowledged:
@@ -70,7 +72,7 @@ class Post:
 
     @staticmethod
     @with_db
-    def create_or_update_from_instagram(instagram_post_data, client_username):
+    def create_or_update_from_instagram(instagram_post_data, client_username, platform=Platform.INSTAGRAM):
         """Create or update a post from Instagram API data, preserving existing fixed_responses, label, and admin_explanation."""
         instagram_id = instagram_post_data['id']
         query = {"id": instagram_id}
@@ -128,6 +130,7 @@ class Post:
                 media_url=api_data['media_url'],
                 media_type=api_data['media_type'],
                 client_username=client_username,
+                platform=platform,
                 like_count=api_data['like_count'],
                 thumbnail_url=api_data['thumbnail_url'],
                 timestamp=api_data['timestamp'],

@@ -17,13 +17,13 @@ class ClientRepository:
         """Get a client by email."""
         return Client.get_by_email(email)
 
-    def create_client(self, username, business_name, email, **kwargs):
+    def create_client(self, username, business_name, email=None, **kwargs):
         """Create a new client."""
-        return Client.create(username, business_name, email, **kwargs)
+        return Client.create(username, business_name, email=email, **kwargs)
 
-    def create_client_with_credentials(self, username, business_name, email, facebook_creds=None, openai_creds=None, **kwargs):
+    def create_client_with_credentials(self, username, business_name, email=None, **kwargs):
         """Create a new client with credentials."""
-        return Client.create_with_credentials(username, business_name, email, facebook_creds, openai_creds, **kwargs)
+        return Client.create_with_credentials(username, business_name, email=email, **kwargs)
 
     def update_client(self, username, update_data):
         """Update a client's data."""
@@ -37,25 +37,13 @@ class ClientRepository:
         """Get client credentials."""
         return Client.get_client_credentials(username, credential_type)
 
-    def enable_module(self, username, module_name):
-        """Enable a module for a client."""
-        return Client.enable_module(username, module_name)
 
-    def disable_module(self, username, module_name):
-        """Disable a module for a client."""
-        return Client.disable_module(username, module_name)
 
     def is_module_enabled(self, username, module_name):
         """Check if a module is enabled for a client."""
         return Client.is_module_enabled(username, module_name)
 
-    def get_module_settings(self, username, module_name):
-        """Get settings for a specific module."""
-        return Client.get_module_settings(username, module_name)
-
-    def update_module_settings(self, username, module_name, settings):
-        """Update settings for a specific module."""
-        return Client.update_module_settings(username, module_name, settings)
+    # Module settings APIs were removed; modules are simple enabled/disabled flags per latest model
 
     def update_usage_stats(self, username, stats_update):
         """Update usage statistics for a client."""

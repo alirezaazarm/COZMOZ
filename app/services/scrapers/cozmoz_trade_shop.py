@@ -4,7 +4,7 @@ from urllib.parse import unquote
 import logging
 from ...models.product import Product
 import json
-from ..openai_service import OpenAIService
+from ..AI.openai_service import OpenAIService
 import os
 
 CLIENT_USERNAME = os.path.splitext(os.path.basename(__file__))[0]

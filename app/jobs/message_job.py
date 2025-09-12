@@ -5,7 +5,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from datetime import datetime, timezone, timedelta
 import logging
 from ..models.client import Client
-from ..models.enums import ModuleType
+from ..models.enums import ModuleType, Platform
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +24,32 @@ def process_messages_job():
 
         for client in active_clients:
             client_username = client.get('username')
-            # Check if dm_assist module is enabled for this client
-            dm_assist_enabled = client.get("modules", {}).get(ModuleType.DM_ASSIST.value, {}).get("enabled", False)
-            if not dm_assist_enabled:
-                logger.info(f"DM Assist is disabled for client '{client_username}'. Skipping.")
+            
+            # Check if DM Assist is enabled for either platform to decide if we need a mediator
+            telegram_dm_assist_enabled = client.get("platforms", {}).get("telegram", {}).get('modules', {}).get(ModuleType.DM_ASSIST.value, {}).get("enabled", False)
+            instagram_dm_assist_enabled = client.get("platforms", {}).get("instagram", {}).get('modules', {}).get(ModuleType.DM_ASSIST.value, {}).get("enabled", False)
+
+            if not telegram_dm_assist_enabled and not instagram_dm_assist_enabled:
+                logger.info(f"DM Assist is disabled for all platforms for client '{client_username}'. Skipping.")
                 continue
-            logger.info(f"DM Assist is enabled for client '{client_username}'. Processing pending messages.")
+
             with get_db() as db:
                 mediator = Mediator(db, client_username=client_username)
-                mediator.process_pending_messages(cutoff_time)
+                
+                # Process Telegram messages if enabled
+                if telegram_dm_assist_enabled:
+                    logger.info(f"DM Assist is enabled for client '{client_username}' on Telegram. Processing pending messages.")
+                    mediator.process_pending_messages(cutoff_time, platform=Platform.TELEGRAM)
+                else:
+                    logger.info(f"DM Assist is disabled for client '{client_username}' on Telegram. Skipping.")
+                
+                # Process Instagram messages if enabled
+                if instagram_dm_assist_enabled:
+                    logger.info(f"DM Assist is enabled for client '{client_username}' on Instagram. Processing pending messages.")
+                    mediator.process_pending_messages(cutoff_time, platform=Platform.INSTAGRAM)
+                else:
+                    logger.info(f"DM Assist is disabled for client '{client_username}' on Instagram. Skipping.")
+
     except Exception as job_error:
         logger.critical(f"Job failed: {str(job_error)}", exc_info=True)
         raise

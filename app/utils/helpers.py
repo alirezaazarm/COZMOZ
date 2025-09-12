@@ -3,9 +3,28 @@ import logging
 from ..models.database import db
 from contextlib import contextmanager
 from pymongo.errors import PyMongoError
+import requests
+from ..config import Config
 
 
 logger = logging.getLogger(__name__)
+
+"""
+In-memory caches shared across the app (per client).
+These were previously defined in instagram_service; they now live here.
+"""
+# {client_username: settings_dict}
+APP_SETTINGS = {}
+# {client_username: {post_id: {trigger: actions}}}
+COMMENT_FIXED_RESPONSES = {}
+# {client_username: {story_id: {trigger: actions}}}
+STORY_FIXED_RESPONSES = {}
+# {client_username: {post_ids: [], story_ids: []}}
+IG_CONTENT_IDS = {}
+# {client_username: credentials_dict}
+CLIENT_CREDENTIALS = {}
+# {ig_id: client_username}
+IG_ID_TO_CLIENT = {}
 
 @contextmanager
 def get_db():
@@ -167,7 +186,6 @@ def load_main_app_globals_from_db():
     from app.models.client import Client
     from app.models.post import Post
     from app.models.story import Story
-    from app.services import instagram_service
     logger = logging.getLogger(__name__)
     try:
         clients = Client.get_all_active()
@@ -177,41 +195,106 @@ def load_main_app_globals_from_db():
             ig_id = client.get('keys', {}).get('ig_id')
             # 1. IG_ID_TO_CLIENT
             if ig_id and username:
-                instagram_service.IG_ID_TO_CLIENT[ig_id] = username
+                IG_ID_TO_CLIENT[ig_id] = username
 
             # 2. CLIENT_CREDENTIALS
-                instagram_service.CLIENT_CREDENTIALS[username] = client.get('keys', {})
+                CLIENT_CREDENTIALS[username] = client.get('keys', {})
 
-            # 3. APP_SETTINGS (fill all modules)
+            # 3. APP_SETTINGS (fill all modules from platforms)
                 from app.models.enums import ModuleType
-                client_modules = client.get('modules', {}) or {}
+                client_platforms = client.get('platforms', {}) or {}
                 app_settings = {}
                 for module in ModuleType:
                     module_name = module.value
-                    app_settings[module_name] = client_modules.get(module_name, {}).get('enabled', False)
-                instagram_service.APP_SETTINGS[username] = app_settings
+                    # Check if module is enabled on any platform
+                    module_enabled = False
+                    for platform_name, platform_cfg in client_platforms.items():
+                        if platform_cfg.get("enabled"):
+                            modules = platform_cfg.get("modules", {})
+                            if module_name in modules and modules[module_name].get("enabled"):
+                                module_enabled = True
+                                break
+                    app_settings[module_name] = module_enabled
+                APP_SETTINGS[username] = app_settings
                 
             # 4. COMMENT_FIXED_RESPONSES
                 post_fixed = Post.get_all_fixed_responses_structured(username)
                 expanded_post_fixed = {}
                 for post_id, triggers_dict in post_fixed.items():
                     expanded_post_fixed[post_id] = expand_triggers(triggers_dict)
-                instagram_service.COMMENT_FIXED_RESPONSES[username] = expanded_post_fixed
+                COMMENT_FIXED_RESPONSES[username] = expanded_post_fixed
 
             # 5. STORY_FIXED_RESPONSES
                 story_fixed = Story.get_all_fixed_responses_structured(username)
                 expanded_story_fixed = {}
                 for story_id, triggers_dict in story_fixed.items():
                     expanded_story_fixed[story_id] = expand_triggers(triggers_dict)
-                instagram_service.STORY_FIXED_RESPONSES[username] = expanded_story_fixed
+                STORY_FIXED_RESPONSES[username] = expanded_story_fixed
                 
             # 6. IG_CONTENT_IDS
                 post_ids = Post.get_post_ids(username)
                 story_ids = Story.get_story_ids(username)
-                instagram_service.IG_CONTENT_IDS[username] = {
+                IG_CONTENT_IDS[username] = {
                     'post_ids': post_ids,
                     'story_ids': story_ids
                 }
         logger.info("InstagramService global variables initialized from DB.")
     except Exception as e:
         logger.error(f"Failed to initialize InstagramService globals from DB: {str(e)}", exc_info=True)
+
+
+# ----------------------------------------------------------------------
+# Cache accessors (moved from instagram_service)
+# ----------------------------------------------------------------------
+
+def set_client_credentials(credentials, client_username):
+    CLIENT_CREDENTIALS[client_username] = credentials
+    return True
+
+def get_client_credentials(client_username):
+    return CLIENT_CREDENTIALS.get(client_username, {})
+
+def get_client_credentials_from_db(client_username):
+    from app.models.client import Client
+    return Client.get_client_credentials(client_username)
+
+def set_ig_id_to_client(ig_id, client_username):
+    IG_ID_TO_CLIENT[ig_id] = client_username
+
+def get_client_by_ig_id(ig_id):
+    return IG_ID_TO_CLIENT.get(ig_id)
+
+def get_client_username_by_ig_id(ig_id):
+    return IG_ID_TO_CLIENT.get(ig_id)
+
+def set_app_settings(settings, client_username):
+    APP_SETTINGS[client_username] = settings
+    ig_id = settings.get('ig_id')
+    if ig_id:
+        set_ig_id_to_client(ig_id, client_username)
+    return True
+
+def get_app_settings(client_username):
+    return APP_SETTINGS.get(client_username, {})
+
+def set_comment_fixed_responses(responses, client_username):
+    COMMENT_FIXED_RESPONSES[client_username] = responses
+    return True
+
+def get_comment_fixed_responses(client_username):
+    return COMMENT_FIXED_RESPONSES.get(client_username, {})
+
+def set_story_fixed_responses(responses, client_username):
+    STORY_FIXED_RESPONSES[client_username] = responses
+    return True
+
+def get_story_fixed_responses(client_username):
+    return STORY_FIXED_RESPONSES.get(client_username, {})
+
+def set_ig_content_ids(data, client_username):
+    IG_CONTENT_IDS[client_username] = data
+    return True
+
+def get_ig_content_ids(client_username):
+    return IG_CONTENT_IDS.get(client_username, {})
+

@@ -3,12 +3,16 @@ def get_message_service():
     return MessageService()
 
 def get_openai_service():
-    from .openai_service import OpenAIService
+    from .AI.openai_service import OpenAIService
     return OpenAIService()
 
 def get_instagram_service():
-    from .instagram_service import InstagramService
+    from .platforms.instagram import InstagramService
     return InstagramService()
+
+def get_telegram_service():
+    from .platforms.telegram import TelegramService
+    return TelegramService()
 
 def get_mediator():
     from .mediator import Mediator

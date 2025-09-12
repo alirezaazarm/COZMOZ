@@ -1,26 +1,22 @@
 # -*- coding: utf-8 -*-
 import requests
-from ..config import Config
+from ...config import Config
 import logging
 import re
 from datetime import datetime, timezone
 from PIL import Image
 from io import BytesIO
-from ..models.user import User
-from ..models.enums import UserStatus, MessageRole, ModuleType
-from ..models.post import Post
-from ..models.story import Story
-from .img_search import process_image
+from ...models.user import User
+from ...models.enums import UserStatus, MessageRole, ModuleType, Platform
+from ...models.post import Post
+from ...models.story import Story
+from ...models.client import Client
+from ..AI.img_search import process_image
+from ...utils import helpers
 
 logger = logging.getLogger(__name__)
 
-# Global variables for multi-client app settings - now client-specific dictionaries
-APP_SETTINGS = {}  # {client_username: settings_dict}
-COMMENT_FIXED_RESPONSES = {}  # {client_username: {post_id: {trigger: actions}}}
-STORY_FIXED_RESPONSES = {}  # {client_username: {story_id: {trigger: actions}}}
-IG_CONTENT_IDS = {}  # {client_username: {post_ids: [], story_ids: []}}
-CLIENT_CREDENTIALS = {}  # {client_username: credentials_dict}
-IG_ID_TO_CLIENT = {}  # {ig_id: client_username}
+# In-memory caches moved to app.utils.helpers
 
 def parse_instagram_timestamp(ts):
     if not ts:
@@ -49,57 +45,47 @@ def parse_instagram_timestamp(ts):
 class InstagramService:
     @staticmethod
     def set_client_credentials(credentials, client_username):
-        """Set client credentials for a specific client in memory."""
-        global CLIENT_CREDENTIALS
-        CLIENT_CREDENTIALS[client_username] = credentials
-        return True
+        """Deprecated wrapper. Use helpers.set_client_credentials directly."""
+        return helpers.set_client_credentials(credentials, client_username)
 
     @staticmethod
     def get_client_credentials(client_username):
-        """Get client credentials for a specific client from memory."""
-        return CLIENT_CREDENTIALS.get(client_username, {})
+        """Deprecated wrapper. Use helpers.get_client_credentials directly."""
+        return helpers.get_client_credentials(client_username)
 
     @staticmethod
     def get_client_credentials_from_db(client_username):
-        """
-        Get client credentials for a specific client directly from the database (for UI dashboard use).
-        This bypasses the in-memory cache and always fetches the latest from the DB.
-        """
-        from app.models.client import Client
-        return Client.get_client_credentials(client_username)
+        """Wrapper to fetch client credentials directly from the database."""
+        return helpers.get_client_credentials_from_db(client_username)
 
     @staticmethod
     def set_ig_id_to_client(ig_id, client_username):
-        """Set the mapping from IG ID to client username in memory."""
-        global IG_ID_TO_CLIENT
-        IG_ID_TO_CLIENT[ig_id] = client_username
+        """Deprecated wrapper. Use helpers.set_ig_id_to_client directly."""
+        helpers.set_ig_id_to_client(ig_id, client_username)
 
 
     @staticmethod
     def get_client_by_ig_id(ig_id):
-        """
-        Look up the client username by Instagram ID from the in-memory global variable.
-        """
-        return IG_ID_TO_CLIENT.get(ig_id)
+        """Wrapper for helpers.get_client_by_ig_id."""
+        return helpers.get_client_by_ig_id(ig_id)
 
     @staticmethod
     def get_client_username_by_ig_id(ig_id):
-        """Get the client username for a given IG ID from memory."""
-        return IG_ID_TO_CLIENT.get(ig_id)
+        """Wrapper for helpers.get_client_username_by_ig_id."""
+        return helpers.get_client_username_by_ig_id(ig_id)
 
     @staticmethod
-    def send_message(recipient_id, text, client_username=None):
-        """Send a message to a recipient using client-specific credentials"""
-        # Get client credentials if client_username is provided
-        if client_username:
-            client_creds = InstagramService.get_client_credentials(client_username)
-            if not client_creds or not client_creds.get('page_access_token'):
-                logger.error(f"No valid Facebook credentials found for client: {client_username}")
-                return None
-            page_access_token = client_creds['page_access_token']
-        else:
-            # Fallback to global config for backward compatibility
-            page_access_token = Config.PAGE_ACCESS_TOKEN
+    def send_message(recipient_id, text, client_username):
+
+        client_creds = helpers.get_client_credentials(client_username)
+        if client_creds == {}:
+            client_creds = InstagramService.get_client_credentials_from_db(client_username)
+
+        if not client_creds.get('page_access_token'):
+            logger.error(f"No valid Facebook credentials found for client: {client_username}")
+            return None
+        page_access_token = client_creds['page_access_token']
+
 
         link_pattern = re.compile(r'https?://\S+')
         links = link_pattern.findall(text)
@@ -129,7 +115,7 @@ class InstagramService:
             return None  # Return None instead of False
 
     @staticmethod
-    def send_split_messages(user_id, text, client_username=None):
+    def send_split_messages(user_id, text, client_username):
         """Split a long message into multiple messages, preserving sentence integrity and links"""
         try:
             # Set a conservative character limit for Instagram
@@ -164,12 +150,12 @@ class InstagramService:
             section_markers = [
                 '\n\n',  # Double line break often separates products
                 '\n',    # Single line break separates product details
-                '. ',    # Period followed by space for sentences
-                '\u060C ',  # Persian comma (،)
-                '\u061B ',  # Persian semicolon (؛)
-                '! ',    # Exclamation
-                '? ',    # Question mark
-                '\u061F '  # Persian question mark (؟)
+                '. ',
+                '\u060C ',
+                '\u061B ',
+                '! ',
+                '? ',
+                '\u061F '
             ]
 
             # Special marker for products in numbered lists
@@ -326,18 +312,16 @@ class InstagramService:
                 return None
 
     @staticmethod
-    def send_message_simple(user_id, text, client_username=None):
-        """Send a simple message without any splitting logic"""
-        # Get client credentials if client_username is provided
-        if client_username:
-            client_creds = InstagramService.get_client_credentials(client_username)
-            if not client_creds or not client_creds.get('page_access_token'):
-                logger.error(f"No valid Facebook credentials found for client: {client_username}")
-                return None
-            page_access_token = client_creds['page_access_token']
-        else:
-            # Fallback to global config for backward compatibility
-            page_access_token = Config.PAGE_ACCESS_TOKEN
+    def send_message_simple(user_id, text, client_username):
+
+        client_creds = helpers.get_client_credentials(client_username)
+        if client_creds == {}:
+            client_creds = InstagramService.get_client_credentials_from_db(client_username)
+
+        if not client_creds.get('page_access_token'):
+            logger.error(f"No valid Facebook credentials found for client: {client_username}")
+            return None
+        page_access_token = client_creds['page_access_token']
 
         MAX_RETRIES = 2
         RETRY_DELAY = 2  # seconds - increased from 1 to 2 seconds
@@ -422,18 +406,16 @@ class InstagramService:
             return None
 
     @staticmethod
-    def send_comment_private_reply(comment_id, text, client_username=None):
-        """Send a private reply to a comment using client-specific credentials"""
-        # Get client credentials if client_username is provided
-        if client_username:
-            client_creds = InstagramService.get_client_credentials(client_username)
-            if not client_creds or not client_creds.get('facebook_access_token'):
-                logger.error(f"No valid Facebook credentials found for client: {client_username}")
-                return False
-            fb_access_token = client_creds['facebook_access_token']
-        else:
-            # Fallback to global config for backward compatibility
-            fb_access_token = Config.FB_ACCESS_TOKEN
+    def send_comment_private_reply(comment_id, text, client_username):
+
+        client_creds = helpers.get_client_credentials(client_username)
+        if client_creds == {}:
+            client_creds = InstagramService.get_client_credentials_from_db(client_username)
+
+        if not client_creds.get('facebook_access_token'):
+            logger.error(f"No valid Facebook credentials found for client: {client_username}")
+            return None
+        fb_access_token = client_creds['facebook_access_token']
 
         try:
             url = f"https://graph.facebook.com/v22.0/{comment_id}/private_replies"
@@ -450,18 +432,15 @@ class InstagramService:
             return False
 
     @staticmethod
-    def send_comment_reply(comment_id, text, client_username=None):
-        """Send a public reply to a comment using client-specific credentials"""
-        # Get client credentials if client_username is provided
-        if client_username:
-            client_creds = InstagramService.get_client_credentials(client_username)
-            if not client_creds or not client_creds.get('page_access_token'):
-                logger.error(f"No valid Facebook credentials found for client: {client_username}")
-                return False
-            page_access_token = client_creds['page_access_token']
-        else:
-            # Fallback to global config for backward compatibility
-            page_access_token = Config.PAGE_ACCESS_TOKEN
+    def send_comment_reply(comment_id, text, client_username):
+        client_creds = helpers.get_client_credentials(client_username)
+        if client_creds == {}:
+            client_creds = InstagramService.get_client_credentials_from_db(client_username)
+
+        if not client_creds.get('page_access_token'):
+            logger.error(f"No valid Facebook credentials found for client: {client_username}")
+            return None
+        page_access_token = client_creds['page_access_token']
 
         try:
             url = f"https://graph.instagram.com/v22.0/{comment_id}/replies"
@@ -541,7 +520,7 @@ class InstagramService:
             if not user:
                 logger.info(f"[process_user] Creating user {user_id} with username: {username} for client: {client_username}")
 
-                user_doc = User.create(user_id=user_id, username=username, client_username=client_username, status=status)
+                user_doc = User.create_instagram_user(user_id=user_id, username=username, client_username=client_username, status=status)
 
                 if user_doc:
                     logger.debug(f"[process_user] Created user: {user_doc['user_id']}")
@@ -586,72 +565,66 @@ class InstagramService:
     @staticmethod
     def set_app_settings(settings, client_username):
         """Set app settings for a specific client"""
-        global APP_SETTINGS
-
         # Log the current settings
-        logger.info(f"InstagramService - Current APP_SETTINGS for {client_username}: {APP_SETTINGS.get(client_username, {})}")
+        logger.info(f"InstagramService - Current APP_SETTINGS for {client_username}: {helpers.get_app_settings(client_username)}")
 
-        # Store the new settings for this client
-        APP_SETTINGS[client_username] = settings
+        # Store the new settings for this client via helpers
+        helpers.set_app_settings(settings, client_username)
 
         # Log the new settings
-        logger.info(f"InstagramService - New APP_SETTINGS for {client_username}: {APP_SETTINGS[client_username]}")
+        logger.info(f"InstagramService - New APP_SETTINGS for {client_username}: {helpers.get_app_settings(client_username)}")
 
         # Explicitly log the assistant status to verify
-        assistant_enabled = APP_SETTINGS[client_username].get(ModuleType.DM_ASSIST.value, True)
+        assistant_enabled = settings.get(ModuleType.DM_ASSIST.value, True)
         logger.info(f"InstagramService - Assistant for {client_username} is now {'ENABLED' if assistant_enabled else 'DISABLED'}")
 
         # After successfully sending app settings
         ig_id = settings.get('ig_id')
         if ig_id:
-            InstagramService.set_ig_id_to_client(ig_id, client_username)  # Update local mapping
-            self.send_ig_id_to_client_to_main()  # Sync with main app
+            helpers.set_ig_id_to_client(ig_id, client_username)  # Update local mapping
 
         return True
 
     @staticmethod
     def set_comment_fixed_responses(responses, client_username):
         """Set comment fixed responses for a specific client"""
-        global COMMENT_FIXED_RESPONSES
-        COMMENT_FIXED_RESPONSES[client_username] = responses
+        helpers.set_comment_fixed_responses(responses, client_username)
         logger.info(f"InstagramService - Updated COMMENT_FIXED_RESPONSES for {client_username}: {len(responses)} posts configured.")
         return True
 
     @staticmethod
     def set_story_fixed_responses(responses, client_username):
         """Set story fixed responses for a specific client"""
-        global STORY_FIXED_RESPONSES
-        STORY_FIXED_RESPONSES[client_username] = responses
+        helpers.set_story_fixed_responses(responses, client_username)
         logger.info(f"InstagramService - Updated STORY_FIXED_RESPONSES for {client_username}: {len(responses)} stories configured.")
         return True
 
     @staticmethod
     def set_ig_content_ids(data, client_username):
         """Set Instagram content IDs for a specific client"""
-        global IG_CONTENT_IDS
-        IG_CONTENT_IDS[client_username] = data
+        helpers.set_ig_content_ids(data, client_username)
         logger.info(f"InstagramService - Updated IG_CONTENT_IDS for {client_username}: {len(data)} posts configured.")
         return True
 
     @staticmethod
     def get_app_settings(client_username):
         """Get app settings for a specific client"""
-        return APP_SETTINGS.get(client_username, {})
+        return helpers.get_app_settings(client_username)
 
     @staticmethod
     def get_comment_fixed_responses(client_username):
         """Get comment fixed responses for a specific client"""
-        return COMMENT_FIXED_RESPONSES.get(client_username, {})
+        return helpers.get_comment_fixed_responses(client_username)
 
     @staticmethod
     def get_story_fixed_responses(client_username):
         """Get story fixed responses for a specific client"""
-        return STORY_FIXED_RESPONSES.get(client_username, {})
+        return helpers.get_story_fixed_responses(client_username)
 
     @staticmethod
     def get_ig_content_ids(client_username):
         """Get Instagram content IDs for a specific client"""
-        return IG_CONTENT_IDS.get(client_username, {})
+        return helpers.get_ig_content_ids(client_username)
 
     @staticmethod
     def handle_message(db, message_data, client_username):
@@ -674,7 +647,7 @@ class InstagramService:
                 return False
 
             # Get client credentials for page ID comparison
-            client_creds = InstagramService.get_client_credentials(client_username)
+            client_creds = helpers.get_client_credentials(client_username)
             if not client_creds:
                 logger.error(f"[handle_message] No credentials found for client: {client_username}")
                 return False
@@ -720,7 +693,7 @@ class InstagramService:
                     user_check = db.users.find_one({"user_id": actual_user_id, "client_username": client_username})
                     if not user_check:
                         logger.info(f"[handle_message] Creating user record for recipient: {actual_user_id}")
-                        user_doc = User.create_user_document(
+                        user_doc = User.create_instagram_document(
                             user_id=actual_user_id,
                             username=sender_info.get('username', ''),
                             client_username=client_username
@@ -818,7 +791,7 @@ class InstagramService:
 
                             # Create the user since they don't exist
                             logger.info(f"[handle_message] Creating missing user record for recipient: {actual_user_id}")
-                            user_doc = User.create_user_document(
+                            user_doc = User.create_instagram_document(
                                 user_id=actual_user_id,
                                 username=sender_info.get('username', ''),
                                 client_username=client_username
@@ -869,7 +842,7 @@ class InstagramService:
             )
 
             # Check if assistant is enabled in app settings for this client
-            client_settings = InstagramService.get_app_settings(client_username)
+            client_settings = helpers.get_app_settings(client_username)
             is_assistant_enabled = client_settings.get(ModuleType.DM_ASSIST.value, True)
 
             # Store message in database with appropriate status
@@ -906,7 +879,7 @@ class InstagramService:
     def handle_comment(db, comment_data, client_username):
         """Process and handle an Instagram comment for a specific client, using in-memory fixed responses if available."""
         # Check client-specific fixed_responses setting
-        client_settings = InstagramService.get_app_settings(client_username)
+        client_settings = helpers.get_app_settings(client_username)
         if not client_settings.get(ModuleType.FIXED_RESPONSE.value, True):
             logger.info(f"Fixed responses are disabled for client {client_username}.")
             return False
@@ -1075,7 +1048,7 @@ class InstagramService:
         """
         try:
             # Get client credentials
-            client_creds = InstagramService.get_client_credentials_from_db(client_username)
+            client_creds = helpers.get_client_credentials_from_db(client_username)
             if not client_creds:
                 logger.error(f"No Facebook credentials found for client: {client_username}")
                 return False
@@ -1088,7 +1061,7 @@ class InstagramService:
                 return False
 
             base_endpoint = f"https://graph.facebook.com/v22.0/{page_id}"
-            # /media?fields=caption,media_url,media_type,id,like_count,timestamp,comments.limit(1000){id,timestamp,text,from,like_count,replies.limit(1000){id,timestamp,text,from,like_count}}&limit=1000
+            # /media?fields=caption,media_url,media_type,id,like_count,timestamp,comments.limit(1000){{id,timestamp,text,from,like_count,replies.limit(1000){{id,timestamp,text,from,like_count}}}}&limit=1000
             post_endpoint = "/media?fields=caption,media_url,thumbnail_url,media_type,id,like_count,timestamp,children{media_url,thumbnail_url,media_type,id}&limit=1000"
             params = {"access_token": fb_access_token}
             response = requests.get(base_endpoint + post_endpoint, params=params)
@@ -1109,7 +1082,7 @@ class InstagramService:
                     "thumbnail_url" : post_item.get('thumbnail_url'),
                     "children": post_item.get('children', {})  # Include children data from API
                 }
-                Post.create_or_update_from_instagram(post_data, client_username)
+                Post.create_or_update_from_instagram(post_data, client_username, platform=Platform.INSTAGRAM)
 
                 # Process comments
                 comment_data_list = post_item.get('comments', {}).get('data', []) # Renamed comment_data
@@ -1184,7 +1157,7 @@ class InstagramService:
         """Retrieves stories from IG for a specific client and stores them using the Story model, and returns the list of current stories."""
         try:
             # Get client credentials
-            client_creds = InstagramService.get_client_credentials_from_db(client_username)
+            client_creds = helpers.get_client_credentials_from_db(client_username)
             if not client_creds:
                 logger.error(f"No Facebook credentials found for client: {client_username}")
                 return []
@@ -1211,11 +1184,11 @@ class InstagramService:
                     "media_type": story_item.get('media_type', ''),
                     "caption": story_item.get('caption', ''),
                     "like_count": story_item.get('like_count', 0),
-                    "thumbnail_url": story_item.get('thumbnail_url',''),
+                    "thumbnail_url": story_item.get('thumbnail_url','') ,
                     "media_url": story_item.get('media_url'),
                     "timestamp": story_item.get('timestamp')
                 }
-                Story.create_or_update_from_instagram(story_data_dict, client_username)
+                Story.create_or_update_from_instagram(story_data_dict, client_username, platform=Platform.INSTAGRAM)
                 result_stories.append(story_data_dict)
             logger.info(f"Successfully fetched and processed {len(result_stories)} stories for client: {client_username}")
             return result_stories
@@ -1249,9 +1222,9 @@ class InstagramService:
                     logger.debug(f"Extracted story_id from URL: {story_id}")
 
             # Use client-based settings and fixed responses
-            app_settings = InstagramService.get_app_settings(client_username)
-            story_fixed_responses = InstagramService.get_story_fixed_responses(client_username)
-            ig_content_ids = InstagramService.get_ig_content_ids(client_username)
+            app_settings = helpers.get_app_settings(client_username)
+            story_fixed_responses = helpers.get_story_fixed_responses(client_username)
+            ig_content_ids = helpers.get_ig_content_ids(client_username)
 
             # Only proceed if fixed responses enabled
             if app_settings.get(ModuleType.FIXED_RESPONSE.value, True) and \
@@ -1278,7 +1251,7 @@ class InstagramService:
                         user_check = db.users.find_one({"user_id": user_id, "client_username": client_username})
                         if not user_check:
                             logger.info(f"Creating user record for story reply user: {user_id} (client: {client_username})")
-                            user_doc = User.create_user_document(
+                            user_doc = User.create_instagram_document(
                                 user_id=user_id,
                                 username='',  # Username will be updated later if available
                                 client_username=client_username,

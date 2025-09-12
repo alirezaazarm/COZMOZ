@@ -1,11 +1,20 @@
 import logging
 import streamlit as st
-from app.services.backend import Backend # Assuming this path is correct
+from ...models.post import Post
+from ...models.story import Story
+from ...models.client import Client
+from ...models.product import Product
+from ...models.user import User
+from ...models.enums import MessageRole, UserStatus
+from ..platforms.instagram import InstagramService
+from ..AI.img_search import process_image
+from ...config import Config
+from datetime import datetime, timedelta, timezone
+import requests
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from datetime import datetime, timezone, timedelta
+from PIL import Image
+import io
 
 logging.basicConfig(
     handlers=[logging.FileHandler('logs.txt', encoding='utf-8'), logging.StreamHandler()],
@@ -14,36 +23,46 @@ logging.basicConfig(
 )
 #===============================================================================================================================
 class AppConstants:
-    """Centralized configuration for icons and messages"""
     ICONS = {
-        "scraper": ":building_construction:" ,
-        "scrape": ":rocket:",
-        "update": ":arrows_counterclockwise:" ,
-        "ai": ":robot_face:",
-        "delete": ":wastebasket:" ,
-        "add": ":heavy_plus_sign:" ,
-        "success": ":white_check_mark:" ,
-        "error": ":x:" ,
-        "preview": ":package:" ,
-        "brain": ":brain:" ,
-        "chat": ":speech_balloon:",
-        "connect": ":link:",
-        "instagram": ":camera:",
-        "post": ":newspaper:",
-        "story": ":film_frames:",
-        "paper_and_pen": ":memo:",
-        "previous": ":arrow_left:",
-        "next": ":arrow_right:",
-        "label": ":label:",
-        "save": ":floppy_disk:",
-        "model": ":brain:",
-        "folder": ":open_file_folder:",
-        "dashboard": ":bar_chart:", # Added icon for dashboard
-        "data": ":page_facing_up:", # Added icon for data
-        "login": ":key:", # Added icon for login
-        "logout": ":door:", # Added icon for logout
-        "user": ":bust_in_silhouette:", # Added icon for user management
-        "magic": ":magic_wand:", # Added icon for auto-labeling
+    "scraper": ":building_construction:",
+    "scrape": ":rocket:",
+    "update": ":arrows_counterclockwise:",
+    "ai": ":robot_face:",
+    "delete": ":wastebasket:",
+    "add": ":heavy_plus_sign:",
+    "success": ":white_check_mark:",
+    "error": ":x:",
+    "preview": ":eyes:",
+    "brain": ":brain:",
+    "chat": ":speech_balloon:",
+    "connect": ":link:",
+    "instagram": ":camera:",
+    "post": ":newspaper:",
+    "story": ":clapper:",   # changed from film_frames
+    "paper_and_pen": ":memo:",
+    "previous": ":arrow_left:",
+    "next": ":arrow_right:",
+    "label": ":label:",
+    "save": ":floppy_disk:",
+    "model": ":brain:",
+    "folder": ":open_file_folder:",
+    "dashboard": ":bar_chart:",
+    "data": ":page_facing_up:",
+    "login": ":key:",
+    "logout": ":door:",
+    "user": ":bust_in_silhouette:", 
+    "controller": ":joystick:", 
+    "default_user": "https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_960_720.png",
+    "admin": ":shield:",
+    "fixed_message": ":pushpin:",
+    
+}
+
+    AVATARS={
+        "admin": "assets/icons/admin.png",
+        "user": "assets/icons/user.png",
+        "assistant": "assets/icons/assistant.png",
+        "fixed_response": "assets/icons/fixed_response.png"
     }
 
     MESSAGES = {
@@ -51,689 +70,642 @@ class AppConstants:
         "update_start": "Checking for new products...",
         "processing_start": "Processing products - this may take several minutes..."
     }
+class InstagramBackend:
+    def __init__(self, client_username=None):
+        self.client_username = client_username
+        self.client_data = None
+        if self.client_username:
+            self.client_data = Client.get_by_username(self.client_username)
+            if not self.client_data:
+                logging.error(f"Client '{self.client_username}' not found")
+                raise ValueError(f"Client '{self.client_username}' not found")
+            if self.client_data.get('status') != 'active':
+                logging.error(f"Client '{self.client_username}' is not active")
+                raise ValueError(f"Client '{self.client_username}' is not active")
+            logging.info(f"InstagramBackend initialized for client: {self.client_username}")
+
+    def reload_main_app_memory(self):
+        """Trigger the main app to reload all memory from the database."""
+        logging.info("Triggering main app to reload memory from DB.")
+        try:
+            response = requests.post(
+                Config.BASE_URL + "/hooshang_update/reload-memory",
+                headers= {"Content-Type": "application/json",  "Authorization": f"Bearer {Config.VERIFY_TOKEN}" }
+            )
+            if response.status_code == 200:
+                logging.info("Main app memory reload triggered successfully.")
+                return True
+            else:
+                logging.error(f"Failed to trigger main app memory reload. Status: {response.status_code}, Response: {response.text}")
+                return False
+        except Exception as e:
+            logging.error(f"Error triggering main app memory reload: {str(e)}")
+            return False
+
+    def _validate_client_access(self, required_module=None):
+        if not self.client_username:
+            return True
+        if not self.client_data:
+            raise ValueError("Client data not loaded")
+        if self.client_data.get('status') != 'active':
+            raise ValueError(f"Client '{self.client_username}' is not active")
+        if required_module:
+            if not Client.is_module_enabled(self.client_username, required_module):
+                raise ValueError(f"Module '{required_module}' is not enabled for client '{self.client_username}'")
+        return True
+
+    def get_products(self):
+            """Wrapper for Product model's get_all method."""
+            self._validate_client_access()
+            try:
+                logging.info(f"Fetching all products for client: {self.client_username or 'admin'}")
+                return Product.get_all(client_username=self.client_username)
+            except Exception as e:
+                logging.error(f"Error fetching products for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+                return []
+
+    def _process_media_for_labeling(self, item_id, media_url, thumbnail_url, item_type="post"):
+        if not media_url and not thumbnail_url:
+            logging.warning(f"{item_type.capitalize()} ID {item_id} has no media URL or thumbnail URL.")
+            return None, "No image URL available"
+        url_to_use = thumbnail_url if thumbnail_url else media_url
+        logging.info(f"Downloading image for {item_type} ID {item_id} from {url_to_use}")
+        try:
+            response = requests.get(url_to_use, stream=True, timeout=20)
+            response.raise_for_status()
+            image_bytes = response.content
+            if not image_bytes:
+                return None, "Downloaded image is empty"
+            image_stream = io.BytesIO(image_bytes)
+            pil_image = Image.open(image_stream)
+            predicted_label = process_image(pil_image, self.client_username)
+            if not predicted_label:
+                logging.info(f"Vision model couldn't find a label for {item_type} ID {item_id}")
+                return None, "Model couldn't determine a label"
+            return predicted_label, None
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Failed to download image for {item_type} {item_id}: {str(e)}")
+            return None, f"Failed to download image: {str(e)}"
+        except Image.UnidentifiedImageError:
+            logging.error(f"Could not identify image for {item_type} {item_id} (not a valid image format or corrupted). URL: {url_to_use}")
+            return None, "Invalid image format or corrupted file."
+        except Exception as e:
+            logging.error(f"Error processing image for {item_type} {item_id}: {str(e)}")
+            return None, f"Error processing image: {str(e)}"
+
+    # --- Post Methods ---
+    def fetch_instagram_posts(self):
+        self._validate_client_access()
+        logging.info(f"Fetching Instagram posts for client: {self.client_username or 'admin'}")
+        try:
+            result = InstagramService.get_posts(client_username=self.client_username)
+            if result:
+                logging.info(f"Instagram posts fetched/updated successfully for client: {self.client_username or 'admin'}")
+                reload_success = self.reload_main_app_memory()
+                if reload_success:  
+                    return result
+                else:
+                    logging.ERROR('Failed to reload_main_app_memory after fetching Instagram posts')
+                    return False
+            else:
+                logging.warning(f"Failed to fetch/update Instagram posts for client: {self.client_username or 'admin'}")
+            return result
+        except Exception as e:
+            logging.error(f"Failed to fetch Instagram posts for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return False
+
+    def get_posts(self):
+        self._validate_client_access()
+        logging.info(f"Fetching stored Instagram posts for client: {self.client_username or 'admin'}")
+        try:
+            posts = Post.get_all(client_username=self.client_username)
+            post_data = [
+                {"id": post.get('id'), "media_url": post.get('media_url'), "thumbnail_url": post.get('thumbnail_url'),
+                 "caption": post.get('caption'), "label": post.get('label', ''), "media_type": post.get('media_type')}
+                for post in posts if post.get('id')
+            ]
+            logging.info(f"Successfully fetched {len(post_data)} Instagram posts for client: {self.client_username or 'admin'}")
+            return post_data
+        except Exception as e:
+            logging.error(f"Error fetching stored Instagram posts for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return []
+
+    def set_post_label(self, post_id, label):
+        self._validate_client_access('vision')
+        logging.info(f"Setting label '{label}' for post ID: {post_id} for client: {self.client_username or 'admin'}")
+        if not post_id:
+            logging.error("Cannot set post label: post_id is missing.")
+            return False
+        try:
+            success = Post.set_label(post_id, label, client_username=self.client_username)
+            if success:
+                logging.info(f"Label update successful for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return True
+            else:
+                logging.warning(f"Could not set label for post ID {post_id} for client: {self.client_username or 'admin'}")
+                return False
+        except Exception as e:
+            logging.error(f"Error setting label for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return False
+
+    def remove_post_label(self, post_id):
+        self._validate_client_access('vision')
+        logging.info(f"Removing label for post ID: {post_id} for client: {self.client_username or 'admin'}")
+        if not post_id:
+            logging.error("Cannot remove post label: post_id is missing.")
+            return False
+        try:
+            success = Post.remove_label(post_id, client_username=self.client_username)
+            if success:
+                logging.info(f"Label removed for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return True
+            else:
+                logging.warning(f"Could not remove label for post ID {post_id} for client: {self.client_username or 'admin'}")
+                return False
+        except Exception as e:
+            logging.error(f"Error removing label for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return False
+
+    def unset_all_post_labels(self):
+        self._validate_client_access('vision')
+        logging.info(f"Unsetting labels from all posts for client: {self.client_username or 'admin'}")
+        try:
+            updated_count = Post.unset_all_labels(client_username=self.client_username)
+            logging.info(f"Successfully unset labels from {updated_count} posts for client: {self.client_username or 'admin'}")
+            return updated_count
+        except Exception as e:
+            logging.error(f"Error unsetting all post labels for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return 0
+
+    def set_single_post_label_by_model(self, post_id):
+        self._validate_client_access('vision')
+        logging.info(f"Processing post ID {post_id} for automatic labeling for client: {self.client_username or 'admin'}")
+        try:
+            post = Post.get_by_instagram_id(post_id, client_username=self.client_username)
+            if not post:
+                logging.warning(f"Post with ID {post_id} not found for client: {self.client_username or 'admin'}")
+                return {"success": False, "message": "Post not found"}
+            predicted_label, error_msg = self._process_media_for_labeling(post_id, post.get('media_url'), post.get('thumbnail_url'), "post")
+            if error_msg:
+                return {"success": False, "message": error_msg}
+            if predicted_label:
+                label_set_success = self.set_post_label(post_id, predicted_label)
+                if label_set_success:
+                    logging.info(f"Post ID {post_id} automatically labeled as '{predicted_label}' for client: {self.client_username or 'admin'}")
+                    return {"success": True, "label": predicted_label}
+                else:
+                    return {"success": False, "message": "Failed to set label in database"}
+            return {"success": False, "message": "Model couldn't determine a label"}
+        except Exception as e:
+            logging.error(f"Error in set_single_post_label_by_model for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return {"success": False, "message": f"Unexpected error: {str(e)}"}
+
+    def set_post_labels_by_model(self):
+        self._validate_client_access('vision')
+        logging.info(f"Starting automatic labeling of posts by model for client: {self.client_username or 'admin'}")
+        processed_count, labeled_count, errors = 0, 0, []
+        all_posts = Post.get_all(client_username=self.client_username)
+        if not all_posts:
+            return {'success': True, 'processed': 0, 'labeled': 0, 'message': 'No posts found.'}
+        unlabeled_posts = [p for p in all_posts if not p.get('label')]
+        logging.info(f"Found {len(unlabeled_posts)} posts without labels for client: {self.client_username or 'admin'}")
+        if not unlabeled_posts:
+            return {'success': True, 'processed': 0, 'labeled': 0, 'message': 'All posts are already labeled.'}
+        for post in unlabeled_posts:
+            post_id = post.get('id')
+            processed_count += 1
+            if not post_id: errors.append(f"Post missing Instagram ID: MongoDB _id {post.get('_id', 'N/A')}"); continue
+            predicted_label, error_msg = self._process_media_for_labeling(post_id, post.get('media_url'), post.get('thumbnail_url'), "post")
+            if error_msg:
+                errors.append(f"Post ID {post_id}: {error_msg}"); continue
+            if predicted_label:
+                if self.set_post_label(post_id, predicted_label): labeled_count += 1
+                else: errors.append(f"Failed to set label for post ID {post_id} after prediction '{predicted_label}'.")
+        message = f"Processed {processed_count} unlabeled posts. Set labels for {labeled_count} posts for client: {self.client_username or 'admin'}"
+        if errors: message += f" Encountered {len(errors)} errors. First few: {'; '.join(errors[:3])}"
+        logging.info(message)
+        return {'success': not errors, 'processed': processed_count, 'labeled': labeled_count, 'message': message, 'errors': errors}
+
+    def download_post_labels(self):
+        self._validate_client_access()
+        logging.info(f"Preparing posts organized by labels for download for client: {self.client_username or 'admin'}")
+        try:
+            posts = Post.get_all(client_username=self.client_username)
+            if not posts: return {}
+            labeled_posts = {}
+            for post in posts:
+                label = post.get('label', '').strip()
+                if not label: continue
+                image_url = post.get('thumbnail_url') or post.get('media_url')
+                if image_url:
+                    if label not in labeled_posts: labeled_posts[label] = []
+                    labeled_posts[label].append(image_url)
+                children = post.get('children', [])
+                if children:
+                    for child in children:
+                        child_url = child.get('thumbnail_url') or child.get('media_url')
+                        if child_url:
+                            if label not in labeled_posts: labeled_posts[label] = []
+                            labeled_posts[label].append(child_url)
+            logging.info(f"Successfully prepared posts by label, found {len(labeled_posts)} unique labels for client: {self.client_username or 'admin'}")
+            return labeled_posts
+        except Exception as e:
+            logging.error(f"Error preparing post labels for download: {str(e)}", exc_info=True)
+            return {"error": str(e)}
+
+    def get_post_fixed_responses(self, post_id):
+        self._validate_client_access('fixed_response')
+        logging.info(f"Fetching fixed responses for post ID: {post_id} for client: {self.client_username or 'admin'}")
+        try:
+            responses = Post.get_fixed_responses(post_id, client_username=self.client_username)
+            if responses:
+                logging.info(f"Fixed responses found for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return responses
+            else:
+                logging.info(f"No fixed responses found for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return []
+        except Exception as e:
+            logging.error(f"Error fetching fixed responses for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}")
+            return []
+
+    def create_or_update_post_fixed_response(self, post_id, trigger_keyword, comment_response_text=None, direct_response_text=None):
+        self._validate_client_access('fixed_response')
+        logging.info(f"Adding/updating fixed response for post ID: {post_id} with trigger: {trigger_keyword} for client: {self.client_username or 'admin'}")
+        try:
+            result = Post.add_fixed_response(post_id, trigger_keyword, self.client_username, comment_response_text, direct_response_text)
+            if result:
+                logging.info(f"Fixed response added/updated successful for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                reload_success = self.reload_main_app_memory()
+                if reload_success:  
+                    return True
+                else:
+                    logging.ERROR('Failed to reload_main_app_memory after adding/updating fixed response')
+                    return False   
+            else:
+                logging.warning(f"Failed to add/update fixed response for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return False
+        except Exception as e:
+            logging.error(f"Error adding/updating fixed response for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}")
+            return False
+
+    def delete_post_fixed_response(self, post_id, trigger_keyword):
+        self._validate_client_access('fixed_response')
+        logging.info(f"Deleting fixed response for post ID: {post_id} with trigger: {trigger_keyword} for client: {self.client_username or 'admin'}")
+        try:
+            result = Post.delete_fixed_response(post_id, trigger_keyword, client_username=self.client_username)
+            if result:
+                logging.info(f"Fixed response deleted successfully for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                reload_success = self.reload_main_app_memory()
+                if reload_success:  
+                    return True
+                else:
+                    logging.ERROR('Failed to reload_main_app_memory after deleting fixed response')
+                    return False
+            else:
+                logging.warning(f"Failed to delete fixed response for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return False
+        except Exception as e:
+            logging.error(f"Error deleting fixed response for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}")
+            return False
+
+    def set_post_admin_explanation(self, post_id, explanation):
+        self._validate_client_access()
+        logging.info(f"Setting admin explanation for post ID: {post_id} for client: {self.client_username or 'admin'}")
+        try:
+            result = Post.set_admin_explanation(post_id, explanation, client_username=self.client_username)
+            if result:
+                logging.info(f"Admin explanation set for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return True
+            else:
+                logging.warning(f"Failed to set admin explanation for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return False
+        except Exception as e:
+            logging.error(f"Error setting admin explanation for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}")
+            return False
+
+    def get_post_admin_explanation(self, post_id):
+        self._validate_client_access()
+        logging.info(f"Fetching admin explanation for post ID: {post_id} for client: {self.client_username or 'admin'}")
+        try:
+            explanation = Post.get_admin_explanation(post_id, client_username=self.client_username)
+            if explanation is not None:
+                logging.info(f"Admin explanation found for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return explanation
+            else:
+                logging.info(f"No admin explanation for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return None
+        except Exception as e:
+            logging.error(f"Error fetching admin explanation for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}")
+            return None
+
+    def remove_post_admin_explanation(self, post_id):
+        self._validate_client_access()
+        logging.info(f"Removing admin explanation for post ID: {post_id} for client: {self.client_username or 'admin'}")
+        try:
+            result = Post.remove_admin_explanation(post_id, client_username=self.client_username)
+            if result:
+                logging.info(f"Admin explanation removed for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return True
+            else:
+                logging.warning(f"Failed to remove admin explanation for post ID: {post_id} for client: {self.client_username or 'admin'}")
+                return False
+        except Exception as e:
+            logging.error(f"Error removing admin explanation for post ID {post_id} for client {self.client_username or 'admin'}: {str(e)}")
+            return False
+
+    # --- Story Methods ---
+    def fetch_instagram_stories(self):
+        self._validate_client_access()
+        logging.info(f"Fetching Instagram stories for client: {self.client_username or 'admin'}")
+        try:
+            result = InstagramService.get_stories(client_username=self.client_username)
+            if result:
+                logging.info(f"Instagram stories fetched/updated successfully for client: {self.client_username or 'admin'}")
+                reload_success = self.reload_main_app_memory()
+                if reload_success:  
+                    return result
+                else:
+                    logging.ERROR('Failed to reload_main_app_memory after fetching Instagram stories')
+                    return False
+            else:
+                logging.warning(f"Failed to fetch/update Instagram stories for client: {self.client_username or 'admin'}")
+            return result
+        except Exception as e:
+            logging.error(f"Failed to fetch Instagram stories for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return False
+
+    def get_stories(self):
+        self._validate_client_access()
+        logging.info(f"Fetching stored Instagram stories for client: {self.client_username or 'admin'}")
+        try:
+            stories = Story.get_all(client_username=self.client_username)
+            story_data = [
+                {"id": story.get('id'), "media_url": story.get('media_url'), "thumbnail_url": story.get('thumbnail_url'),
+                 "caption": story.get('caption'), "label": story.get('label', ''), "media_type": story.get('media_type')}
+                for story in stories if story.get('id')
+            ]
+            logging.info(f"Successfully fetched {len(story_data)} Instagram stories from DB for client: {self.client_username or 'admin'}")
+            return story_data
+        except Exception as e:
+            logging.error(f"Error fetching stored Instagram stories for client {self.client_username or 'admin'}: {str(e)}", exc_info=True)
+            return []
+
+    def set_story_label(self, story_id, label):
+        self._validate_client_access('vision')
+        logging.info(f"Setting label '{label}' for story ID: {story_id} for client: {self.client_username or 'admin'}")
+        if not story_id:
+            logging.error("Cannot set story label: story_id is missing.")
+            return False
+        try:
+            success = Story.set_label(story_id, label, client_username=self.client_username)
+            if success:
+                logging.info(f"Label update successful for story ID: {story_id}"); return True
+            else:
+                logging.warning(f"Could not set label for story ID {story_id}"); return False
+        except Exception as e:
+            logging.error(f"Error setting label for story ID {story_id}: {str(e)}", exc_info=True); return False
+
+    def remove_story_label(self, story_id):
+        self._validate_client_access('vision')
+        logging.info(f"Removing label for story ID: {story_id} for client: {self.client_username or 'admin'}")
+        if not story_id:
+            logging.error("Cannot remove story label: story_id is missing."); return False
+        try:
+            success = Story.remove_label(story_id, client_username=self.client_username)
+            if success: logging.info(f"Label removed for story ID: {story_id}"); return True
+            else: logging.warning(f"Could not remove label for story ID {story_id}"); return False
+        except Exception as e: logging.error(f"Error removing label for story ID {story_id}: {str(e)}", exc_info=True); return False
+
+    def unset_all_story_labels(self):
+        self._validate_client_access('vision')
+        logging.info(f"Unsetting labels from all stories for client: {self.client_username or 'admin'}")
+        try:
+            updated_count = Story.unset_all_labels(client_username=self.client_username)
+            logging.info(f"Successfully unset labels from {updated_count} stories for client: {self.client_username or 'admin'}")
+            return updated_count
+        except Exception as e: logging.error(f"Error unsetting all story labels: {str(e)}", exc_info=True); return 0
+
+    def set_single_story_label_by_model(self, story_id):
+        self._validate_client_access('vision')
+        logging.info(f"Processing story ID {story_id} for automatic labeling for client: {self.client_username or 'admin'}")
+        try:
+            story = Story.get_by_instagram_id(story_id, client_username=self.client_username)
+            if not story:
+                logging.warning(f"Story with ID {story_id} not found."); return {"success": False, "message": "Story not found"}
+            media_type = story.get('media_type', '').upper()
+            media_url = story.get('media_url')
+            thumbnail_url = story.get('thumbnail_url')
+            if media_type == 'VIDEO' and not thumbnail_url:
+                logging.info(f"Story ID {story_id} is a video without a thumbnail. Skipping AI labeling.")
+                return {"success": False, "message": "Cannot label video without thumbnail."}
+            predicted_label, error_msg = self._process_media_for_labeling(story_id, media_url, thumbnail_url, "story")
+            if error_msg:
+                return {"success": False, "message": error_msg}
+            if predicted_label:
+                label_set_success = self.set_story_label(story_id, predicted_label)
+                if label_set_success:
+                    logging.info(f"Story ID {story_id} automatically labeled as '{predicted_label}'")
+                    return {"success": True, "label": predicted_label}
+                else:
+                    return {"success": False, "message": "Failed to set label in database"}
+            return {"success": False, "message": "Model couldn't determine a label"}
+        except Exception as e:
+            logging.error(f"Error in set_single_story_label_by_model for story ID {story_id}: {str(e)}", exc_info=True)
+            return {"success": False, "message": f"Unexpected error: {str(e)}"}
+
+    def set_story_labels_by_model(self):
+        self._validate_client_access('vision')
+        logging.info(f"Starting automatic labeling of stories by model for client: {self.client_username or 'admin'}")
+        processed_count, labeled_count, errors = 0, 0, []
+        all_stories = Story.get_all(client_username=self.client_username)
+        if not all_stories:
+            return {'success': True, 'processed': 0, 'labeled': 0, 'message': 'No stories found.'}
+        unlabeled_stories = [s for s in all_stories if not s.get('label')]
+        logging.info(f"Found {len(unlabeled_stories)} stories without labels for client: {self.client_username or 'admin'}")
+        if not unlabeled_stories:
+            return {'success': True, 'processed': 0, 'labeled': 0, 'message': 'All stories are already labeled.'}
+        for story in unlabeled_stories:
+            story_id = story.get('id')
+            processed_count += 1
+            if not story_id: errors.append(f"Story missing Instagram ID: MongoDB _id {story.get('_id', 'N/A')}"); continue
+            media_type = story.get('media_type', '').upper()
+            media_url = story.get('media_url')
+            thumbnail_url = story.get('thumbnail_url')
+            if media_type == 'VIDEO' and not thumbnail_url:
+                errors.append(f"Story ID {story_id}: Cannot label video without thumbnail."); continue
+            predicted_label, error_msg = self._process_media_for_labeling(story_id, media_url, thumbnail_url, "story")
+            if error_msg:
+                errors.append(f"Story ID {story_id}: {error_msg}"); continue
+            if predicted_label:
+                if self.set_story_label(story_id, predicted_label): labeled_count += 1
+                else: errors.append(f"Failed to set label for story ID {story_id} after prediction '{predicted_label}'.")
+        message = f"Processed {processed_count} unlabeled stories. Set labels for {labeled_count} stories for client: {self.client_username or 'admin'}"
+        if errors: message += f" Encountered {len(errors)} errors. First few: {'; '.join(errors[:3])}"
+        logging.info(message)
+        return {'success': not errors, 'processed': processed_count, 'labeled': labeled_count, 'message': message, 'errors': errors}
+
+    def download_story_labels(self):
+        self._validate_client_access()
+        logging.info(f"Preparing stories organized by labels for download for client: {self.client_username or 'admin'}")
+        try:
+            stories = Story.get_all(client_username=self.client_username)
+            if not stories: return {}
+            labeled_stories = {}
+            for story in stories:
+                label = story.get('label', '').strip()
+                if not label: continue
+                image_url = story.get('thumbnail_url') or story.get('media_url')
+                if not image_url: continue
+                if label not in labeled_stories: labeled_stories[label] = []
+                labeled_stories[label].append(image_url)
+            logging.info(f"Successfully prepared stories by label, found {len(labeled_stories)} unique labels for client: {self.client_username or 'admin'}")
+            return labeled_stories
+        except Exception as e:
+            logging.error(f"Error preparing story labels for download: {str(e)}", exc_info=True)
+            return {"error": str(e)}
+
+    def get_story_fixed_responses(self, story_id):
+        self._validate_client_access('fixed_response')
+        logging.info(f"Fetching fixed responses for story ID: {story_id} for client: {self.client_username or 'admin'}")
+        try:
+            responses = Story.get_fixed_responses(story_id, client_username=self.client_username)
+            if responses: logging.info(f"Fixed responses found for story ID: {story_id}"); return responses
+            else: logging.info(f"No fixed responses found for story ID: {story_id}"); return []
+        except Exception as e: logging.error(f"Error fetching fixed responses for story ID {story_id}: {str(e)}"); return []
+
+    def create_or_update_story_fixed_response(self, story_id, trigger_keyword, direct_response_text=None):
+        self._validate_client_access('fixed_response')
+        logging.info(f"Adding/updating fixed response for story ID: {story_id} with trigger: {trigger_keyword} for client: {self.client_username or 'admin'}")
+        try:
+            result = Story.add_fixed_response(
+                story_id,
+                trigger_keyword,
+                client_username=self.client_username,
+                direct_response_text=direct_response_text
+            )
+            if result: 
+                logging.info(f"Fixed response added/updated successful for story ID: {story_id}")
+                reload_success = self.reload_main_app_memory()
+                if reload_success:  
+                    return True
+                else:
+                    logging.warning(f"Failed to reload main app memory for client: {self.client_username or 'admin'}")
+                    return False
+            else: logging.warning(f"Failed to add/update fixed response for story ID: {story_id}"); return False
+        except Exception as e: logging.error(f"Error adding/updating fixed response for story ID {story_id}: {str(e)}"); return False
+
+    def delete_story_fixed_response(self, story_id, trigger_keyword):
+        self._validate_client_access('fixed_response')
+        logging.info(f"Deleting fixed response for story ID: {story_id} with trigger: {trigger_keyword} for client: {self.client_username or 'admin'}")
+        try:
+            result = Story.delete_fixed_response(story_id, trigger_keyword, client_username=self.client_username)
+            if result:
+                logging.info(f"Fixed response deleted successfully for story ID: {story_id}")
+                reload_success = self.reload_main_app_memory()
+                if reload_success:  
+                    return True
+                else:
+                    logging.warning(f"Failed to reload main app memory for client: {self.client_username or 'admin'}")
+                    return False
+            else: logging.warning(f"Failed to delete fixed response for story ID: {story_id}"); return False
+        except Exception as e: logging.error(f"Error deleting fixed response for story ID {story_id}: {str(e)}"); return False
+
+    def set_story_admin_explanation(self, story_id, explanation):
+        self._validate_client_access()
+        logging.info(f"Setting admin explanation for story ID: {story_id} for client: {self.client_username or 'admin'}")
+        try:
+            result = Story.set_admin_explanation(story_id, explanation, client_username=self.client_username)
+            if result: logging.info(f"Admin explanation set for story ID: {story_id}"); return True
+            else: logging.warning(f"Failed to set admin explanation for story ID: {story_id}"); return False
+        except Exception as e: logging.error(f"Error setting admin explanation for story ID {story_id}: {str(e)}"); return False
+
+    def get_story_admin_explanation(self, story_id):
+        self._validate_client_access()
+        logging.info(f"Fetching admin explanation for story ID: {story_id} for client: {self.client_username or 'admin'}")
+        try:
+            explanation = Story.get_admin_explanation(story_id, client_username=self.client_username)
+            if explanation is not None: logging.info(f"Admin explanation found for story ID: {story_id}"); return explanation
+            else: logging.info(f"No admin explanation for story ID: {story_id}"); return None
+        except Exception as e: logging.error(f"Error fetching admin explanation for story ID {story_id}: {str(e)}"); return None
+
+    def remove_story_admin_explanation(self, story_id):
+        self._validate_client_access()
+        logging.info(f"Removing admin explanation for story ID: {story_id} for client: {self.client_username or 'admin'}")
+        try:
+            result = Story.remove_admin_explanation(story_id, client_username=self.client_username)
+            if result: logging.info(f"Admin explanation removed for story ID: {story_id}"); return True
+            else: logging.warning(f"Failed to remove admin explanation for story ID: {story_id}"); return False
+        except Exception as e: logging.error(f"Error removing admin explanation for story ID {story_id}: {str(e)}"); return False
+
+    def get_all_users(self):
+        """Wrapper to get all Instagram users for the client."""
+        return User.get_users_by_platform_for_client("instagram", self.client_username)
+
+    def get_user_messages(self, user_id):
+        """Wrapper for User model's get_user_messages method."""
+        return User.get_user_messages(user_id, client_username=self.client_username, limit=100)
+    
+    def get_user_by_id(self, user_id):
+        """Wrapper for User model's get_by_id method."""
+        return User.get_by_id(user_id, client_username=self.client_username)
+
+    def get_message_statistics_by_role_within_timeframe_by_platform(self, time_frame, start_datetime, end_datetime, platform):
+        """Wrapper for User model's message statistics method."""
+        return User.get_message_statistics_by_role_within_timeframe_by_platform(
+            time_frame, start_datetime, end_datetime, platform, self.client_username
+        )
+
+    def get_user_status_counts_within_timeframe_by_platform(self, start_datetime, end_datetime, platform):
+        """Wrapper for User model's user status counts method."""
+        return User.get_user_status_counts_within_timeframe_by_platform(
+            start_datetime, end_datetime, platform, self.client_username
+        )
+
+    def get_total_users_count_within_timeframe_by_platform(self, start_datetime, end_datetime, platform):
+        """Wrapper for User model's total user count method."""
+        return User.get_total_users_count_within_timeframe_by_platform(
+            start_datetime, end_datetime, platform, self.client_username
+        )
+
+    def get_user_status_counts_by_platform(self, platform):
+        """Wrapper for User model's user status counts method for all time."""
+        return User.get_user_status_counts_by_platform(platform, self.client_username)
+
+    def get_total_users_count_by_platform(self, platform):
+        """Wrapper for User model's total user count method for all time."""
+        return User.get_total_users_count_by_platform(platform, self.client_username)
+    
+    def get_paginated_users(self, page=1, limit=25, status_filter=None):
+        """
+        Wrapper to get a paginated and filtered list of Instagram users for the client.
+        """
+        return User.get_paginated_users_by_platform(
+            platform="instagram",
+            client_username=self.client_username,
+            page=page,
+            limit=limit,
+            status_filter=status_filter
+        )
+    
 #===============================================================================================================================
 class BaseSection:
     """Base class for UI sections"""
-    def __init__(self, backend):
-        self.backend = backend
+    def __init__(self, client_username=None):
+        self.backend = InstagramBackend(client_username=client_username)
         self.const = AppConstants()
 #===============================================================================================================================
-class AppStatusSection(BaseSection): #
-    """Handles application status settings and analytics""" #
-    def render(self):
-        try:
-            self._render_toggles() #
-            st.write("---") #
-            self._render_analytics_dashboard() #
-            st.write("---") #
-        except RuntimeError as e: #
-            st.error(f"Error managing app status: {str(e)}") #
-
-    def _render_toggles(self): #
-        """Render configuration toggles""" #
-        settings = { #
-            "assistant": f"{self.const.ICONS['success']} Enable Assistant", #
-            "fixed_responses": f"{self.const.ICONS['success']} Enable Fixed Responses" #
-        }
-
-        for key, label in settings.items(): #
-            current_status = self.backend.get_app_setting(key) #
-            # Normalize current_status to boolean
-            current_status_bool = bool(current_status)
-            if isinstance(current_status, str):
-                current_status_bool = current_status.lower() == "true"
-            new_state = st.toggle(label, value=current_status_bool, key=f"{key}_toggle") #
-            if new_state != current_status_bool: #
-                self.backend.update_is_active(key, new_state) #
-                status_msg = "enabled" if new_state else "disabled" #
-                icon = self.const.ICONS['success'] if new_state else self.const.ICONS['error'] #
-                st.success(f"{icon} {key.replace('_', ' ').title()} {status_msg} successfully!") #
-
-    def _render_analytics_dashboard(self): #
-        """Render analytics dashboard with charts and statistics""" #
-        st.subheader(f"{self.const.ICONS['dashboard']} Analytics Dashboard") #
-        
-        # Create tabs for different analytics views
-        message_tab, user_tab = st.tabs([
-            f"{self.const.ICONS['chat']} Message Analytics",
-            f"{self.const.ICONS['user']} User Statistics"
-        ])
-        
-        with message_tab:
-            self._render_message_analytics()
-            
-        with user_tab:
-            self._render_user_statistics()
-
-    def _render_message_analytics(self): #
-        """Render message analytics with histogram charts""" #
-        try:
-            # Time frame and date range selectors
-            col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 1])
-            
-            with col1:
-                time_frame = st.selectbox(
-                    "Time Frame",
-                    options=["daily", "hourly"],
-                    index=0,
-                    key="message_time_frame"
-                )
-            
-            with col2:
-                # Default to last 7 days
-                default_start = datetime.now(timezone.utc) - timedelta(days=7)
-                start_date = st.date_input(
-                    "Start Date",
-                    value=default_start.date(),
-                    key="message_start_date"
-                )
-            
-            with col3:
-                start_time = st.time_input(
-                    "Start Time",
-                    value=default_start.time(),
-                    key="message_start_time"
-                )
-            
-            with col4:
-                # Default to now
-                default_end = datetime.now(timezone.utc)
-                end_date = st.date_input(
-                    "End Date",
-                    value=default_end.date(),
-                    key="message_end_date"
-                )
-                
-                end_time = st.time_input(
-                    "End Time",
-                    value=default_end.time(),
-                    key="message_end_time"
-                )
-            
-            with col5:
-                if st.button(f"{self.const.ICONS['update']} Refresh Data", key="refresh_message_data"):
-                    st.rerun()
-            
-            # Combine date and time
-            start_datetime = datetime.combine(start_date, start_time).replace(tzinfo=timezone.utc)
-            end_datetime = datetime.combine(end_date, end_time).replace(tzinfo=timezone.utc)
-            
-            # Validate date range
-            if start_datetime >= end_datetime:
-                st.error("Start date/time must be before end date/time.")
-                return
-            
-            # Fetch message statistics using the new timeframe method
-            message_stats = self.backend.get_message_statistics_by_role_within_timeframe(time_frame, start_datetime, end_datetime)
-            
-            if not message_stats:
-                st.info("No message data available for the selected time period.")
-                return
-            
-            # Prepare data for plotting
-            # Convert statistics to DataFrame
-            data_rows = []
-            for date_str, roles in message_stats.items():
-                for role, count in roles.items():
-                    data_rows.append({
-                        'Date': date_str,
-                        'Role': role,
-                        'Count': count
-                    })
-            
-            if not data_rows:
-                st.info("No message data to display.")
-                return
-                
-            df = pd.DataFrame(data_rows)
-            df['Date'] = pd.to_datetime(df['Date'])
-            df = df.sort_values('Date')
-            
-            # Create histogram chart
-            date_range_str = f"{start_datetime.strftime('%Y-%m-%d %H:%M')} to {end_datetime.strftime('%Y-%m-%d %H:%M')} UTC"
-            fig = px.bar(
-                df, 
-                x='Date', 
-                y='Count', 
-                color='Role',
-                title=f'Direct Messages by Role ({time_frame.title()} View - {date_range_str})',
-                labels={'Count': 'Number of Messages', 'Date': 'Time Period'},
-                color_discrete_map={
-                    'user': '#1f77b4',
-                    'assistant': '#ff7f0e', 
-                    'admin': '#2ca02c',
-                    'fixed_response': '#d62728'
-                }
-            )
-            
-            fig.update_layout(
-                xaxis_title="Time Period",
-                yaxis_title="Number of Messages",
-                legend_title="Message Role",
-                height=500,
-                showlegend=True
-            )
-            
-            # Format x-axis based on time frame
-            if time_frame == "hourly":
-                fig.update_xaxes(tickformat="%Y-%m-%d %H:%M")
-            else:
-                fig.update_xaxes(tickformat="%Y-%m-%d")
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Summary statistics
-            st.subheader("Summary Statistics")
-            
-            # Calculate totals by role
-            role_totals = df.groupby('Role')['Count'].sum().sort_values(ascending=False)
-            
-            cols = st.columns(len(role_totals))
-            for i, (role, total) in enumerate(role_totals.items()):
-                with cols[i]:
-                    st.metric(
-                        label=f"{role.replace('_', ' ').title()} Messages",
-                        value=f"{total:,}"
-                    )
-            
-            # Show raw data table
-            with st.expander("View Raw Data"):
-                st.dataframe(df, use_container_width=True)
-                
-        except Exception as e:
-            st.error(f"Error rendering message analytics: {str(e)}")
-
-    def _render_user_statistics(self): #
-        """Render user statistics and status counts""" #
-        try:
-            # Time window selector
-            col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
-            
-            with col1:
-                # Default to last 7 days
-                default_start = datetime.now(timezone.utc) - timedelta(days=7)
-                start_date = st.date_input(
-                    "Start Date",
-                    value=default_start.date(),
-                    key="user_stats_start_date"
-                )
-            
-            with col2:
-                start_time = st.time_input(
-                    "Start Time",
-                    value=default_start.time(),
-                    key="user_stats_start_time"
-                )
-            
-            with col3:
-                # Default to now
-                default_end = datetime.now(timezone.utc)
-                end_date = st.date_input(
-                    "End Date",
-                    value=default_end.date(),
-                    key="user_stats_end_date"
-                )
-            
-            with col4:
-                end_time = st.time_input(
-                    "End Time",
-                    value=default_end.time(),
-                    key="user_stats_end_time"
-                )
-            
-            # Combine date and time
-            start_datetime = datetime.combine(start_date, start_time).replace(tzinfo=timezone.utc)
-            end_datetime = datetime.combine(end_date, end_time).replace(tzinfo=timezone.utc)
-            
-            # Validate date range
-            if start_datetime >= end_datetime:
-                st.error("Start date/time must be before end date/time.")
-                return
-            
-            # Refresh button and time window toggle
-            col1, col2, col3 = st.columns([1, 1, 4])
-            with col1:
-                if st.button(f"{self.const.ICONS['update']} Refresh", key="refresh_user_stats"):
-                    st.rerun()
-            
-            with col2:
-                use_time_window = st.checkbox(
-                    "Use Time Window",
-                    value=True,
-                    key="use_time_window",
-                    help="Filter users by their last update time within the selected window"
-                )
-            
-            # Fetch user statistics based on time window selection
-            if use_time_window:
-                status_counts = self.backend.get_user_status_counts_within_timeframe(start_datetime, end_datetime)
-                total_users = self.backend.get_total_users_count_within_timeframe(start_datetime, end_datetime)
-                time_info = f"({start_datetime.strftime('%Y-%m-%d %H:%M')} to {end_datetime.strftime('%Y-%m-%d %H:%M')} UTC)"
-            else:
-                status_counts = self.backend.get_user_status_counts()
-                total_users = self.backend.get_total_users_count()
-                time_info = "(All time)"
-            
-            # Display total users with time info
-            st.metric(
-                label=f"Total Users {time_info}",
-                value=f"{total_users:,}"
-            )
-            
-            if not status_counts:
-                st.info("No user status data available for the selected time period.")
-                return
-            
-            # Filter out SCRAPED status
-            filtered_status_counts = {
-                status: count for status, count in status_counts.items() 
-                if status.upper() != 'SCRAPED'
-            }
-            
-            if not filtered_status_counts:
-                st.info("No user status data available (excluding SCRAPED users) for the selected time period.")
-                return
-            
-            # Create two columns for charts and metrics
-            chart_col, metrics_col = st.columns([2, 1])
-            
-            with chart_col:
-                # Create pie chart for user status distribution
-                # Prepare data for pie chart (excluding SCRAPED)
-                status_df = pd.DataFrame([
-                    {'Status': status, 'Count': count} 
-                    for status, count in filtered_status_counts.items()
-                ])
-                
-                fig = px.pie(
-                    status_df,
-                    values='Count',
-                    names='Status',
-                    title=f'User Status Distribution {time_info}',
-                    color_discrete_sequence=px.colors.qualitative.Set3
-                )
-                
-                # Show only percentages, no labels
-                fig.update_traces(textposition='inside', textinfo='percent')
-                fig.update_layout(height=400)
-                
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with metrics_col:
-                st.subheader("Status Breakdown")
-                
-                # Sort statuses by count (descending) - excluding SCRAPED
-                sorted_statuses = sorted(filtered_status_counts.items(), key=lambda x: x[1], reverse=True)
-                
-                for status, count in sorted_statuses:
-                    # Format status name for display
-                    display_status = status.replace('_', ' ').title()
-                    
-                    # Remove percentage display as requested
-                    st.metric(
-                        label=display_status,
-                        value=f"{count:,}"
-                    )
-            
-        except Exception as e:
-            st.error(f"Error rendering user statistics: {str(e)}")
-
-
-class ProductScraperSection(BaseSection):
-    """Handles product scraping functionality and additional info management."""
-    def render(self):
-        self._render_action_buttons()
-        self._render_product_table_only()
-        st.write("---")  # Separator between product table and additional info
-        self._render_additional_info_section()
-        st.write("---") # Original separator at the end of the section
-
-    def _render_action_buttons(self):
-        """Renders top action buttons like Update Products and Rebuild VS."""
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button(f"{self.const.ICONS['update']} Update Products",
-                        help="Add new products only", use_container_width=True):
-                self._handle_scraping_action(self.backend.update_products) # Note: pass function reference
-
-        with col2:
-            if st.button(f"{self.const.ICONS['brain']} Rebuild VS",  # Changed icon
-                        key="update_vs_btn_top",
-                        help="Rebuild Vector Store for Additional Info. This may take time.",
-                        use_container_width=True):
-                try:
-                    with st.spinner("Rebuilding Additional Info Vector Store... Please wait."):
-                        success = self.backend.rebuild_files_and_vs()
-                        if success:
-                            st.success(f"{self.const.ICONS['success']} Additional info AI data rebuilt successfully!")
-                        else:
-                            st.error(f"{self.const.ICONS['error']} Failed to rebuild additional info AI data.")
-                except Exception as e:
-                    st.error(f"{self.const.ICONS['error']} Error during rebuild: {str(e)}")
-
-    def _handle_scraping_action(self, action_function): # Renamed parameter for clarity
-        """Handles the execution of scraping-related actions with spinner and messages."""
-        try:
-            # Assuming MESSAGES["scraping_start"] is generic enough, or use a specific one
-            with st.spinner(self.const.MESSAGES.get("update_start", "Processing...")):
-                action_function() # Call the passed function
-                st.success(f"{self.const.ICONS['success']} Operation completed!")
-                st.rerun()
-        except Exception as e:
-            logging.error(f"Scraping action failed: {e}", exc_info=True)
-            st.error(f"{self.const.ICONS['error']} Operation failed: {str(e)}")
-
-    def _render_product_table_only(self):
-        """Renders only the product table."""
-        st.subheader(f"{self.const.ICONS['preview']} Product Table")
-        try:
-            products = self.backend.get_products()
-            if products:
-                # Convert to DataFrame if not already
-                if not isinstance(products, pd.DataFrame):
-                    products = pd.DataFrame(products)
-                # Convert 'Price' column to string if it contains dicts
-                if 'Price' in products.columns:
-                    products['Price'] = products['Price'].apply(lambda x: str(x) if isinstance(x, dict) else x)
-                st.dataframe(
-                    products,
-                    column_config={
-                        "Link": st.column_config.LinkColumn("Product Link"),
-                    },
-                    use_container_width=True,
-                    height=400
-                )
-            else:
-                st.info("No products found. Click 'Update Products' to get started or check your data source.")
-        except Exception as e:
-            logging.error(f"Failed to load products: {e}", exc_info=True)
-            st.error(f"Failed to load products: {str(e)}")
-
-    def _render_additional_info_section(self):
-        """Renders the 'Additional info' section with tabs for editing and adding."""
-        st.subheader(f"{self.const.ICONS['paper_and_pen']} Additional info")
-
-        edit_tab, add_tab = st.tabs(["Edit Existing", "Add New"])
-
-        with add_tab:
-            with st.form(key="add_additionalinfo_form"):
-                title = st.text_input("Title", key="app_setting_title",
-                                      placeholder="Enter a descriptive title for the info")
-                text = st.text_area("Text", key="app_setting_text", height=150, # Adjusted height
-                                   placeholder="Enter your text content here")
-                submit = st.form_submit_button(f"{self.const.ICONS['save']} Save Info", use_container_width=True)
-
-            if submit:
-                if not title.strip():
-                    st.error("Title is required.")
-                elif not text.strip():
-                    st.error("Text content is required.")
-                else:
-                    with st.spinner("Saving..."):
-                        success = self.backend.add_additionalinfo(title.strip(), text.strip())
-                        if success:
-                            st.success(f"'{title.strip()}' saved successfully!")
-                            # Consider st.rerun() if the list on the edit tab should update immediately
-                        else:
-                            st.error(f"Failed to save '{title.strip()}'.")
-
-        with edit_tab:
-            app_settings = self.backend.get_additionalinfo()
-            if not app_settings:
-                st.info("No saved additional info found. Use the 'Add New' tab to create some.")
-            else:
-                if 'editing_app_setting_key' not in st.session_state:
-                    st.session_state['editing_app_setting_key'] = None
-
-                for setting in app_settings:
-                    key = setting["key"]
-                    value = setting["value"]
-
-                    if st.session_state.get('editing_app_setting_key') == key:
-                        # Editing mode for this item
-                        with st.container(border=True):
-                            with st.form(key=f"edit_app_setting_form_{key}"):
-                                st.subheader(f"Editing: {key}")
-                                new_value = st.text_area("Content", value=value, key=f"edit_value_{key}",
-                                                          height=200, label_visibility="collapsed")
-
-                                form_cols = st.columns(2)
-                                with form_cols[0]:
-                                    update_btn = st.form_submit_button(f"{self.const.ICONS['save']} Update",
-                                                                    use_container_width=True)
-                                with form_cols[1]:
-                                    cancel_btn = st.form_submit_button("Cancel", type="secondary",
-                                                                     use_container_width=True)
-
-                            if update_btn:
-                                if not new_value.strip():
-                                    st.error("Text content cannot be empty.")
-                                else:
-                                    with st.spinner(f"Updating '{key}'..."):
-                                        success = self.backend.add_additionalinfo(key, new_value.strip()) # Assuming add_additionalinfo can also update
-                                        if success:
-                                            st.success(f"'{key}' updated successfully!")
-                                            st.session_state['editing_app_setting_key'] = None
-                                            st.rerun()
-                                        else:
-                                            st.error(f"Failed to update '{key}'.")
-                            elif cancel_btn:
-                                st.session_state['editing_app_setting_key'] = None
-                                st.rerun()
-                    else:
-                        # Display mode for this item (not being edited)
-                        item_cols = st.columns([0.7, 0.15, 0.15]) # Key | Edit | Delete
-                        with item_cols[0]:
-                            st.markdown(f"**{key}**")
-                            # Optionally, show a preview of the text if it's very short, or word/char count
-                            # st.caption(f"{len(value.split())} words" if value else "Empty")
-
-                        with item_cols[1]:
-                            if st.button("Edit", key=f"edit_btn_{key}", use_container_width=True, type="secondary"):
-                                st.session_state['editing_app_setting_key'] = key
-                                st.rerun()
-                        with item_cols[2]:
-                            if st.button(f"{self.const.ICONS['delete']}", key=f"remove_btn_{key}", use_container_width=True, help=f"Delete '{key}'"):
-                                with st.spinner(f"Deleting '{key}'..."):
-                                    success = self.backend.delete_additionalinfo(key)
-                                    if success:
-                                        st.success(f"'{key}' deleted successfully!")
-                                        if st.session_state.get('editing_app_setting_key') == key: # Clear editing state if deleted item was being edited
-                                            st.session_state['editing_app_setting_key'] = None
-                                        st.rerun()
-                                    else:
-                                        st.error(f"Failed to delete '{key}'.")
-                        st.divider()
-
-class OpenAIManagementSection(BaseSection): #
-    """Handles OpenAI processing with improved UX (all calls via Backend).""" #
-    def render(self): #
-
-        vs_id = self.backend.get_vs_id() #
-        if vs_id is None: #
-            st.warning("No vector store currently available. Please connect to a vector store before testing the assistant.") #
-
-        settings_tab, chat_tab = st.tabs([ #
-            f"{self.const.ICONS['brain']} Assistant Settings", #
-            f"{self.const.ICONS['chat']} Test Assistant" #
-        ]) #
-
-        with settings_tab: #
-            self._render_settings_section() #
-
-        with chat_tab: #
-            if vs_id is not None: #
-                self._render_chat_testing_section() #
-            else: #
-                st.error("You need to connect to a vector store first before testing the assistant") #
-
-        st.markdown("---") #
-
-    def _render_settings_section(self): #
-        current_instructions = self.backend.get_assistant_instructions() #
-        current_temperature = self.backend.get_assistant_temperature() #
-        current_top_p = self.backend.get_assistant_top_p() #
-
-        new_instructions = st.text_area( #
-            "Assistant Instructions", #
-            value=current_instructions if current_instructions else "Enter instructions...", #
-            height=600, #
-            help="How the assistant should behave", #
-            label_visibility="collapsed" #
-        ) #
-
-        col1, col2, col3 = st.columns([4, 2, 4]) #
-
-        with col1: #
-            new_temperature = st.slider( #
-                "Temperature", #
-                min_value=0.0, #
-                max_value=2.0, #
-                value=float(current_temperature), #
-                step=0.01, #
-                help="Randomness (0=strict, 2=creative)" #
-            ) #
-
-        with col2: #
-            st.write("") #
-            update_btn = st.button( #
-                f"{self.const.ICONS['update']} Update All", #
-                use_container_width=True, #
-                help="Save all settings" #
-            ) #
-            st.write("") #
-
-        with col3: #
-            new_top_p = st.slider( #
-                "Top-P", #
-                min_value=0.0, #
-                max_value=1.0, #
-                value=float(current_top_p), #
-                step=0.01, #
-                help="Focus (1=broad, 0=narrow)" #
-            ) #
-
-        if update_btn: #
-            with st.spinner("Saving..."): #
-                results = { #
-                    'instructions': self.backend.update_assistant_instructions(new_instructions), #
-                    'temperature': self.backend.update_assistant_temperature(new_temperature), #
-                    'top_p': self.backend.update_assistant_top_p(new_top_p) #
-                } #
-
-                if all(r['success'] for r in results.values()): #
-                    st.success(f"{self.const.ICONS['success']} All settings saved!") #
-                else: #
-                    errors = [ #
-                        f"{name}: {result['message']}" #
-                        for name, result in results.items() #
-                        if not result['success'] #
-                    ] #
-                    st.error(f"{self.const.ICONS['error']} Issues: {', '.join(errors)}") #
-
-    def _render_chat_testing_section(self): #
-        st.subheader("Test your assistant") #
-
-        if 'thread_id' not in st.session_state: #
-            try: #
-                thread_id = self.backend.create_chat_thread() #
-                st.session_state['thread_id'] = thread_id #
-                st.session_state['messages'] = [] #
-                st.session_state['user_message_sent'] = True #
-                st.session_state['processed_file_ids'] = set() #
-            except Exception as e: #
-                st.error(f"Failed to create thread: {str(e)}") #
-                return #
-        if 'processed_file_ids' not in st.session_state: #
-             st.session_state['processed_file_ids'] = set() #
-
-
-        chat_container = st.container() #
-        chat_container.height = 400 #
-
-        input_container = st.container() #
-
-        new_user_input = None #
-
-        with input_container: #
-            uploaded_file = st.file_uploader( #
-                "Upload an image (optional)", #
-                type=None, #
-                key="chat_image_uploader" #
-            ) #
-
-            if uploaded_file is not None: #
-                if uploaded_file.file_id not in st.session_state['processed_file_ids']: #
-                    with st.spinner("Analyzing image..."): #
-                        try: #
-                            st.session_state['processed_file_ids'].add(uploaded_file.file_id) #
-
-                            if uploaded_file.type.startswith('image/'): #
-                                image_bytes = uploaded_file.getvalue() #
-                                analysis_result = self.backend.process_uploaded_image(image_bytes) #
-                                new_user_input = f"Analysis of uploaded image: {analysis_result}" #
-
-                                with chat_container: #
-                                    with st.chat_message("user"): #
-                                        st.image(image_bytes, width=150) #
-                                        st.write(new_user_input) #
-                            else: #
-                                st.error("Please upload an image file (JPG, PNG, etc.)") #
-                                new_user_input = None #
-
-                        except Exception as e: #
-                            st.error(f"Error handling image upload: {str(e)}") #
-                            new_user_input = None #
-
-
-            user_text_input = st.chat_input("Type your message here...") #
-
-            if user_text_input: #
-                new_user_input = user_text_input #
-
-
-        if new_user_input: #
-            st.session_state['messages'].append({"role": "user", "content": new_user_input}) #
-            st.session_state['user_message_sent'] = False #
-
-        with chat_container: #
-            for message in st.session_state.get('messages', []): #
-                 with st.chat_message(message["role"]): #
-                     st.write(message["content"]) #
-
-
-        if not st.session_state.get('user_message_sent', True): #
-            last_message = st.session_state['messages'][-1] if st.session_state['messages'] else None #
-
-            if last_message and last_message["role"] == "user": #
-                with st.spinner("Assistant is thinking..."): #
-                    try: #
-                        response = self.backend.send_message_to_thread( #
-                            st.session_state['thread_id'], #
-                            last_message["content"] #
-                        ) #
-                        st.session_state['messages'].append({"role": "assistant", "content": response}) #
-                        st.session_state['user_message_sent'] = True #
-
-                        st.rerun() #
-
-                    except Exception as e: #
-                        st.error(f"Error getting response: {str(e)}") #
-                        st.session_state['user_message_sent'] = True #
-
-class InstagramSection(BaseSection): #
-    """Handles Instagram-related functionality including posts, stories""" #
-    def __init__(self, backend): #
-        super().__init__(backend) #
-        if 'custom_labels' not in st.session_state: #
-            st.session_state['custom_labels'] = [] #
-        if 'post_page' not in st.session_state: #
-            st.session_state['post_page'] = 0 #
-        if 'posts_per_page' not in st.session_state: #
-            st.session_state['posts_per_page'] = 8 #
-        if 'post_filter' not in st.session_state: #
-            st.session_state['post_filter'] = "All" #
-        # Story-related session state
+class InstagramUI(BaseSection):
+    """Handles Instagram-related functionality including posts, stories"""
+    def __init__(self, client_username=None):
+        super().__init__(client_username)
+        if 'custom_labels' not in st.session_state:
+            st.session_state['custom_labels'] = []
+        if 'post_page' not in st.session_state:
+            st.session_state['post_page'] = 0
+        if 'posts_per_page' not in st.session_state:
+            st.session_state['posts_per_page'] = 8
+        if 'post_filter' not in st.session_state:
+            st.session_state['post_filter'] = "All"
         if 'story_page' not in st.session_state:
             st.session_state['story_page'] = 0
         if 'stories_per_page' not in st.session_state:
@@ -742,21 +714,521 @@ class InstagramSection(BaseSection): #
             st.session_state['selected_story_id'] = None
         if 'story_filter' not in st.session_state:
             st.session_state['story_filter'] = "All"
+        if 'selected_instagram_user' not in st.session_state:
+            st.session_state.selected_instagram_user = None
+        if 'selected_instagram_user_data' not in st.session_state:
+            st.session_state.selected_instagram_user_data = None
 
     def render(self):
+        self._render_controller_panel()
+        st.write("---")
+        
+        posts_tab, stories_tab, statistics_tab, chat_tab = st.tabs([
+            f"{self.const.ICONS['post']} Posts",
+            f"{self.const.ICONS['story']} Stories",
+            f"{self.const.ICONS['dashboard']} Statistics",
+            f"{self.const.ICONS['chat']} Chat"
+        ])
 
-        posts_tab, stories_tab = st.tabs([ #
-            f"{self.const.ICONS['post']} Posts", #
-            f"{self.const.ICONS['story']} Stories", #
-        ]) #
+        with posts_tab:
+            self._render_posts_tab()
 
-        with posts_tab: #
-            self._render_posts_tab() #
+        with stories_tab:
+            self._render_stories_tab()
+            
+        with statistics_tab:
+            self._render_statistics_tab()
 
-        with stories_tab: #
-            self._render_stories_tab() #
+        with chat_tab:
+            self._render_chat_tab()
 
-        st.write("---") #
+        st.write("---")
+
+    def _render_statistics_tab(self):
+        """Renders the combined statistics tab for messages and users."""
+        # --- Centralized Controls ---
+        col1, col2, col3 = st.columns([2, 2, 1])
+        key_suffix = "instagram_stats"
+        with col1:
+            time_frame = st.selectbox("Time Frame", options=["daily", "hourly"], index=1, key=f"time_frame_{key_suffix}")
+        with col2:
+            duration_options = {"1 day": 1, "7 days": 7, "1 month": 30, "3 months": 90, "All time": 0}
+            selected_duration = st.selectbox("Duration", options=list(duration_options.keys()), index=0, key=f"duration_{key_suffix}")
+            days_back = duration_options[selected_duration]
+        with col3:
+            st.markdown("_")
+            if st.button(f"{self.const.ICONS['update']} Refresh", key=f"refresh_{key_suffix}", width='stretch'):
+                st.rerun()
+        
+        end_datetime = datetime.now(timezone.utc)
+        start_datetime = end_datetime - timedelta(days=days_back)
+
+        st.write("---")
+        self._render_message_analytics(time_frame, start_datetime, end_datetime, days_back)
+        st.write("---")
+        self._render_user_statistics(start_datetime, end_datetime, days_back)
+
+    def _render_chat_tab(self):
+        """Renders the chat history and interaction tab."""
+        try:
+            user_list_col, chat_display_col = st.columns([1, 2])
+            with user_list_col:
+                self._render_user_sidebar()
+            with chat_display_col:
+                if st.session_state.selected_instagram_user and st.session_state.selected_instagram_user_data:
+                    self._display_user_info(st.session_state.selected_instagram_user_data)
+                    self._display_chat_messages(st.session_state.selected_instagram_user_data)
+                else:
+                    with st.container(border=True, height=700):
+                        st.info("Select a conversation from the list to view the chat history.")
+        except Exception as e:
+            st.error(f"Error rendering chat history: {str(e)}")
+    def _render_user_sidebar(self):
+        """
+        Renders an efficient, paginated, and filterable sidebar for the chat tab,
+        with display name logic matching the specified preference order.
+        """
+        with st.container(border=True):
+            # --- 1. Initialize Session State for Pagination and Filtering ---
+            if 'chat_page' not in st.session_state:
+                st.session_state.chat_page = 1
+            if 'chat_status_filter' not in st.session_state:
+                st.session_state.chat_status_filter = "All"
+
+            # --- 2. Add Filtering Controls ---
+            st.markdown("**Filter by Status**")
+            status_options = ["All"] + [status.value for status in UserStatus]
+            
+            def on_filter_change():
+                st.session_state.chat_page = 1
+
+            selected_status = st.selectbox(
+                "User Status",
+                options=status_options,
+                key='chat_status_filter',
+                on_change=on_filter_change,
+                label_visibility="collapsed"
+            )
+            
+            # --- 3. Fetch Paginated Data from Backend ---
+            status_to_query = None if selected_status == "All" else selected_status
+            
+            try:
+                paginated_data = self.backend.get_paginated_users(
+                    page=st.session_state.chat_page,
+                    limit=25,
+                    status_filter=status_to_query
+                )
+                users = paginated_data.get("users", [])
+                total_users = paginated_data.get("total_count", 0)
+                total_pages = paginated_data.get("total_pages", 1)
+
+                if not users:
+                    st.info("No Instagram users found with the selected filter.")
+                    return
+
+                # --- 4. Display User List ---
+                with st.container(height=550):
+                    for user in users:
+                        user_id = user.get("user_id")
+                        # Safeguard: although you expect user_id to always exist,
+                        # this prevents any future errors if a bad record is ever created.
+                        if not user_id:
+                            continue
+
+                        # ============================ REFINED LOGIC IS HERE ============================
+                        # Build the full name from parts that actually exist (are not None or empty).
+                        full_name_parts = [name for name in [user.get("first_name"), user.get("last_name")] if name]
+                        full_name = " ".join(full_name_parts)
+
+                        # Apply the display name logic in the specified order of preference.
+                        # The `or` operator in Python elegantly handles this: it returns the first truthy value.
+                        display_name = user.get("username") or full_name or user_id
+                        # ===============================================================================
+
+                        entry = st.container(border=True)
+                        col1, col2 = entry.columns([1, 4])
+                        
+                        profile_pic = self.const.ICONS["default_user"]
+                        col1.image(profile_pic, width=40, clamp=True)
+
+                        if col2.button(display_name, key=f"insta_user_select_{user_id}", width='stretch'):
+                            st.session_state.selected_instagram_user = user_id
+                            st.session_state.selected_instagram_user_data = self.backend.get_user_by_id(user_id)
+                            st.rerun()
+                
+                # --- 5. Add Pagination Controls ---
+                st.write("---")
+                nav_col1, nav_col2, nav_col3 = st.columns([2, 3, 2])
+
+                with nav_col1:
+                    if st.button(f"{self.const.ICONS['previous']} Prev", width='stretch', disabled=(st.session_state.chat_page <= 1)):
+                        st.session_state.chat_page -= 1
+                        st.rerun()
+                
+                with nav_col2:
+                    st.markdown(f"<div style='text-align: center;'>Page {st.session_state.chat_page} of {total_pages}</div>", unsafe_allow_html=True)
+                    st.caption(f"Total Users: {total_users}")
+
+                with nav_col3:
+                    if st.button(f"Next {self.const.ICONS['next']}", width='stretch', disabled=(st.session_state.chat_page >= total_pages)):
+                        st.session_state.chat_page += 1
+                        st.rerun()
+
+            except Exception as e:
+                st.error(f"Failed to load users: {e}")
+    
+    def _display_user_info(self, user_data):
+        """Displays key information for the selected user."""
+        with st.container(border=True):
+            username = user_data.get("username", "N/A")
+            full_name = user_data.get("full_name", "N/A")
+            followers = user_data.get("follower_count", "N/A")
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Username", username)
+            col2.metric("Full Name", full_name)
+            col3.metric("Followers", followers)
+            
+    def _display_chat_messages(self, user_data):
+        """Displays the chat history and a message input box for the selected user."""
+        display_name = user_data.get("username") or "User"
+            
+        chat_container = st.container(height=550, border=True)
+        with chat_container:
+                st.markdown(f"**Chat with {display_name}**")
+                messages = self.backend.get_user_messages(user_data["user_id"])
+                
+                if not messages:
+                    st.warning("No messages found for this user.")
+                else:
+                    default_avatar = "💬" 
+
+                    for msg in messages:
+                        role = msg.get("role")
+                        
+                        alignment = "user" if role == MessageRole.USER.value else "assistant"
+                        
+                        avatar = self.const.AVATARS.get(role, default_avatar)
+                        
+                        with st.chat_message(alignment, avatar=avatar):
+                            st.markdown(msg.get("text", "*No text content*"))
+                            
+                            if msg.get("media_url"):
+                                st.image(msg["media_url"])
+                            
+                            timestamp = msg.get("timestamp")
+                            if timestamp:
+                                st.caption(timestamp.astimezone().strftime('%Y-%m-%d %H:%M'))
+
+        with st.container(border=True):
+            col1, col2 = st.columns([4, 1])
+            text_input = col1.text_input("Type a message...", key=f"insta_chat_input_{user_data['user_id']}", label_visibility="collapsed")
+            send_button = col2.button("Send", key=f"insta_send_button_{user_data['user_id']}", use_container_width=True)
+
+            if send_button and text_input:
+                user_id = user_data["user_id"]
+                mid = InstagramService.send_message(user_id, text_input, self.backend.client_username)
+                if mid:
+                    message_doc = User.create_message_document(
+                        text=text_input,
+                        role=MessageRole.ADMIN.value,
+                        mid= mid,
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    User.add_direct_message(user_id, message_doc, self.backend.client_username)
+                    User.update_status(user_id, UserStatus.ADMIN_REPLIED.value, self.backend.client_username)
+                    st.success("Message sent and user status updated!")
+                    st.rerun()
+                else:
+                    st.error("Failed to send message.")
+
+    def _render_controller_panel(self):
+            """Render Instagram platform controller panel"""
+            st.subheader(f"{self.const.ICONS.get('instagram', '')} Instagram Controller")
+            
+            try:
+                from ...services.dashboards.ui import validate_client_access
+                validate_client_access(self.backend.client_username)
+                
+                # Get platform configuration
+                platform_config = Client.get_client_platforms_config(self.backend.client_username)
+                instagram_config = platform_config.get('instagram', {})
+                
+                # Platform enable toggle
+                platform_enabled = instagram_config.get('enabled', False)
+                new_platform_enabled = st.toggle(
+                    "Enable Instagram Platform", 
+                    value=platform_enabled, 
+                    key="instagram_platform_enable"
+                )
+                
+                if new_platform_enabled != platform_enabled:
+                    if Client.update_platform_enabled_status(self.backend.client_username, 'instagram', new_platform_enabled):
+                        st.success(f"Instagram platform {'enabled' if new_platform_enabled else 'disabled'} successfully")
+                        st.rerun()
+                    else:
+                        st.error("Failed to update Instagram platform status")
+                
+                # Module toggles (only show if platform is enabled)
+                if new_platform_enabled:
+                    st.write("### Module Controls")
+                    modules = instagram_config.get('modules', {})
+                    
+                    # Create columns for module toggles
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        # Fixed Response toggle
+                        fixed_response_enabled = modules.get('fixed_response', {}).get('enabled', False)
+                        new_fixed_response = st.toggle(
+                            "Fixed Response", 
+                            value=fixed_response_enabled, 
+                            key="instagram_fixed_response"
+                        )
+                        
+                        if new_fixed_response != fixed_response_enabled:
+                            if Client.update_module_status(self.backend.client_username, 'instagram', 'fixed_response', new_fixed_response):
+                                st.success(f"Fixed Response {'enabled' if new_fixed_response else 'disabled'}")
+                                st.rerun()
+                            else:
+                                st.error("Failed to update Fixed Response")
+                        
+                        # Comment Assist toggle
+                        comment_assist_enabled = modules.get('comment_assist', {}).get('enabled', False)
+                        new_comment_assist = st.toggle(
+                            "Comment Assist", 
+                            value=comment_assist_enabled, 
+                            key="instagram_comment_assist"
+                        )
+                        
+                        if new_comment_assist != comment_assist_enabled:
+                            if Client.update_module_status(self.backend.client_username, 'instagram', 'comment_assist', new_comment_assist):
+                                st.success(f"Comment Assist {'enabled' if new_comment_assist else 'disabled'}")
+                                st.rerun()
+                            else:
+                                st.error("Failed to update Comment Assist")
+                    
+                    with col2:
+                        # DM Assist toggle
+                        dm_assist_enabled = modules.get('dm_assist', {}).get('enabled', False)
+                        new_dm_assist = st.toggle(
+                            "DM Assist", 
+                            value=dm_assist_enabled, 
+                            key="instagram_dm_assist"
+                        )
+                        
+                        if new_dm_assist != dm_assist_enabled:
+                            if Client.update_module_status(self.backend.client_username, 'instagram', 'dm_assist', new_dm_assist):
+                                st.success(f"DM Assist {'enabled' if new_dm_assist else 'disabled'}")
+                                st.rerun()
+                            else:
+                                st.error("Failed to update DM Assist")
+                        
+                        # Vision toggle
+                        vision_enabled = modules.get('vision', {}).get('enabled', False)
+                        new_vision = st.toggle(
+                            "Vision", 
+                            value=vision_enabled, 
+                            key="instagram_vision"
+                        )
+                        
+                        if new_vision != vision_enabled:
+                            if Client.update_module_status(self.backend.client_username, 'instagram', 'vision', new_vision):
+                                st.success(f"Vision {'enabled' if new_vision else 'disabled'}")
+                                st.rerun()
+                            else:
+                                st.error("Failed to update Vision")
+                else:
+                    st.info("Enable the Instagram platform to access module controls.")
+                    
+            except ValueError as e:
+                st.error(f"Access denied: {str(e)}")
+            except Exception as e:
+                st.error(f"Error rendering controller panel: {str(e)}")
+
+    def _render_message_analytics(self, time_frame, start_datetime, end_datetime, days_back):
+        with st.container(border=True):
+            if days_back == 0:
+                st.info("Please select a specific duration (e.g., '1 day', '7 days') to view message analytics.")
+                return
+            
+            try:
+                message_stats = self.backend.get_message_statistics_by_role_within_timeframe_by_platform(time_frame, start_datetime, end_datetime, "instagram")
+                
+                if not message_stats:
+                    st.info("No message data available for the selected time period.")
+                    return
+
+                df = pd.DataFrame(
+                    [{"Date": date_str, "Role": role, "Count": count} for date_str, roles in message_stats.items() for role, count in roles.items()]
+                )
+                if df.empty:
+                    st.info("No message data to display.")
+                    return
+                
+                summary_counts = df.groupby('Role')['Count'].sum()
+                
+                user_msgs = int(summary_counts.get('user', 0))
+                assistant_msgs = int(summary_counts.get('assistant', 0))
+                admin_msgs = int(summary_counts.get('admin', 0))
+                fixed_responses = int(summary_counts.get('fixed_response', 0))
+                
+                m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+                m_col1.metric("User Messages", user_msgs)
+                m_col2.metric("Assistant Messages", assistant_msgs)
+                m_col3.metric("Admin Messages", admin_msgs)
+                m_col4.metric("Fixed Responses", fixed_responses)
+                st.write("---")
+                
+                df['Date'] = pd.to_datetime(df['Date'])
+                df = df.sort_values('Date')
+
+                fig = px.bar(df, x='Date', y='Count', color='Role', title='Direct Messages by Role', color_discrete_map={'user': '#1f77b4', 'assistant': '#ff7f0e', 'admin': '#2ca02c', 'fixed_response': '#d62728'})
+                
+                if time_frame == "hourly":
+                    fig.update_xaxes(tickformat="%Y-%m-%d %H:%M", title_text="Time")
+                else:
+                    fig.update_xaxes(tickformat="%Y-%m-%d", title_text="Date")
+                
+                fig.update_yaxes(title_text="Number of Messages")
+                
+                st.plotly_chart(fig, width='stretch')
+                
+            except Exception as e:
+                st.error(f"Error rendering message analytics: {str(e)}")
+
+    def _render_user_statistics(self, start_datetime, end_datetime, days_back):
+        with st.container(border=True):
+            try:
+                if days_back > 0:
+                    status_counts = self.backend.get_user_status_counts_within_timeframe_by_platform(start_datetime, end_datetime, "instagram")
+                else:
+                    status_counts = self.backend.get_user_status_counts_by_platform("instagram")
+
+                filtered_counts = {k: v for k, v in (status_counts or {}).items() if k.upper() != 'SCRAPED'}
+                if not filtered_counts:
+                    st.info("No user status data available for the selected time period.")
+                    return
+
+                num_statuses = len(filtered_counts)
+                if num_statuses > 0:
+                    cols = st.columns(num_statuses)
+                    for i, (status, count) in enumerate(filtered_counts.items()):
+                        display_status = status.replace("_", " ").title()
+                        cols[i].metric(label=display_status, value=count)
+                st.write("---")
+
+                status_df = pd.DataFrame(filtered_counts.items(), columns=['Status', 'Count'])
+                fig = px.pie(status_df, values='Count', names='Status', title="User Status Distribution", color_discrete_sequence=px.colors.qualitative.Pastel)
+                st.plotly_chart(fig, width='stretch')
+
+            except Exception as e:
+                st.error(f"Error rendering user statistics: {str(e)}")
+
+    def _render_controller_panel(self):
+        """Render Instagram platform controller panel"""
+        st.subheader(f"{self.const.ICONS.get('instagram', '')} Instagram Controller")
+        
+        try:
+            from ...services.dashboards.ui import validate_client_access
+            validate_client_access(self.backend.client_username)
+            
+            # Get platform configuration
+            platform_config = Client.get_client_platforms_config(self.backend.client_username)
+            instagram_config = platform_config.get('instagram', {})
+            
+            # Platform enable toggle
+            platform_enabled = instagram_config.get('enabled', False)
+            new_platform_enabled = st.toggle(
+                "Enable Instagram Platform", 
+                value=platform_enabled, 
+                key="instagram_platform_enable"
+            )
+            
+            if new_platform_enabled != platform_enabled:
+                if Client.update_platform_enabled_status(self.backend.client_username, 'instagram', new_platform_enabled):
+                    st.success(f"Instagram platform {'enabled' if new_platform_enabled else 'disabled'} successfully")
+                    st.rerun()
+                else:
+                    st.error("Failed to update Instagram platform status")
+            
+            # Module toggles (only show if platform is enabled)
+            if new_platform_enabled:
+                st.write("### Module Controls")
+                modules = instagram_config.get('modules', {})
+                
+                # Create columns for module toggles
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Fixed Response toggle
+                    fixed_response_enabled = modules.get('fixed_response', {}).get('enabled', False)
+                    new_fixed_response = st.toggle(
+                        "Fixed Response", 
+                        value=fixed_response_enabled, 
+                        key="instagram_fixed_response"
+                    )
+                    
+                    if new_fixed_response != fixed_response_enabled:
+                        if Client.update_module_status(self.backend.client_username, 'instagram', 'fixed_response', new_fixed_response):
+                            st.success(f"Fixed Response {'enabled' if new_fixed_response else 'disabled'}")
+                            st.rerun()
+                        else:
+                            st.error("Failed to update Fixed Response")
+                    
+                    # Comment Assist toggle
+                    comment_assist_enabled = modules.get('comment_assist', {}).get('enabled', False)
+                    new_comment_assist = st.toggle(
+                        "Comment Assist", 
+                        value=comment_assist_enabled, 
+                        key="instagram_comment_assist"
+                    )
+                    
+                    if new_comment_assist != comment_assist_enabled:
+                        if Client.update_module_status(self.backend.client_username, 'instagram', 'comment_assist', new_comment_assist):
+                            st.success(f"Comment Assist {'enabled' if new_comment_assist else 'disabled'}")
+                            st.rerun()
+                        else:
+                            st.error("Failed to update Comment Assist")
+                
+                with col2:
+                    # DM Assist toggle
+                    dm_assist_enabled = modules.get('dm_assist', {}).get('enabled', False)
+                    new_dm_assist = st.toggle(
+                        "DM Assist", 
+                        value=dm_assist_enabled, 
+                        key="instagram_dm_assist"
+                    )
+                    
+                    if new_dm_assist != dm_assist_enabled:
+                        if Client.update_module_status(self.backend.client_username, 'instagram', 'dm_assist', new_dm_assist):
+                            st.success(f"DM Assist {'enabled' if new_dm_assist else 'disabled'}")
+                            st.rerun()
+                        else:
+                            st.error("Failed to update DM Assist")
+                    
+                    # Vision toggle
+                    vision_enabled = modules.get('vision', {}).get('enabled', False)
+                    new_vision = st.toggle(
+                        "Vision", 
+                        value=vision_enabled, 
+                        key="instagram_vision"
+                    )
+                    
+                    if new_vision != vision_enabled:
+                        if Client.update_module_status(self.backend.client_username, 'instagram', 'vision', new_vision):
+                            st.success(f"Vision {'enabled' if new_vision else 'disabled'}")
+                            st.rerun()
+                        else:
+                            st.error("Failed to update Vision")
+            else:
+                st.info("Enable the Instagram platform to access module controls.")
+                
+        except ValueError as e:
+            st.error(f"Access denied: {str(e)}")
+        except Exception as e:
+            st.error(f"Error rendering controller panel: {str(e)}")
 
     def _render_posts_tab(self): #
         """Renders the section for managing and viewing Instagram posts with optimized performance.""" #
@@ -770,7 +1242,7 @@ class InstagramSection(BaseSection): #
         col1, col2, col3, col4, col5 = st.columns(5) #
 
         with col1: #
-            if st.button(f"{self.const.ICONS['update']} Update Posts", help="Fetch and update Instagram posts", use_container_width=True): #
+            if st.button(f"{self.const.ICONS['update']} Update Posts", help="Fetch and update Instagram posts", width='stretch'): #
                 with st.spinner("Fetching posts..."): #
                     try: #
                         success = self.backend.fetch_instagram_posts() #
@@ -783,7 +1255,7 @@ class InstagramSection(BaseSection): #
                         st.error(f"Error: {str(e)}") #
 
         with col2: #
-            if st.button(f"{self.const.ICONS['model']} AI Label", help="Auto-label posts with AI", use_container_width=True): #
+            if st.button(f"{self.const.ICONS['model']} AI Label", help="Auto-label posts with AI", width='stretch'): #
                 with st.spinner("AI labeling..."): #
                     try: #
                         if hasattr(self.backend, 'set_post_labels_by_model'): #
@@ -799,7 +1271,7 @@ class InstagramSection(BaseSection): #
                         st.error(f"Error: {str(e)}") #
 
         with col3:
-            if st.button(f"{self.const.ICONS['folder']} Download", help="Download post labels as JSON", use_container_width=True):
+            if st.button(f"{self.const.ICONS['folder']} Download", help="Download post labels as JSON", width='stretch'):
                 try:
                     # Get labeled posts data from backend
                     labeled_data = self.backend.download_post_labels()
@@ -825,7 +1297,7 @@ class InstagramSection(BaseSection): #
                     st.error(f"Error preparing download: {str(e)}")
 
         with col4:
-            if st.button(f"{self.const.ICONS['delete']} Remove Labels", help="Remove all labels from posts", use_container_width=True):
+            if st.button(f"{self.const.ICONS['delete']} Remove Labels", help="Remove all labels from posts", width='stretch'):
                 try:
                     with st.spinner("Removing all labels..."):
                         updated_count = self.backend.unset_all_post_labels()
@@ -927,7 +1399,7 @@ class InstagramSection(BaseSection): #
                                 disabled=prev_disabled,
                                 key="prev_page_btn",
                                 help="Previous page",
-                                use_container_width=True):
+                                width='stretch'):
                         st.session_state['post_page'] -= 1
                         st.rerun()
 
@@ -993,7 +1465,7 @@ class InstagramSection(BaseSection): #
                                 disabled=next_disabled,
                                 key="next_page_btn",
                                 help="Next page",
-                                use_container_width=True):
+                                width='stretch'):
                         st.session_state['post_page'] += 1
                         st.rerun()
 
@@ -1018,7 +1490,7 @@ class InstagramSection(BaseSection): #
         with col1:
             if st.button(f"{self.const.ICONS['update']} Update Stories",
                         help="Fetch and update Instagram stories",
-                        use_container_width=True):
+                        width='stretch'):
                 with st.spinner("Fetching stories..."):
                     try:
                         success = self.backend.fetch_instagram_stories()
@@ -1033,7 +1505,7 @@ class InstagramSection(BaseSection): #
         with col2:
             if st.button(f"{self.const.ICONS['model']} AI Label",
                         help="Auto-label stories with AI",
-                        use_container_width=True):
+                        width='stretch'):
                 with st.spinner("AI labeling..."):
                     try:
                         result = self.backend.set_story_labels_by_model()
@@ -1048,7 +1520,7 @@ class InstagramSection(BaseSection): #
         with col3:
             if st.button(f"{self.const.ICONS['folder']} Download",
                         help="Download story labels as JSON",
-                        use_container_width=True):
+                        width='stretch'):
                 try:
                     labeled_data = self.backend.download_story_labels()
                     if isinstance(labeled_data, dict) and not labeled_data.get("error"):
@@ -1068,7 +1540,7 @@ class InstagramSection(BaseSection): #
         with col4:
             if st.button(f"{self.const.ICONS['delete']} Remove Labels",
                         help="Remove all labels from stories",
-                        use_container_width=True):
+                        width='stretch'):
                 try:
                     with st.spinner("Removing all labels..."):
                         updated_count = self.backend.unset_all_story_labels()
@@ -1167,7 +1639,7 @@ class InstagramSection(BaseSection): #
                                 disabled=prev_disabled,
                                 key="prev_story_page_btn",
                                 help="Previous page",
-                                use_container_width=True):
+                                width='stretch'):
                         st.session_state['story_page'] -= 1
                         st.rerun()
 
@@ -1222,7 +1694,7 @@ class InstagramSection(BaseSection): #
                                 disabled=next_disabled,
                                 key="next_story_page_btn",
                                 help="Next page",
-                                use_container_width=True):
+                                width='stretch'):
                         st.session_state['story_page'] += 1
                         st.rerun()
 
@@ -1314,7 +1786,7 @@ class InstagramSection(BaseSection): #
                     </div>
                     """, unsafe_allow_html=True)
 
-                    view_btn = st.button("View Details", key=f"view_story_btn_{story_id_key}", use_container_width=True)
+                    view_btn = st.button("View Details", key=f"view_story_btn_{story_id_key}", width='stretch')
 
                     if view_btn:
                         st.session_state['selected_story_id'] = story_id
@@ -1351,7 +1823,7 @@ class InstagramSection(BaseSection): #
 
             if not story:
                 st.error(f"Story not found with ID: {story_id}")
-                if st.button("Back to grid", use_container_width=True):
+                if st.button("Back to grid", width='stretch'):
                     st.session_state['selected_story_id'] = None
                     st.rerun()
                 return
@@ -1410,7 +1882,7 @@ class InstagramSection(BaseSection): #
             cols = st.columns([1, 3, 1])
 
             with cols[0]:
-                if st.button("Back", key="back_to_story_grid_btn", help="Back to grid", use_container_width=True):
+                if st.button("Back", key="back_to_story_grid_btn", help="Back to grid", width='stretch'):
                     st.session_state['selected_story_id'] = None
                     st.rerun()
 
@@ -1422,7 +1894,7 @@ class InstagramSection(BaseSection): #
                                key="detail_prev_story_btn",
                                disabled=prev_disabled,
                                help="Previous story",
-                               use_container_width=True):
+                               width='stretch'):
                         if prev_story_id:
                             st.session_state['selected_story_id'] = prev_story_id
                             st.rerun()
@@ -1433,7 +1905,7 @@ class InstagramSection(BaseSection): #
                                key="detail_next_story_btn",
                                disabled=next_disabled,
                                help="Next story",
-                               use_container_width=True):
+                               width='stretch'):
                         if next_story_id:
                             st.session_state['selected_story_id'] = next_story_id
                             st.rerun()
@@ -1462,12 +1934,12 @@ class InstagramSection(BaseSection): #
                     except Exception as e:
                         st.error(f"Unable to play video: {str(e)}")
                         if thumbnail_url:
-                            st.image(thumbnail_url, use_container_width=True)
+                            st.image(thumbnail_url, width='stretch')
                             st.caption("Video thumbnail (video playback unavailable)")
                         else:
                             st.warning("Video playback unavailable")
                 elif media_url:
-                    st.image(media_url, use_container_width=True)
+                    st.image(media_url, width='stretch')
                 else:
                     st.warning("No media available")
 
@@ -1477,7 +1949,7 @@ class InstagramSection(BaseSection): #
                 with st.container():
                     try:
                         products_data = self.backend.get_products()
-                        product_titles = sorted([p['Title'] for p in products_data if p.get('Title')])
+                        product_titles = sorted([p['title'] for p in products_data if p.get('title')])
                         custom_labels = st.session_state.get('custom_labels', [])
                         all_labels = ["-- Select --"] + sorted(list(set(product_titles + custom_labels)))
 
@@ -1546,7 +2018,7 @@ class InstagramSection(BaseSection): #
                         )
 
                     with label_btn_col:
-                        if st.button(f"{self.const.ICONS['add']}", key=f"story_detail_add_label_btn_{story_id}", help="Add label", use_container_width=True):
+                        if st.button(f"{self.const.ICONS['add']}", key=f"story_detail_add_label_btn_{story_id}", help="Add label", width='stretch'):
                             new_label_stripped = new_label.strip()
                             if new_label_stripped and new_label_stripped not in st.session_state['custom_labels']:
                                 st.session_state['custom_labels'].append(new_label_stripped)
@@ -1584,14 +2056,14 @@ class InstagramSection(BaseSection): #
                         with exp_col1:
                             save_exp_button = st.form_submit_button(
                                 f"{self.const.ICONS['save']} Save Explanation",
-                                use_container_width=True
+                                width='stretch'
                             )
 
                         with exp_col2:
                             remove_exp_button = st.form_submit_button(
                                 f"{self.const.ICONS['delete']} Remove Explanation",
                                 type="secondary",
-                                use_container_width=True
+                                width='stretch'
                             )
 
                         if save_exp_button:
@@ -1668,12 +2140,12 @@ class InstagramSection(BaseSection): #
                                 )
                                 col_update, col_delete = st.columns(2)
                                 with col_update:
-                                    update_button = st.form_submit_button(f"{self.const.ICONS['save']} Update This Response", use_container_width=True)
+                                    update_button = st.form_submit_button(f"{self.const.ICONS['save']} Update This Response", width='stretch')
                                 with col_delete:
                                     delete_button = st.form_submit_button(
                                         f"{self.const.ICONS['delete']} Remove This Response",
                                         type="secondary",
-                                        use_container_width=True
+                                        width='stretch'
                                     )
 
                                 if update_button:
@@ -1719,7 +2191,7 @@ class InstagramSection(BaseSection): #
                                 "DM reply",
                                 placeholder="Response sent as DM when someone messages with trigger words"
                             )
-                            new_submit_button = st.form_submit_button(f"{self.const.ICONS['add']} Create", use_container_width=True)
+                            new_submit_button = st.form_submit_button(f"{self.const.ICONS['add']} Create", width='stretch')
                             if new_submit_button:
                                 try:
                                     if new_trigger_keyword.strip():
@@ -1740,7 +2212,7 @@ class InstagramSection(BaseSection): #
 
         except Exception as e:
             st.error(f"Error loading story details: {str(e)}")
-            if st.button("Back to grid", use_container_width=True):
+            if st.button("Back to grid", width='stretch'):
                 st.session_state['selected_story_id'] = None
                 st.rerun()
 
@@ -1830,7 +2302,7 @@ class InstagramSection(BaseSection): #
                     """, unsafe_allow_html=True)
 
                     # Use a regular button styled to be small and flat
-                    view_btn = st.button("View Details", key=f"view_btn_{post_id_key}", use_container_width=True)
+                    view_btn = st.button("View Details", key=f"view_btn_{post_id_key}", width='stretch')
 
                     # Handle click
                     if view_btn:
@@ -1868,7 +2340,7 @@ class InstagramSection(BaseSection): #
 
         if not post:
             st.error(f"Post not found with ID: {post_id}")
-            if st.button("Back to grid", use_container_width=True):
+            if st.button("Back to grid", width='stretch'):
                 st.session_state['selected_post_id'] = None
                 st.rerun()
             return
@@ -1928,7 +2400,7 @@ class InstagramSection(BaseSection): #
 
         with cols[0]:
             # Back button
-            if st.button("Back", key="back_to_grid_btn", help="Back to grid", use_container_width=True):
+            if st.button("Back", key="back_to_grid_btn", help="Back to grid", width='stretch'):
                 st.session_state['selected_post_id'] = None
                 st.rerun()
 
@@ -1942,7 +2414,7 @@ class InstagramSection(BaseSection): #
                            key="detail_prev_post_btn",
                            disabled=prev_disabled,
                            help="Previous post",
-                           use_container_width=True):
+                           width='stretch'):
                     if prev_post_id:
                         st.session_state['selected_post_id'] = prev_post_id
                         st.rerun()
@@ -1954,7 +2426,7 @@ class InstagramSection(BaseSection): #
                            key="detail_next_post_btn",
                            disabled=next_disabled,
                            help="Next post",
-                           use_container_width=True):
+                           width='stretch'):
                     if next_post_id:
                         st.session_state['selected_post_id'] = next_post_id
                         st.rerun()
@@ -1986,13 +2458,13 @@ class InstagramSection(BaseSection): #
                     # If video player fails, show error and fallback
                     st.error(f"Unable to play video: {str(e)}")
                     if thumbnail_url:
-                        st.image(thumbnail_url, use_container_width=True)
+                        st.image(thumbnail_url, width='stretch')
                         st.caption("Video thumbnail (video playback unavailable)")
                     else:
                         st.warning("Video playback unavailable")
             elif media_url:
                 # For images, display the image
-                st.image(media_url, use_container_width=True)
+                st.image(media_url, width='stretch')
             else:
                 st.warning("No media available")
 
@@ -2003,7 +2475,7 @@ class InstagramSection(BaseSection): #
                 # Get product titles for dropdown (moved from settings section)
                 try:
                     products_data = self.backend.get_products()
-                    product_titles = sorted([p['Title'] for p in products_data if p.get('Title')])
+                    product_titles = sorted([p['title'] for p in products_data if p.get('title')])
                     custom_labels = st.session_state.get('custom_labels', [])
                     all_labels = ["-- Select --"] + sorted(list(set(product_titles + custom_labels)))
 
@@ -2080,7 +2552,7 @@ class InstagramSection(BaseSection): #
                     )
 
                 with label_btn_col:
-                    if st.button(f"{self.const.ICONS['add']}", key=f"detail_add_label_btn_{post_id}", help="Add label", use_container_width=True):
+                    if st.button(f"{self.const.ICONS['add']}", key=f"detail_add_label_btn_{post_id}", help="Add label", width='stretch'):
                         new_label_stripped = new_label.strip()
                         if new_label_stripped and new_label_stripped not in st.session_state['custom_labels']:
                             st.session_state['custom_labels'].append(new_label_stripped)
@@ -2123,7 +2595,7 @@ class InstagramSection(BaseSection): #
                         # Save button
                         save_exp_button = st.form_submit_button(
                             f"{self.const.ICONS['save']} Save Explanation",
-                            use_container_width=True
+                            width='stretch'
                         )
 
                     with exp_col2:
@@ -2131,7 +2603,7 @@ class InstagramSection(BaseSection): #
                         remove_exp_button = st.form_submit_button(
                             f"{self.const.ICONS['delete']} Remove Explanation",
                             type="secondary",
-                            use_container_width=True
+                            width='stretch'
                         )
 
                     if save_exp_button:
@@ -2219,12 +2691,12 @@ class InstagramSection(BaseSection): #
                             # Row for buttons
                             col_update, col_delete = st.columns(2)
                             with col_update:
-                                update_button = st.form_submit_button(f"{self.const.ICONS['save']} Update This Response", use_container_width=True)
+                                update_button = st.form_submit_button(f"{self.const.ICONS['save']} Update This Response", width='stretch')
                             with col_delete:
                                 delete_button = st.form_submit_button(
                                     f"{self.const.ICONS['delete']} Remove This Response",
                                     type="secondary",
-                                    use_container_width=True
+                                    width='stretch'
                                 )
 
                             if update_button:
@@ -2285,7 +2757,7 @@ class InstagramSection(BaseSection): #
                         )
 
                         # Submit button to save fixed response
-                        new_submit_button = st.form_submit_button(f"{self.const.ICONS['add']} Create", use_container_width=True)
+                        new_submit_button = st.form_submit_button(f"{self.const.ICONS['add']} Create", width='stretch')
 
                         if new_submit_button:
                             # Handle adding new fixed response using backend
@@ -2307,235 +2779,3 @@ class InstagramSection(BaseSection): #
 
                 except Exception as e:
                     st.error(f"Error loading form: {str(e)}")
-
-
-#===============================================================================================================================
-class AdminUI:
-    """Main application container"""
-    def __init__(self, client_username):
-        st.set_page_config(layout="wide", page_title="Admin Dashboard")
-
-        # Initialize session state variables for authentication
-        if 'authenticated' not in st.session_state:
-            st.session_state['authenticated'] = False
-        if 'username' not in st.session_state:
-            st.session_state['username'] = None
-
-        try:
-            # Determine backend context: admin or client
-            username = st.session_state.get('username')
-            if username and username != 'admin':
-                self.backend = Backend(client_username=username)
-            else:
-                self.backend = Backend()
-
-            # Initialize the default admin user if needed
-            self.backend.ensure_default_admin()
-
-            # Check for authentication token on startup
-            self._check_auth_token()
-        except NameError:
-            st.error("Backend class definition not found. Please ensure it's defined or imported.")
-            # Define a DummyBackend to allow the UI to run for demonstration if Backend is missing
-            class DummyBackend:
-                def __getattr__(self, name):
-                    def method(*args, **kwargs):
-                        print(f"DummyBackend: Method '{name}' called with args={args}, kwargs={kwargs}")
-                        if name == 'get_app_setting': return "true"
-                        if name == 'get_labels': return {}
-                        if name == 'get_posts': return []
-                        if name == 'get_products': return []
-                        if name == 'get_additionalinfo': return []
-                        if name == 'get_vs_id': return "dummy_vs_id"
-                        if name == 'get_assistant_instructions': return "Dummy instructions"
-                        if name == 'get_assistant_temperature': return 0.7
-                        if name == 'get_assistant_top_p': return 1.0
-                        if name == 'create_chat_thread': return "dummy_thread_id"
-                        if name == 'format_updated_at': return "recently"
-                        if name == 'authenticate_admin': return True
-                        if name == 'get_admin_users': return []
-                        if name == 'create_admin_user': return True
-                        if name == 'update_admin_password': return True
-                        if name == 'update_admin_status': return True
-                        if name == 'delete_admin_user': return True
-                        if name == 'ensure_default_admin': return True
-                        if name == 'create_auth_token': return "dummy_token"
-                        if name == 'verify_auth_token': return None
-                        # Add other dummy methods as needed by your sections
-                        return None
-                    return method
-            self.backend = DummyBackend()
-
-        # Map section titles to their respective classes
-        self.section_mapping = {
-            "Dashboard": AppStatusSection(self.backend),
-            "Data": ProductScraperSection(self.backend),
-            "GPT": OpenAIManagementSection(self.backend),
-            "Instagram": InstagramSection(self.backend)
-        }
-
-        # Initialize session state for the selected page if it doesn't exist
-        if 'selected_page' not in st.session_state:
-            st.session_state.selected_page = "Dashboard" # Default page
-
-    def _check_auth_token(self):
-        """Check if an authentication token is present and valid"""
-        if 'auth_token' in st.session_state:
-            # For security reasons, prioritize session state over cookies
-            return
-
-        auth_token = st.query_params.get('auth_token')
-        if auth_token and len(auth_token) > 0:
-            username = self.backend.verify_auth_token(auth_token)
-            if username:
-                st.session_state['authenticated'] = True
-                st.session_state['username'] = username
-                st.session_state['auth_token'] = auth_token
-
-    def render(self):
-        """Render all application sections based on authentication status"""
-        # Check if user is authenticated
-        if not st.session_state['authenticated']:
-            self._render_login_page()
-        else:
-            # Set auth token in query params if not already there
-            if 'auth_token' in st.session_state:
-                if 'auth_token' not in st.query_params:
-                    st.query_params['auth_token'] = st.session_state['auth_token']
-            self._render_authenticated_ui()
-
-    def _render_login_page(self):
-        """Display login page for unauthenticated users"""
-        const = AppConstants()
-
-        st.title(f"{const.ICONS['login']} Admin Login")
-
-        # Center the login form
-        col1, col2, col3 = st.columns([1, 2, 1])
-
-        with col2:
-            with st.form("login_form"):
-                st.subheader("Please sign in")
-                username = st.text_input("Username", key="login_username")
-                password = st.text_input("Password", type="password", key="login_password")
-                submitted = st.form_submit_button("Login", use_container_width=True)
-
-                if submitted:
-                    if not username or not password:
-                        st.error("Please enter both username and password.")
-                    else:
-                        # Authenticate user via backend
-                        if self.backend.authenticate_admin(username, password):
-                            # Create authentication token
-                            auth_token = self.backend.create_auth_token(username)
-
-                            # Store in session state
-                            st.session_state['authenticated'] = True
-                            st.session_state['username'] = username
-                            st.session_state['auth_token'] = auth_token
-
-                            # Set in query params for persistence
-                            st.query_params['auth_token'] = auth_token
-
-                            # After successful login, clear the toggle keys
-                            for key in ['assistant_toggle', 'fixed_responses_toggle']:
-                                if key in st.session_state:
-                                    del st.session_state[key]
-
-                            st.rerun()
-                        else:
-                            st.error("Invalid username or password.")
-
-            # Add a note about default credentials
-            st.info("If this is your first time logging in, use the default credentials:\nUsername: admin\nPassword: admin123\n\nPlease change the password immediately after login.")
-
-    def _render_authenticated_ui(self):
-        """Render the main UI for authenticated users"""
-        # Add custom CSS for sidebar
-        st.markdown("""
-        <style>
-        section[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] {
-            padding-top: 1.5rem;
-        }
-        div[role="radiogroup"] {
-            margin-top: 1.5rem !important;
-        }
-        div[role="radiogroup"] label {
-            padding: 0.6rem 0 !important;
-            font-weight: 600 !important;
-            font-size: 1.05rem !important;
-            margin-bottom: 0.5rem !important;
-        }
-        .sidebar-header {
-            font-size: 1.3rem;
-            font-weight: 700;
-            margin-bottom: 1rem;
-            color: #4b4b4b;
-        }
-        .sidebar-welcome {
-            font-size: 0.9rem;
-            margin-bottom: 0.7rem;
-            color: #5a5a5a;
-            font-weight: 500;
-        }
-        .sidebar-divider {
-            margin-top: 1.5rem;
-            margin-bottom: 1.5rem;
-            border-top: 1px solid #e0e0e0;
-        }
-        .logout-button {
-            margin-top: 0.5rem;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-
-        # Add logout button to sidebar
-        const = AppConstants()
-
-        # Use styled headers instead of built-in title
-        st.sidebar.markdown('<div class="sidebar-header">Navigation</div>', unsafe_allow_html=True)
-
-        # Welcome message with styled text
-        st.sidebar.markdown(f'<div class="sidebar-welcome">Welcome, {st.session_state["username"]}!</div>', unsafe_allow_html=True)
-
-        # Logout button with custom styling
-        logout_col = st.sidebar.columns(1)[0]
-        with logout_col:
-            if st.button(f"{const.ICONS['logout']} Logout", key="logout_button", use_container_width=True, type="secondary"):
-                # Reset authentication state
-                st.session_state['authenticated'] = False
-                st.session_state['username'] = None
-                if 'auth_token' in st.session_state:
-                    del st.session_state['auth_token']
-                # Clear query params
-                st.query_params.clear()
-                # After logout, clear the toggle keys
-                for key in ['assistant_toggle', 'fixed_responses_toggle']:
-                    if key in st.session_state:
-                        del st.session_state[key]
-                st.rerun()
-
-        # Add a visual divider
-        st.sidebar.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
-
-        # Create radio buttons in the sidebar for section selection
-        st.session_state.selected_page = st.sidebar.radio(
-            "Navigation Menu",  # Provide descriptive label for accessibility
-            options=list(self.section_mapping.keys()),
-            key="navigation_radio",
-            label_visibility="collapsed"  # Hide the label completely
-        )
-
-        # Retrieve the selected section object
-        selected_section_title = st.session_state.selected_page
-        section_to_render = self.section_mapping.get(selected_section_title)
-
-        # Render the selected section
-        if section_to_render:
-            section_to_render.render()
-        else:
-            st.error("Page not found. Please select a section from the sidebar.")
-
-if __name__ == "__main__":
-    app = AdminUI(client_username="your_username")
-    app.render()

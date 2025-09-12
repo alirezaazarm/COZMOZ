@@ -1,18 +1,18 @@
-from ..utils.exceptions import PermanentError, RetryableError
-from ..models.product import Product
-from ..models.additional_info import Additionalinfo
-from ..models.client import Client
-from ..models.database import db
-from ..config import Config
+from ...utils.exceptions import PermanentError, RetryableError
+from ...models.product import Product
+from ...models.additional_info import Additionalinfo
+from ...models.client import Client
+from ...models.database import db
+from ...config import Config
 import openai
 import time
 import re
 import logging
 import json
 from datetime import datetime, timezone
-from ..models.enums import ModuleType
-from app.services.instagram_service import APP_SETTINGS
-from ..repositories.orderbook_repository import OrderbookRepository
+from ...models.enums import ModuleType
+from ...utils.helpers import get_app_settings
+from ...repositories.orderbook_repository import OrderbookRepository
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +252,10 @@ class OpenAIService:
             if final_vs.file_counts.completed == len(file_ids):
                 Client.update(self.client_username, {"keys.vector_store_id": vs_id})
                 logger.info(f"Stored vector_store_id '{vs_id}' in client")
+                # Attach the vector store to the client's assistant as well
+                attach_result = self.set_assistant_vector_store(vs_id)
+                if not attach_result.get('success'):
+                    logger.error(f"Failed to attach vector store to assistant: {attach_result.get('message')}")
                 return vs_id
             logger.error(f"Vector store incomplete: {final_vs.file_counts}")
             return None
@@ -464,7 +468,7 @@ class OpenAIService:
             logger.error(f"Failed to retrieve assistant top_p: {str(e)}")
             return None
 
-    def _build_tools_and_resources(self):
+    def _build_tools_and_resources(self, vs_id_override: str | None = None):
         """
         Build the tools and tool_resources for the assistant based on client config.
         Always includes file_search if vector store is present.
@@ -474,12 +478,14 @@ class OpenAIService:
         tools = []
         tool_resources = {}
         vs_id = self.client_obj.get('keys', {}).get('vector_store_id')
+        if vs_id_override is not None:
+            vs_id = vs_id_override
         if vs_id:
             tools.append({"type": "file_search"})
             tool_resources["file_search"] = {"vector_store_ids": [vs_id]}
         # Check if orderbook module is enabled in APP_SETTINGS
         orderbook_enabled = False
-        app_settings = APP_SETTINGS.get(self.client_username, {})
+        app_settings = get_app_settings(self.client_username)
         # The helpers.py loader sets app_settings[ModuleType.ORDERBOOK.value] = True/False
         if app_settings.get(ModuleType.ORDERBOOK.value, False):
             orderbook_enabled = True
@@ -522,6 +528,31 @@ class OpenAIService:
                 }
             })
         return tools, tool_resources if tool_resources else None
+
+    def set_assistant_vector_store(self, vs_id: str):
+        """
+        Attach the provided vector store ID to the client's assistant by
+        updating tools and tool_resources accordingly.
+        """
+        if not self.client:
+            logger.error("OpenAI client is not initialized.")
+            return {'success': False, 'message': 'OpenAI client is not initialized.'}
+        try:
+            assistant_id = self.client_obj.get('keys', {}).get('assistant_id')
+            if not assistant_id:
+                logger.error("No assistant_id found in client keys")
+                return {'success': False, 'message': 'No assistant_id found in client keys.'}
+            tools, tool_resources = self._build_tools_and_resources(vs_id_override=vs_id)
+            self.client.beta.assistants.update(
+                assistant_id=assistant_id,
+                tools=tools,
+                tool_resources=tool_resources
+            )
+            logger.info(f"Attached vector store {vs_id} to assistant {assistant_id} successfully.")
+            return {'success': True, 'message': 'Vector store attached to assistant.'}
+        except Exception as e:
+            logger.error(f"Failed to attach vector store to assistant: {str(e)}")
+            return {'success': False, 'message': f"Failed to attach vector store: {str(e)}"}
 
     def update_assistant_instructions(self, new_instructions):
         if not self.client:

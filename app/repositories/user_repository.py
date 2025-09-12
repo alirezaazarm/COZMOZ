@@ -1,4 +1,5 @@
 from ..models.user import User
+from ..models.enums import Platform
 from ..models.database import USERS_COLLECTION, db
 
 class UserRepository:
@@ -14,11 +15,13 @@ class UserRepository:
         """Get a user by username for the current client"""
         return User.get_by_username(username, self.client_username)
     
-    def create_user(self, user_id, username, status, thread_id=None):
+    def create_user(self, user_id, username, status, thread_id=None, platform=None):
         """Create a new user for the current client"""
         if not self.client_username:
             raise ValueError("Client username is required for user creation")
-        return User.create(user_id, username, self.client_username, status, thread_id)
+        if platform is None:
+            raise ValueError("platform is required for user creation")
+        return User.create(user_id, username, self.client_username, status, thread_id, platform)
     
     def update_user(self, user_id, update_data):
         """Update a user for the current client"""

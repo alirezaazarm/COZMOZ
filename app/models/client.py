@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from .database import db, with_db
-from .enums import ClientStatus, ModuleType
+from .enums import ClientStatus, ModuleType, Platform
 import logging
 from pymongo.errors import PyMongoError
 from bson import ObjectId
@@ -32,9 +32,11 @@ class Client:
         page_access_token=None,
         facebook_id=None,
         facebook_access_token=None,
+        telegram_access_token=None,
         assistant_id=None,
         vector_store_id=None,
         modules=None,
+        platforms=None,
         notes=None,
         is_admin=False,
         password=None,
@@ -43,6 +45,26 @@ class Client:
         settings=None
     ):
         """Create a new client document structure"""
+        # Default platform structures with all modules for each platform
+        default_platform_modules = {
+            ModuleType.FIXED_RESPONSE.value: {"enabled": True},
+            ModuleType.DM_ASSIST.value: {"enabled": True},
+            ModuleType.COMMENT_ASSIST.value: {"enabled": True},
+            ModuleType.VISION.value: {"enabled": True},
+            ModuleType.ORDERBOOK.value: {"enabled": True},
+        }
+
+        platform_struct = platforms or {
+            Platform.INSTAGRAM.value: {
+                "enabled": False,
+                "modules": {**default_platform_modules},
+            },
+            Platform.TELEGRAM.value: {
+                "enabled": False,
+                "modules": {**default_platform_modules},
+            },
+        }
+
         document = {
             "username": username,  # Unique identifier for the client
             "status": status,
@@ -64,20 +86,14 @@ class Client:
                 "username": username,  # Same as main username
                 "ig_id": facebook_id,  # Instagram ID (not Facebook ID)
                 "facebook_access_token": facebook_access_token,
+                "telegram_access_token": telegram_access_token,
                 "assistant_id": assistant_id,
                 "vector_store_id": vector_store_id,
                 "password": password  # Admin password for all clients
             },
             
-            # Modules (these modules don't have settings, only enabled status)
-            "modules": modules or {
-                ModuleType.FIXED_RESPONSE.value: {"enabled": True},
-                ModuleType.DM_ASSIST.value: {"enabled": True},
-                ModuleType.COMMENT_ASSIST.value: {"enabled": True},
-                ModuleType.VISION.value: {"enabled": True},
-                ModuleType.SCRAPER.value: {"enabled": True},
-                ModuleType.ORDERBOOK.value: {"enabled": True}
-            },
+            # Platform configurations (per-platform enable toggle and modules)
+            "platforms": platform_struct,
             
             # Notes
             "notes": notes,
@@ -122,6 +138,33 @@ class Client:
         }
         return document
 
+
+
+    @staticmethod
+    def _validate_platform_requirements(platforms, keys):
+        """Validate that required keys are present for enabled platforms.
+        Returns a list of error strings; empty list if valid.
+        """
+        errors = []
+        platforms = platforms or {}
+        keys = keys or {}
+
+        instagram = platforms.get(Platform.INSTAGRAM.value, {})
+        if instagram.get("enabled"):
+            required_ig_keys = ["page_access_token", "username", "ig_id", "facebook_access_token"]
+            missing = [k for k in required_ig_keys if not keys.get(k)]
+            if missing:
+                errors.append(
+                    f"Instagram enabled but missing required keys: {', '.join(missing)}"
+                )
+
+        telegram = platforms.get(Platform.TELEGRAM.value, {})
+        if telegram.get("enabled"):
+            if not keys.get("telegram_access_token"):
+                errors.append("Telegram enabled but missing required key: telegram_access_token")
+
+        return errors
+
     @staticmethod
     @with_db
     def create(username, business_name=None, **kwargs):
@@ -131,12 +174,19 @@ class Client:
             if Client.get_by_username(username):
                 logger.error(f"Client with username {username} already exists")
                 return None
-                
+            
             client_doc = Client.create_client_document(
                 username=username,
                 business_name=business_name,
                 **kwargs
             )
+            # Validate platform requirements
+            errors = Client._validate_platform_requirements(
+                client_doc.get("platforms"), client_doc.get("keys")
+            )
+            if errors:
+                logger.error("; ".join(errors))
+                return None
             
             result = db[CLIENTS_COLLECTION].insert_one(client_doc)
             if result.acknowledged:
@@ -186,6 +236,17 @@ class Client:
             # Include the updated timestamp
             update_data["updated_at"] = datetime.now(timezone.utc)
             
+            # Validate platform requirements if platforms or keys are being updated
+            if "platforms" in update_data or "keys" in update_data:
+                current = Client.get_by_username(username) or {}
+                new_platforms = update_data.get("platforms", current.get("platforms") or {})
+                new_keys = update_data.get("keys", current.get("keys") or {})
+                
+                errors = Client._validate_platform_requirements(new_platforms, new_keys)
+                if errors:
+                    logger.error("; ".join(errors))
+                    return False
+            
             result = db[CLIENTS_COLLECTION].update_one(
                 {"username": username},
                 {"$set": update_data}
@@ -216,43 +277,7 @@ class Client:
 
     # update_module_settings method removed - these modules don't have settings, only enabled status
 
-    @staticmethod
-    @with_db
-    def enable_module(username, module_name):
-        """Enable a module for a client"""
-        try:
-            result = db[CLIENTS_COLLECTION].update_one(
-                {"username": username},
-                {
-                    "$set": {
-                        f"modules.{module_name}.enabled": True,
-                        "updated_at": datetime.now(timezone.utc)
-                    }
-                }
-            )
-            return result.modified_count > 0
-        except PyMongoError as e:
-            logger.error(f"Failed to enable module: {str(e)}")
-            return False
 
-    @staticmethod
-    @with_db
-    def disable_module(username, module_name):
-        """Disable a module for a client"""
-        try:
-            result = db[CLIENTS_COLLECTION].update_one(
-                {"username": username},
-                {
-                    "$set": {
-                        f"modules.{module_name}.enabled": False,
-                        "updated_at": datetime.now(timezone.utc)
-                    }
-                }
-            )
-            return result.modified_count > 0
-        except PyMongoError as e:
-            logger.error(f"Failed to disable module: {str(e)}")
-            return False
 
     @staticmethod
     @with_db
@@ -409,23 +434,168 @@ class Client:
     @staticmethod
     @with_db
     def is_module_enabled(username, module_name):
-        """Check if a module is enabled for a client"""
+        """Check if a module is enabled for a client by checking all platforms"""
         try:
             client = db[CLIENTS_COLLECTION].find_one(
                 {"username": username},
-                {f"modules.{module_name}": 1}
+                {"platforms": 1}
             )
             
-            if not client or "modules" not in client:
+            if not client or "platforms" not in client:
                 return False
-                
-            module = client["modules"].get(module_name, {})
-            return module.get("enabled", False)
+            
+            # Check if module is enabled on any platform
+            platforms = client["platforms"]
+            for platform_name, platform_cfg in platforms.items():
+                if platform_cfg.get("enabled"):
+                    modules = platform_cfg.get("modules", {})
+                    if module_name in modules and modules[module_name].get("enabled"):
+                        return True
+            return False
         except PyMongoError as e:
             logger.error(f"Failed to check module status: {str(e)}")
             return False
 
     # get_module_settings method removed - these modules don't have settings, only enabled status
+
+    @staticmethod
+    @with_db
+    def get_module_status(username, platform, module_name):
+        """Get the enabled status of a specific module for a client and platform."""
+        try:
+            client = db[CLIENTS_COLLECTION].find_one(
+                {"username": username},
+                {f"platforms.{platform}.modules.{module_name}.enabled": 1}
+            )
+            if not client:
+                return False
+            
+            platform_data = client.get("platforms", {}).get(platform, {})
+            module_data = platform_data.get("modules", {}).get(module_name, {})
+            return module_data.get("enabled", False)
+        except PyMongoError as e:
+            logger.error(f"Failed to get module status for {username}, {platform}, {module_name}: {str(e)}")
+            return False
+
+    @staticmethod
+    @with_db
+    def update_module_status(username, platform, module_name, enabled):
+        """Update the enabled status of a specific module for a client and platform."""
+        try:
+            update_data = {
+                f"platforms.{platform}.modules.{module_name}.enabled": bool(enabled),
+                "updated_at": datetime.now(timezone.utc)
+            }
+            
+            result = db[CLIENTS_COLLECTION].update_one(
+                {"username": username},
+                {"$set": update_data}
+            )
+            if result.modified_count > 0:
+                Client.reload_main_app_memory()
+                return True
+            return False
+        except PyMongoError as e:
+            logger.error(f"Failed to update module status for {username}, {platform}, {module_name}: {str(e)}")
+            return False
+
+    @staticmethod
+    @with_db
+    def get_platform_module_settings(username, platform):
+        """Get all module settings for a given platform for a client."""
+        try:
+            client = db[CLIENTS_COLLECTION].find_one(
+                {"username": username},
+                {f"platforms.{platform}.modules": 1}
+            )
+            if not client:
+                return {}
+            
+            platform_data = client.get("platforms", {}).get(platform, {})
+            return platform_data.get("modules", {})
+        except PyMongoError as e:
+            logger.error(f"Failed to get module settings for {username}, {platform}: {str(e)}")
+            return {}
+
+    @staticmethod
+    @with_db
+    def get_platform_enabled_status(username, platform):
+        """Get the enabled status of a specific platform for a client."""
+        try:
+            client = db[CLIENTS_COLLECTION].find_one(
+                {"username": username},
+                {f"platforms.{platform}.enabled": 1}
+            )
+            if not client:
+                return False
+            
+            platform_data = client.get("platforms", {}).get(platform, {})
+            return platform_data.get("enabled", False)
+        except PyMongoError as e:
+            logger.error(f"Failed to get platform status for {username}, {platform}: {str(e)}")
+            return False
+
+    @staticmethod
+    @with_db
+    def update_platform_enabled_status(username, platform, enabled):
+        """Update the enabled status of a specific platform for a client."""
+        try:
+            update_data = {
+                f"platforms.{platform}.enabled": bool(enabled),
+                "updated_at": datetime.now(timezone.utc)
+            }
+            
+            result = db[CLIENTS_COLLECTION].update_one(
+                {"username": username},
+                {"$set": update_data}
+            )
+            if result.modified_count > 0:
+                Client.reload_main_app_memory()
+                return True
+            return False
+        except PyMongoError as e:
+            logger.error(f"Failed to update platform status for {username}, {platform}: {str(e)}")
+            return False
+
+    @staticmethod
+    @with_db
+    def get_client_platforms_config(username):
+        """Get all platform configurations for a client."""
+        try:
+            client = db[CLIENTS_COLLECTION].find_one(
+                {"username": username},
+                {"platforms": 1}
+            )
+            if not client:
+                return {}
+            
+            return client.get("platforms", {})
+        except PyMongoError as e:
+            logger.error(f"Failed to get client platforms config for {username}: {str(e)}")
+            return {}
+
+    @staticmethod
+    def reload_main_app_memory():
+        """Trigger main app to reload memory from DB."""
+        logging.info("Triggering main app to reload memory from DB.")
+        try:
+            from ..config import Config
+            import requests
+            
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {Config.VERIFY_TOKEN}"}
+            response = requests.post(
+                Config.BASE_URL + "/hooshang_update/reload-memory",
+                headers=headers
+            )
+            if response.status_code == 200:
+                logging.info("Main app memory reload triggered successfully.")
+                return True
+            else:
+                logging.error(f"Failed to trigger main app memory reload. Status: {response.status_code}, Response: {response.text}")
+                return False
+        except Exception as e:
+            logging.error(f"Error triggering main app memory reload: {str(e)}")
+            return False
 
     # ===== CLIENT MANAGEMENT UTILITIES =====
     
@@ -490,7 +660,7 @@ class Client:
                     "stories": db[STORIES_COLLECTION].count_documents({"client_username": client_username})
                 },
                 "usage_stats": client.get("usage_stats", {}),
-                "modules": client.get("modules", {}),
+                "platforms": client.get("platforms", {}),
                 "last_activity": client.get("usage_stats", {}).get("last_activity")
             }
             
@@ -551,11 +721,13 @@ class Client:
                     "last_login": client.get("last_login"),
                     "keys": client.get("keys", {}),
                     "openai": client.get("openai", {}),
-                    "modules": client.get("modules", {}),
+                    "platforms": client.get("platforms", {}),
                     "last_activity": client.get("usage_stats", {}).get("last_activity"),
                     "total_users": client.get("usage_stats", {}).get("total_users", 0),
                     "enabled_modules": [
-                        module for module, config in client.get("modules", {}).items()
+                        module for platform_name, platform_cfg in client.get("platforms", {}).items()
+                        if platform_cfg.get("enabled")
+                        for module, config in platform_cfg.get("modules", {}).items()
                         if config.get("enabled", False)
                     ]
                 }

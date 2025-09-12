@@ -1,9 +1,10 @@
+import math
 from datetime import datetime, timezone
 from .database import db, USERS_COLLECTION, with_db
 import logging
 from pymongo.errors import PyMongoError
 from bson import ObjectId
-from .enums import UserStatus, MessageRole
+from .enums import UserStatus, MessageRole, Platform
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,6 @@ class User:
 
     # Status constants (for backward compatibility)
     STATUS_WAITING = UserStatus.WAITING.value
-    STATUS_REPLIED = UserStatus.REPLIED.value
     STATUS_ADMIN_REPLIED = UserStatus.ADMIN_REPLIED.value
     STATUS_ASSISTANT_REPLIED = UserStatus.ASSISTANT_REPLIED.value
     STATUS_FIXED_REPLIED = UserStatus.FIXED_REPLIED.value
@@ -28,12 +28,21 @@ class User:
     STATUS_SCRAPED = UserStatus.SCRAPED.value
 
     @staticmethod
-    def create_user_document(user_id, username, client_username, thread_id=None, status=UserStatus.WAITING.value):
+    def create_user_document(user_id, username, client_username, thread_id=None, status=UserStatus.WAITING.value, platform=None, first_name=None, last_name=None, language_code=None, is_premium=False, profile_photo_url=None):
         """Create a new user document structure"""
+        if platform is None:
+            raise ValueError("platform is required when creating a user document")
         document = {
             "user_id": str(user_id),
             "username": username,
+            "first_name": first_name,
+            "last_name": last_name,
+            "language_code": language_code,
+            "is_premium": is_premium,
+            "profile_photo_url": profile_photo_url,
+            "profile_photo_last_checked": datetime.now(timezone.utc) if profile_photo_url else None,
             "client_username": client_username,  # Links user to specific client
+            "platform": platform,
             "status": status,
             "thread_id": thread_id,
             "created_at": datetime.now(timezone.utc),
@@ -48,7 +57,7 @@ class User:
         return document
 
     @staticmethod
-    def create_message_document(text, role=MessageRole.USER.value, media_type=None, media_url=None, timestamp=None, mid=None):
+    def create_message_document(text, role=MessageRole.USER.value, media_type=None, media_url=None, timestamp=None, mid=None, message_id=None, entities=None, reply_to_message_id=None, edit_date=None):
         """Create a direct message document to be stored in user's direct_messages array"""
         if timestamp is None:
             timestamp = datetime.now(timezone.utc)
@@ -57,22 +66,26 @@ class User:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
 
         message = {
+            "message_id": message_id,
             "text": text,
             "role": role,
             "timestamp": timestamp
         }
 
-        # Only add media fields if they exist
+        # Only add optional fields if they exist
         if media_url:
             message["media_url"] = media_url
-
         if media_type:
             message["media_type"] = media_type
-
-        # Add mid if provided (for tracking Instagram message IDs)
         if mid:
-            message["mid"] = mid
-
+            message["mid"] = mid # for Instagram
+        if entities:
+            message["entities"] = entities
+        if reply_to_message_id:
+            message["reply_to_message_id"] = reply_to_message_id
+        if edit_date:
+            message["edit_date"] = edit_date
+            
         return message
 
     @staticmethod
@@ -151,18 +164,140 @@ class User:
 
     @staticmethod
     @with_db
-    def create(user_id, username, client_username, status, thread_id=None):
+    def create(user_id, username, client_username, status, thread_id=None, platform=None):
         """Create a new user"""
+        if platform is None:
+            raise ValueError("platform is required when creating a user")
         user_doc = User.create_user_document(
             user_id=user_id,
             username=username,
             client_username=client_username,
             thread_id=thread_id,
-            status=status
+            status=status,
+            platform=platform
         )
         db[USERS_COLLECTION].insert_one(user_doc)
         return user_doc
 
+    # -------- Platform-specific helpers --------
+    @staticmethod
+    def create_instagram_user(user_id, username, client_username, status, thread_id=None):
+        """Create a new Instagram user"""
+        return User.create(
+            user_id=user_id,
+            username=username,
+            client_username=client_username,
+            status=status,
+            thread_id=thread_id,
+            platform=Platform.INSTAGRAM.value,
+        )
+
+    @staticmethod
+    def create_telegram_user(user_id, username, client_username, status, thread_id=None):
+        """Create a new Telegram user"""
+        return User.create(
+            user_id=user_id,
+            username=username,
+            client_username=client_username,
+            status=status,
+            thread_id=thread_id,
+            platform=Platform.TELEGRAM.value,
+        )
+
+    @staticmethod
+    def create_instagram_document(user_id, username, client_username, thread_id=None, status=UserStatus.WAITING.value):
+        """Create an Instagram user document (without insertion)"""
+        return User.create_user_document(
+            user_id=user_id,
+            username=username,
+            client_username=client_username,
+            thread_id=thread_id,
+            status=status,
+            platform=Platform.INSTAGRAM.value,
+        )
+
+    @staticmethod
+    def create_telegram_document(user_id, username, client_username, thread_id=None, status=UserStatus.WAITING.value, first_name=None, last_name=None, language_code=None, is_premium=False, profile_photo_url=None):
+        """Create a Telegram user document (without insertion)"""
+        return User.create_user_document(
+            user_id=user_id,
+            username=username,
+            client_username=client_username,
+            thread_id=thread_id,
+            status=status,
+            platform=Platform.TELEGRAM.value,
+            first_name=first_name,
+            last_name=last_name,
+            language_code=language_code,
+            is_premium=is_premium,
+            profile_photo_url=profile_photo_url
+        )
+    
+    @staticmethod
+    @with_db
+    def upsert_telegram_user_and_messages(user_id, client_username, user_profile_data, message_docs):
+        """
+        Atomically updates a Telegram user's profile and pushes new messages.
+        If the user doesn't exist, they are created.
+        This prevents race conditions and field conflicts.
+        
+        :param user_id: The Telegram user ID.
+        :param client_username: The client context.
+        :param user_profile_data: A dict with keys like 'username', 'first_name', etc.
+        :param message_docs: A list of message documents to push.
+        """
+        try:
+            # 1. Define the fields that should be updated on every interaction
+            set_spec = {
+                "status": UserStatus.WAITING.value,
+                "updated_at": datetime.now(timezone.utc),
+                **user_profile_data # Unpack all profile data here
+            }
+
+            # 2. Define the user document to be created ONLY if the user is new
+            user_doc_on_insert = User.create_telegram_document(
+                user_id=user_id,
+                client_username=client_username,
+                status=UserStatus.WAITING.value,
+                username=user_profile_data.get('username'),
+                first_name=user_profile_data.get('first_name'),
+                last_name=user_profile_data.get('last_name'),
+                language_code=user_profile_data.get('language_code'),
+                is_premium=user_profile_data.get('is_premium', False)
+            )
+
+            # 3. IMPORTANT: Remove any keys from $setOnInsert that are also in $set to avoid conflict
+            for key in set_spec.keys():
+                user_doc_on_insert.pop(key, None)
+            
+            # Remove array keys that will be handled by $push
+            user_doc_on_insert.pop("direct_messages", None)
+            user_doc_on_insert.pop("comments", None)
+            user_doc_on_insert.pop("reactions", None)
+
+            # 4. Build the final update query
+            update_query = {
+                "$setOnInsert": user_doc_on_insert,
+                "$set": set_spec
+            }
+            
+            # 5. Add the $push operation only if there are messages to add
+            if message_docs:
+                update_query["$push"] = {"direct_messages": {"$each": message_docs}}
+
+            # 6. Execute the atomic upsert operation
+            result = db[USERS_COLLECTION].update_one(
+                {"user_id": user_id, "client_username": client_username},
+                update_query,
+                upsert=True
+            )
+            
+            return result.modified_count > 0 or result.upserted_id is not None or result.matched_count > 0
+
+        except PyMongoError as e:
+            logger.error(f"Failed to upsert Telegram user and messages: {str(e)}")
+            return False
+        
     @staticmethod
     @with_db
     def update(user_id, update_data, client_username=None):
@@ -324,6 +459,33 @@ class User:
             query,
             limit=limit
         ))
+    
+    @staticmethod
+    @with_db
+    def get_users_by_platform_for_client(platform, client_username=None):
+        """Get all users for a given platform and client, projecting only necessary fields for a user list."""
+        try:
+            match_filter = {"platform": platform}
+            if client_username:
+                match_filter["client_username"] = client_username
+
+            projection = {
+                "user_id": 1,
+                "username": 1,
+                "first_name": 1,
+                "last_name": 1,
+                "profile_photo_url": 1,
+                "updated_at": 1,
+                "_id": 0
+            }
+
+            sort_order = [("updated_at", -1)]
+
+            users = list(db[USERS_COLLECTION].find(match_filter, projection).sort(sort_order))
+            return users
+        except PyMongoError as e:
+            logger.error(f"Failed to get users by platform: {str(e)}")
+            return []
 
     @staticmethod
     @with_db
@@ -568,3 +730,197 @@ class User:
         except PyMongoError as e:
             logger.error(f"Failed to get message statistics within timeframe: {str(e)}")
             return {}
+
+    @staticmethod
+    @with_db
+    def get_message_statistics_by_role_within_timeframe_by_platform(time_frame, start_date, end_date, platform, client_username=None):
+        """Get message statistics by role, time frame, and platform"""
+        try:
+            if time_frame == "hourly":
+                group_format = {
+                    "year": {"$year": "$direct_messages.timestamp"},
+                    "month": {"$month": "$direct_messages.timestamp"},
+                    "day": {"$dayOfMonth": "$direct_messages.timestamp"},
+                    "hour": {"$hour": "$direct_messages.timestamp"}
+                }
+            else:
+                group_format = {
+                    "year": {"$year": "$direct_messages.timestamp"},
+                    "month": {"$month": "$direct_messages.timestamp"},
+                    "day": {"$dayOfMonth": "$direct_messages.timestamp"}
+                }
+            match_filter = {
+                "platform": platform,
+                "direct_messages.timestamp": {"$gte": start_date, "$lte": end_date}
+            }
+            if client_username:
+                match_filter["client_username"] = client_username
+            pipeline = [
+                {"$unwind": "$direct_messages"},
+                {"$match": match_filter},
+                {"$group": {
+                    "_id": {
+                        "date": group_format,
+                        "role": "$direct_messages.role"
+                    },
+                    "count": {"$sum": 1}
+                }},
+                {"$sort": {"_id.date": 1}}
+            ]
+            results = list(db[USERS_COLLECTION].aggregate(pipeline))
+            statistics = {}
+            for result in results:
+                date_parts = result["_id"]["date"]
+                if time_frame == "hourly":
+                    date_str = f"{date_parts['year']}-{date_parts['month']:02d}-{date_parts['day']:02d} {date_parts['hour']:02d}:00:00"
+                else:
+                    date_str = f"{date_parts['year']}-{date_parts['month']:02d}-{date_parts['day']:02d}"
+                role = result["_id"]["role"]
+                count = result["count"]
+                if date_str not in statistics:
+                    statistics[date_str] = {}
+                statistics[date_str][role] = count
+            return statistics
+        except PyMongoError as e:
+            logger.error(f"Failed to get message statistics by platform: {str(e)}")
+            return {}
+
+    @staticmethod
+    @with_db
+    def get_user_status_counts_by_platform(platform, client_username=None):
+        """Get user status counts by platform"""
+        try:
+            match_filter = {"platform": platform}
+            if client_username:
+                match_filter["client_username"] = client_username
+            pipeline = [
+                {"$match": match_filter},
+                {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+                {"$sort": {"_id": 1}}
+            ]
+            results = list(db[USERS_COLLECTION].aggregate(pipeline))
+            return {result["_id"]: result["count"] for result in results}
+        except PyMongoError as e:
+            logger.error(f"Failed to get user status counts by platform: {str(e)}")
+            return {}
+
+    @staticmethod
+    @with_db
+    def get_user_status_counts_within_timeframe_by_platform(start_date, end_date, platform, client_username=None):
+        """Get user status counts within a timeframe by platform"""
+        try:
+            match_filter = {
+                "platform": platform,
+                "updated_at": {"$gte": start_date, "$lte": end_date}
+            }
+            if client_username:
+                match_filter["client_username"] = client_username
+            pipeline = [
+                {"$match": match_filter},
+                {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+                {"$sort": {"_id": 1}}
+            ]
+            results = list(db[USERS_COLLECTION].aggregate(pipeline))
+            return {result["_id"]: result["count"] for result in results}
+        except PyMongoError as e:
+            logger.error(f"Failed to get user status counts by platform and timeframe: {str(e)}")
+            return {}
+
+    @staticmethod
+    @with_db
+    def get_total_users_count_by_platform(platform, client_username=None):
+        """Get total user count by platform"""
+        try:
+            match_filter = {"platform": platform}
+            if client_username:
+                match_filter["client_username"] = client_username
+            return db[USERS_COLLECTION].count_documents(match_filter)
+        except PyMongoError as e:
+            logger.error(f"Failed to get total users count by platform: {str(e)}")
+            return 0
+
+    @staticmethod
+    @with_db
+    def get_total_users_count_within_timeframe_by_platform(start_date, end_date, platform, client_username=None):
+        """Get total user count within a timeframe by platform"""
+        try:
+            match_filter = {
+                "platform": platform,
+                "updated_at": {"$gte": start_date, "$lte": end_date}
+            }
+            if client_username:
+                match_filter["client_username"] = client_username
+            return db[USERS_COLLECTION].count_documents(match_filter)
+        except PyMongoError as e:
+            logger.error(f"Failed to get total users count by platform and timeframe: {str(e)}")
+            return 0
+    
+    @staticmethod
+    @with_db
+    def get_paginated_users_by_platform(platform, client_username, page=1, limit=25, status_filter=None):
+        """
+        Retrieves a paginated and filtered list of users for a specific platform and client.
+
+        Args:
+            platform (str): The platform to filter by (e.g., 'instagram').
+            client_username (str): The client's username.
+            page (int): The page number to retrieve, starting from 1.
+            limit (int): The number of users to return per page.
+            status_filter (str, optional): The user status to filter by. Defaults to None.
+
+        Returns:
+            dict: A dictionary containing:
+                  - 'users' (list): The list of user documents.
+                  - 'total_count' (int): The total number of users matching the filter.
+                  - 'total_pages' (int): The total number of pages available.
+        """
+        try:
+            # 1. Build the database query filter
+            query = {
+                "platform": platform,
+                "client_username": client_username
+            }
+            
+            # 2. Add the status filter if it is provided
+            if status_filter:
+                query["status"] = status_filter
+                
+            # 3. Get the total count of documents matching the query for pagination
+            total_count = db[USERS_COLLECTION].count_documents(query)
+            if total_count == 0:
+                return {"users": [], "total_count": 0, "total_pages": 0}
+
+            # 4. Calculate pagination details
+            total_pages = math.ceil(total_count / limit)
+            # Ensure page number is within a valid range
+            page = max(1, min(page, total_pages))
+            skip_amount = (page - 1) * limit
+
+            # 5. Define the projection to fetch only necessary fields
+            projection = {
+                "user_id": 1,
+                "username": 1,
+                "first_name": 1,
+                "last_name": 1,
+                "profile_photo_url": 1,
+                "updated_at": 1,
+                "_id": 0  # Exclude the MongoDB ObjectId
+            }
+            
+            # 6. Execute the query to get the paginated subset of users.
+            # Sorting by 'updated_at' descending shows the most recently active users first.
+            cursor = db[USERS_COLLECTION].find(
+                query,
+                projection
+            ).sort([("updated_at", -1)]).skip(skip_amount).limit(limit)
+            
+            users_list = list(cursor)
+                
+            return {
+                "users": users_list,
+                "total_count": total_count,
+                "total_pages": total_pages
+            }
+        except PyMongoError as e:
+            logger.error(f"Failed to fetch paginated users for client {client_username}: {e}")
+            return {"users": [], "total_count": 0, "total_pages": 0, "error": str(e)}

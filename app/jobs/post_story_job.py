@@ -1,7 +1,7 @@
 import logging
 import time
 from tenacity import retry, stop_after_attempt, wait_exponential
-from ..services.instagram_service import InstagramService
+from ..services.platforms.instagram import InstagramService
 from ..utils.helpers import get_db
 
 # Set up logging

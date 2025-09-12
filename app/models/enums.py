@@ -4,11 +4,11 @@ class UserStatus(Enum):
     """Enumeration for user status."""
     SCRAPED = "SCRAPED"     # User has been scraped from Instagram
     WAITING = "WAITING"   # User is waiting for a response
-    REPLIED = "REPLIED"   # User has received a response (deprecated - use specific types)
     ADMIN_REPLIED = "ADMIN_REPLIED"  # User has received an admin response
     ASSISTANT_REPLIED = "ASSISTANT_REPLIED"  # User has received an assistant response
     FIXED_REPLIED = "FIXED_REPLIED"  # User has received a fixed response
     INSTAGRAM_FAILED = "INSTAGRAM_FAILED"  # Instagram failed to send the message
+    TELEGRAM_FAILED = "TELEGRAM_FAILED"  # telegram failed to send the message
     ASSISTANT_FAILED = "ASSISTANT_FAILED"  # Assistant (OpenAI) failed to generate a response
 
 class MessageRole(Enum):
@@ -27,13 +27,17 @@ class ClientStatus(Enum):
     TRIAL = "trial"       # Client is on trial period
     EXPIRED = "expired"   # Client's subscription has expired
 
+class Platform(Enum):
+    """Enumeration for platform."""
+    INSTAGRAM = "instagram"
+    TELEGRAM = "telegram"
+
 class ModuleType(Enum):
     """Enumeration for available client modules."""
     FIXED_RESPONSE = "fixed_response"         # Fixed response automation
     DM_ASSIST = "dm_assist"                   # Direct message assistant
     COMMENT_ASSIST = "comment_assist"         # Comment assistant
     VISION = "vision"                         # Vision/image analysis
-    SCRAPER = "scraper"                       # Web/IG scraper
     ORDERBOOK = "orderbook"                   # Orderbook management
 
 class OrderStatus(Enum):
