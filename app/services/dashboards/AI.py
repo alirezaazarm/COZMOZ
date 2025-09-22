@@ -120,7 +120,6 @@ class DataManagerBackend:
             return False
 
     def update_products(self):
-        self._validate_client_access('scraper')
         logging.info(f"Scraping the site is starting for client: {self.client_username or 'admin'}")
         try:
             self.scraper.update_products()
@@ -255,7 +254,7 @@ class DataManagerBackend:
         except Exception as e:
             logging.error(f"Error in rebuild_files_and_vs: {str(e)}")
             return False
-        
+
 class OpenAIBackend:
     def __init__(self, client_username=None):
         self.client_username = client_username

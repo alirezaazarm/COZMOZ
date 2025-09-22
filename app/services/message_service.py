@@ -47,7 +47,7 @@ class MessageService:
             last_non_user_idx = -1
             for i, msg in enumerate(all_messages):
                 role = msg.get("role")
-                if role in [MessageRole.ASSISTANT.value, MessageRole.ADMIN.value]:
+                if role in [MessageRole.ASSISTANT.value, MessageRole.ADMIN.value, MessageRole.FIXED_RESPONSE.value]:
                     last_non_user_idx = i
 
             # Get messages after the last assistant/admin message (or all if none found)
