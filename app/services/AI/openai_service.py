@@ -2,6 +2,7 @@ from ...utils.exceptions import PermanentError, RetryableError
 from ...models.product import Product
 from ...models.additional_info import Additionalinfo
 from ...models.client import Client
+from ...models.enums import Platform,ModuleType
 from ...models.database import db
 from ...config import Config
 import openai
@@ -88,25 +89,25 @@ class OpenAIService:
     def clear_files(self, model_cls) -> bool:
         entries = model_cls.get_all(client_username=self.client_obj['username'])
         success = True
-        
+
         # Get all entry titles to match against OpenAI files
         entry_titles = set()
         for entry in entries:
             title = entry.get('title')
             if title:
                 entry_titles.add(f"{title}.json")  # Files are uploaded with .json extension
-        
+
         # Get all files from OpenAI and find matches by filename
         try:
             openai_files = self.client.files.list(purpose='assistants')
             files_to_delete = []
-            
+
             for file_obj in openai_files.data:
                 filename = getattr(file_obj, 'filename', '')
                 if filename in entry_titles:
                     files_to_delete.append(file_obj.id)
                     logger.info(f"Found file to delete: {filename} (ID: {file_obj.id})")
-            
+
             # Delete all matching files from OpenAI
             for file_id in files_to_delete:
                 try:
@@ -119,11 +120,11 @@ class OpenAIService:
                 except Exception as e:
                     logger.error(f"Error deleting file '{file_id}': {e}")
                     success = False
-            
+
         except Exception as e:
             logger.error(f"Error listing files from OpenAI: {e}")
             success = False
-        
+
         # Reset file_id in database entries to None
         for entry in entries:
             try:
@@ -133,7 +134,7 @@ class OpenAIService:
             except Exception as e:
                 logger.error(f"Error resetting file_id for entry '{identifier}': {e}")
                 success = False
-                
+
         return success
 
     def upload_files(self, model_cls, folder_name: str) -> bool:
@@ -169,7 +170,7 @@ class OpenAIService:
         else: # additionalinfo
             if entry["content_format"] == "json":
                 return entry["content"]
-            
+
             else: #markdown
                 return {
                     'title': entry['title'],
@@ -263,7 +264,7 @@ class OpenAIService:
             logger.error(f"Error in create_vs: {e}")
             return None
 
-    def rebuild_all(self) -> bool:        
+    def rebuild_all(self) -> bool:
         ok1 = self.clear_files(Product)
         Client.append_log(self.client_username, 'clear_files_product', 'success' if ok1 else 'failure')
         ok2 = self.clear_files(Additionalinfo)
@@ -275,16 +276,18 @@ class OpenAIService:
         if not (ok1 and ok2 and ok3 and ok4):
             Client.append_log(self.client_username, 'rebuild_all', 'failure', details='One or more clear/upload steps failed')
             # Disable DM_ASSIST module if any step failed
-            Client.disable_module(self.client_username, ModuleType.DM_ASSIST.value)
-            Client.append_log(self.client_username, 'disable_dm_assist', 'success', details='Disabled DM_ASSIST due to rebuild_all failure')
+            Client.update_module_status(self.client_username, Platform.INSTAGRAM._value_, ModuleType.DM_ASSIST.value , False)
+            Client.update_module_status(self.client_username, Platform.TELEGRAM._value_, ModuleType.DM_ASSIST.value , False)
+            Client.append_log(self.client_username, 'disable_dm_assist', 'success', details='Disabled DM_ASSIST for all platforms due to rebuild_all failure')
         else:
             Client.append_log(self.client_username, 'rebuild_all', 'success')
         vs_id = self.create_vs()
         if not vs_id:
             Client.append_log(self.client_username, 'create_vs', 'failure')
             # Disable DM_ASSIST module if vector store creation failed
-            Client.disable_module(self.client_username, ModuleType.DM_ASSIST.value)
-            Client.append_log(self.client_username, 'disable_dm_assist', 'success', details='Disabled DM_ASSIST due to create_vs failure')
+            Client.update_module_status(self.client_username, Platform.INSTAGRAM._value_, ModuleType.DM_ASSIST.value , False)
+            Client.update_module_status(self.client_username, Platform.TELEGRAM._value_, ModuleType.DM_ASSIST.value , False)
+            Client.append_log(self.client_username, 'disable_dm_assist', 'success', details='Disabled DM_ASSIST for all platforms due to create_vs failure')
             return False
         Client.append_log(self.client_username, 'create_vs', 'success')
         return True
@@ -521,7 +524,7 @@ class OpenAIService:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "tx_id": {"type": "integer", "description": "شماره ارجاع(یا مرجع) تراکنش"}                           
+                            "tx_id": {"type": "integer", "description": "شماره ارجاع(یا مرجع) تراکنش"}
                         },
                         "required": ["tx_id"]
                     }
