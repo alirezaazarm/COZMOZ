@@ -89,14 +89,14 @@ class TelegramService:
 
             if not data.get("ok") or not data.get("result", {}).get("photos"):
                 return None
-            
+
             # Get the highest resolution photo (last in the list)
             highest_res_photo = data["result"]["photos"][0][-1]
             file_id = highest_res_photo.get("file_id")
 
             if not file_id:
                 return None
-            
+
             # Use the existing helper to get the final downloadable URL
             return TelegramService._get_file_url(token, file_id)
 
@@ -140,7 +140,7 @@ class TelegramService:
         try:
             from datetime import timedelta
 
-            message = update.get('message') or update.get('edited_message')
+            message = update.get('message').strip() or update.get('edited_message').strip()
             if not message:
                 logger.info("Ignoring non-message Telegram update")
                 return True
@@ -159,12 +159,12 @@ class TelegramService:
                 'language_code': from_user.get('language_code'),
                 'is_premium': from_user.get('is_premium', False)
             }
-            
+
             # Check if we need to refresh the profile photo
             user = User.get_by_id(user_id, client_username)
             should_fetch_photo = True
             CACHE_DURATION = timedelta(hours=24)
-            
+
             if user and 'profile_photo_last_checked' in user and user.get('profile_photo_last_checked'):
                 last_checked = user['profile_photo_last_checked']
 
@@ -184,7 +184,7 @@ class TelegramService:
                     photo_url = TelegramService._get_user_profile_photo_url(token, user_id)
                     if photo_url:
                         user_profile_data['profile_photo_url'] = photo_url
-                
+
                 # Always update the checked timestamp, even if fetching failed
                 user_profile_data['profile_photo_last_checked'] = datetime.now(timezone.utc)
 
@@ -218,14 +218,14 @@ class TelegramService:
                 user_profile_data=user_profile_data,
                 message_docs=messages_to_push
             )
-            
+
             if not success:
                 logger.warning(f"Failed to store Telegram message via User model: user_id={user_id}, client={client_username}")
                 return False
 
             logger.info(f"Stored Telegram message and updated profile for user {user_id} (client {client_username})")
             return True
-            
+
         except Exception as e:
             logger.error(f"Unexpected error handling Telegram update: {str(e)}", exc_info=True)
             return False

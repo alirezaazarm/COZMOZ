@@ -651,14 +651,14 @@ class InstagramService:
             if not client_creds:
                 logger.error(f"[handle_message] No credentials found for client: {client_username}")
                 return False
-            
+
             client_page_id = client_creds.get('ig_id')
             if not client_page_id:
                 logger.error(f"[handle_message] No ig_id found for client: {client_username}")
                 return False
 
             # Get message details
-            message_text = message_data.get('text', '')
+            message_text = message_data.get('text', '').strip()
             media_type = message_data.get('media_type')
             media_url = message_data.get('media_url')
             timestamp = message_data.get('timestamp')
@@ -716,7 +716,7 @@ class InstagramService:
                 # Check if this MID already exists in our database
                 message_mid = message_data.get('id')
                 mid_exists = User.check_mid_exists(actual_user_id, message_mid, client_username)
-                
+
                 if mid_exists:
                     # MID exists, this is a duplicate echo - skip processing
                     logger.info(f"[handle_message] MID {message_mid} already exists in database, skipping duplicate echo")
@@ -758,15 +758,6 @@ class InstagramService:
 
                 logger.debug(f"[handle_message] Created message document for echo message: {message_doc}")
 
-                # Determine appropriate status based on role
-                if msg_role == MessageRole.ASSISTANT.value:
-                    new_status = UserStatus.ASSISTANT_REPLIED.value
-                elif msg_role == MessageRole.ADMIN.value:
-                    new_status = UserStatus.ADMIN_REPLIED.value
-                elif msg_role == MessageRole.FIXED_RESPONSE.value:
-                    new_status = UserStatus.FIXED_REPLIED.value
-                else:
-                    new_status = UserStatus.REPLIED.value  # fallback
 
                 # Update status based on message role
                 try:
@@ -774,7 +765,7 @@ class InstagramService:
                         {"user_id": actual_user_id, "client_username": client_username},  # Use the actual user ID and client
                         {
                             "$push": {"direct_messages": message_doc},
-                            "$set": {"status": new_status, "updated_at": datetime.now(timezone.utc)}
+                            "$set": {"status": msg_role, "updated_at": datetime.now(timezone.utc)}
                         }
                     )
 
@@ -804,7 +795,7 @@ class InstagramService:
                                 {"user_id": actual_user_id, "client_username": client_username},
                                 {
                                     "$push": {"direct_messages": message_doc},
-                                    "$set": {"status": UserStatus.REPLIED.value, "updated_at": datetime.now(timezone.utc)}
+                                    "$set": {"status": UserStatus.FIXED_REPLIED.value, "updated_at": datetime.now(timezone.utc)}
                                 }
                             )
                             logger.info(f"[handle_message] Second attempt result: matched={result.matched_count}, modified={result.modified_count}")
@@ -817,7 +808,7 @@ class InstagramService:
                                     {"user_id": actual_user_id, "client_username": client_username},
                                     {
                                         "$push": {"direct_messages": message_doc},
-                                        "$set": {"status": UserStatus.REPLIED.value, "updated_at": datetime.now(timezone.utc)}
+                                        "$set": {"status": UserStatus.FIXED_REPLIED.value, "updated_at": datetime.now(timezone.utc)}
                                     },
                                     upsert=True
                                 )
@@ -1052,10 +1043,10 @@ class InstagramService:
             if not client_creds:
                 logger.error(f"No Facebook credentials found for client: {client_username}")
                 return False
-            
+
             page_id = client_creds.get('ig_id')
             fb_access_token = client_creds.get('facebook_access_token')
-            
+
             if not page_id or not fb_access_token:
                 logger.error(f"Missing ig_id or facebook_access_token for client: {client_username}")
                 return False
@@ -1161,10 +1152,10 @@ class InstagramService:
             if not client_creds:
                 logger.error(f"No Facebook credentials found for client: {client_username}")
                 return []
-            
+
             page_id = client_creds.get('ig_id')
             fb_access_token = client_creds.get('facebook_access_token')
-            
+
             if not page_id or not fb_access_token:
                 logger.error(f"Missing ig_id or facebook_access_token for client: {client_username}")
                 return []
@@ -1246,7 +1237,7 @@ class InstagramService:
                     response_text = actions.get('direct_response_text')
                     if response_text:
                         logger.info(f"Sending fixed DM for story {story_id} using trigger '{trig_key}' to user {user_id} (client: {client_username})")
-                        
+
                         # Ensure user exists in database before storing messages
                         user_check = db.users.find_one({"user_id": user_id, "client_username": client_username})
                         if not user_check:
@@ -1259,24 +1250,24 @@ class InstagramService:
                             )
                             db.users.insert_one(user_doc)
                             logger.info(f"Created new user record for story reply user: {user_id} (client: {client_username})")
-                        
+
                         # First, store the user's story reply message
                         story_details = Story.get_by_instagram_id(story_id, client_username) if story_id else {}
                         user_message_text = f"Story replied by fixed response.\n\nstory label: {story_details.get('label', 'N/A')}\n\nstory caption: {story_details.get('caption', 'N/A')}\n\nadmin explanation: {story_details.get('admin_explanation', 'N/A')}\n\nuser message: {trigger_keyword}"
-                        
+
                         user_message_doc = User.create_message_document(
                             text=user_message_text,
                             role=MessageRole.USER.value,
                             timestamp=datetime.now(timezone.utc)
                         )
-                        
+
                         # Store user message first
                         db.users.update_one(
                             {"user_id": user_id, "client_username": client_username},
                             {"$push": {"direct_messages": user_message_doc}}
                         )
                         logger.info(f"Stored user story reply message for user {user_id} (client: {client_username})")
-                        
+
                         # Send the fixed response message
                         mid = InstagramService.send_message(user_id, response_text, client_username)
                         if mid:
