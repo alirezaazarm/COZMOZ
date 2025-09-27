@@ -324,15 +324,13 @@ class InstagramService:
         page_access_token = client_creds['page_access_token']
 
         MAX_RETRIES = 2
-        RETRY_DELAY = 2  # seconds - increased from 1 to 2 seconds
+        RETRY_DELAY = 2
 
         try:
-            # Ensure text doesn't exceed Instagram's limits
-            if len(text) > 1000:
+            if len(text) > 950:
                 logger.warning(f"Message too long ({len(text)} chars), will be truncated")
-                text = text[:980] + "..."
+                text = text[:930] + "..."
 
-            # Try to make the API call with retries
             for attempt in range(MAX_RETRIES + 1):
                 try:
                     logger.info(f"Sending message to {user_id} (attempt {attempt+1}/{MAX_RETRIES+1}) for client: {client_username or 'default'}")
@@ -340,13 +338,11 @@ class InstagramService:
                         "https://graph.instagram.com/v22.0/me/messages",
                         headers={"Authorization": f"Bearer {page_access_token}"},
                         json={"recipient": {"id": user_id}, "message": {"text": text}},
-                        timeout=30  # Increased from 15 to 30 seconds
+                        timeout=30
                     )
 
-                    # Log the response details
                     logger.debug(f"Instagram API response: status={response.status_code}, content={response.text[:100]}...")
 
-                    # Check for success
                     response.raise_for_status()
                     response_data = response.json()
                     mid = response_data.get('message_id')
@@ -359,12 +355,10 @@ class InstagramService:
                     status_code = getattr(error_response, 'status_code', None)
                     response_text = getattr(error_response, 'text', None)
 
-                    # Log detailed error information
                     logger.error(f"Instagram API error (attempt {attempt+1}): status={status_code}, response={response_text}")
 
-                    # Check if this is a rate limiting issue (429) or server error (5xx)
                     if status_code in [429, 500, 502, 503, 504] and attempt < MAX_RETRIES:
-                        retry_delay = RETRY_DELAY * (attempt + 1)  # Exponential backoff
+                        retry_delay = RETRY_DELAY * (attempt + 1)
                         logger.info(f"Retrying in {retry_delay} seconds (attempt {attempt+1}/{MAX_RETRIES})")
                         import time
                         time.sleep(retry_delay)
@@ -397,7 +391,6 @@ class InstagramService:
                         logger.error("Max retries reached for timeout error")
                         return None
 
-            # If we get here, all retries failed
             logger.error(f"Failed to send message after {MAX_RETRIES+1} attempts")
             return None
 
@@ -630,7 +623,6 @@ class InstagramService:
     def handle_message(db, message_data, client_username):
         """Process and handle an Instagram direct message for a specific client"""
         try:
-            # Log the message data for debugging
             logger.debug(f"[handle_message] Received message data: {message_data} for client: {client_username}")
 
             required_fields = ['id', 'from', 'timestamp']
@@ -658,28 +650,23 @@ class InstagramService:
                 return False
 
             # Get message details
-            message_text = message_data.get('text', '').strip()
+            message_text = (message_data.get('text') or '').strip()
             media_type = message_data.get('media_type')
             media_url = message_data.get('media_url')
-            timestamp = message_data.get('timestamp')
+            timestamp = parse_instagram_timestamp(message_data.get('timestamp'))
             is_echo = message_data.get('is_echo', False)
             role = message_data.get('role', MessageRole.USER.value)
 
             logger.info(f"[handle_message] Processing message ID: {message_data.get('id')} from user: {user_id}, is_echo: {is_echo}, role: {role}")
 
-            # Skip if message has no content (no text AND no media)
             if not message_text and not media_url:
                 logger.warning(f"[handle_message] Skipping empty message from user {user_id}")
                 return False
 
-            # *** SPECIAL HANDLING FOR ECHO MESSAGES FROM BUSINESS ACCOUNT ***
-            # For echo messages from the business account, we need to find or create the actual user
             actual_user_id = user_id
             if is_echo and user_id == client_page_id:
                 logger.debug(f"[handle_message] This is an echo message from client {client_username} business account.")
-                # We need to find the appropriate user record
 
-                # For messages, the recipient ID is the actual user
                 if 'recipient' in message_data:
                     actual_user_id = message_data.get('recipient', {}).get('id')
                     logger.debug(f"[handle_message] Found recipient ID in message_data: {actual_user_id}")
@@ -689,7 +676,6 @@ class InstagramService:
                     actual_user_id = user_id
                 else:
                     logger.debug(f"[handle_message] Using recipient ID as actual user: {actual_user_id}")
-                    # Make sure the user exists
                     user_check = db.users.find_one({"user_id": actual_user_id, "client_username": client_username})
                     if not user_check:
                         logger.info(f"[handle_message] Creating user record for recipient: {actual_user_id}")
@@ -703,50 +689,52 @@ class InstagramService:
                     else:
                         logger.debug(f"[handle_message] Found existing user record for recipient ID: {actual_user_id}")
 
-            # Process the sender user, this creates a document if needed
             if not is_echo or user_id != client_page_id:
-                # Only process the sender user if it's not an echo from business account
                 user = InstagramService.process_user(sender_info, UserStatus.WAITING.value, client_username)
                 if not user:
                     logger.error(f"[handle_message] Failed to process user: {user_id}")
                     return False
 
-            # Handle echo messages (admin or assistant replies)
             if is_echo:
-                # Check if this MID already exists in our database
                 message_mid = message_data.get('id')
                 mid_exists = User.check_mid_exists(actual_user_id, message_mid, client_username)
 
                 if mid_exists:
-                    # MID exists, this is a duplicate echo - skip processing
                     logger.info(f"[handle_message] MID {message_mid} already exists in database, skipping duplicate echo")
                     return True
                 else:
-                    # MID doesn't exist, need to determine correct role
-                    # Check if this is from a fixed response by looking at recent messages
                     user_doc = db.users.find_one({"user_id": actual_user_id, "client_username": client_username})
+                    msg_role = MessageRole.ADMIN.value
+                    user_status_to_set = UserStatus.ADMIN_REPLIED.value
+
                     if user_doc and user_doc.get('direct_messages'):
-                        # Get the most recent message
                         recent_messages = user_doc['direct_messages']
                         if recent_messages:
+
                             last_message = recent_messages[-1]
-                            # If the last message has fixed_response role, this echo is from a fixed response
                             if last_message.get('role') == MessageRole.FIXED_RESPONSE.value:
                                 msg_role = MessageRole.FIXED_RESPONSE.value
+                                user_status_to_set = UserStatus.FIXED_REPLIED.value
                                 logger.info(f"[handle_message] MID {message_mid} is from fixed response, assigning fixed_response role")
+                            elif last_message.get('role') == MessageRole.ADMIN.value:
+                                msg_role = MessageRole.ADMIN.value
+                                user_status_to_set = UserStatus.ADMIN_REPLIED.value
+                                logger.info(f"[handle_message] MID {message_mid} is from admin, assigning admin role and ADMIN_REPLIED status.")
+                            elif last_message.get('role') == MessageRole.ASSISTANT.value:
+                                msg_role = MessageRole.ASSISTANT.value
+                                user_status_to_set = UserStatus.ASSISTANT_REPLIED.value
+                                logger.info(f"[handle_message] MID {message_mid} is from assistant, assigning assistant role and ASSISTANT_REPLIED status.")
                             else:
                                 msg_role = MessageRole.ADMIN.value
-                                logger.info(f"[handle_message] MID {message_mid} not from fixed response, assigning admin role")
+                                user_status_to_set = UserStatus.ADMIN_REPLIED.value
+                                logger.info(f"[handle_message] No specific role found for last message, assigning ADMIN role and ADMIN_REPLIED status.")
                         else:
-                            msg_role = MessageRole.ADMIN.value
-                            logger.info(f"[handle_message] No previous messages, assigning admin role")
+                            logger.info(f"[handle_message] No previous messages, assigning ADMIN role and ADMIN_REPLIED status.")
                     else:
-                        msg_role = MessageRole.ADMIN.value
-                        logger.info(f"[handle_message] User not found or no messages, assigning admin role")
+                        logger.info(f"[handle_message] User not found or no messages, assigning ADMIN role and ADMIN_REPLIED status.")
 
                 logger.debug(f"[handle_message] Echo message with role: {msg_role}")
 
-                # Create a message document
                 message_doc = User.create_message_document(
                     text=message_text,
                     role=msg_role,
@@ -759,28 +747,25 @@ class InstagramService:
                 logger.debug(f"[handle_message] Created message document for echo message: {message_doc}")
 
 
-                # Update status based on message role
                 try:
                     result = db.users.update_one(
-                        {"user_id": actual_user_id, "client_username": client_username},  # Use the actual user ID and client
+                        {"user_id": actual_user_id, "client_username": client_username},
                         {
                             "$push": {"direct_messages": message_doc},
-                            "$set": {"status": msg_role, "updated_at": datetime.now(timezone.utc)}
+                            "$set": {"status": user_status_to_set, "updated_at": datetime.now(timezone.utc)}
                         }
                     )
 
                     logger.debug(f"[handle_message] DB update result for echo message: matched={result.matched_count}, modified={result.modified_count}")
 
                     if result.modified_count > 0:
-                        logger.info(f"[handle_message] Successfully stored echo message {message_data.get('id')} for user {actual_user_id} with role {msg_role} and status {new_status}")
+                        logger.info(f"[handle_message] Successfully stored echo message {message_data.get('id')} for user {actual_user_id} with role {msg_role} and status {user_status_to_set}")
                     else:
                         logger.warning(f"[handle_message] Failed to update user document for echo message {message_data.get('id')} from user {actual_user_id}")
-                        # Check if user exists
                         user_check = db.users.find_one({"user_id": actual_user_id, "client_username": client_username})
                         if not user_check:
                             logger.error(f"[handle_message] User {actual_user_id} not found in database!")
 
-                            # Create the user since they don't exist
                             logger.info(f"[handle_message] Creating missing user record for recipient: {actual_user_id}")
                             user_doc = User.create_instagram_document(
                                 user_id=actual_user_id,
@@ -790,25 +775,23 @@ class InstagramService:
                             db.users.insert_one(user_doc)
                             logger.info(f"[handle_message] Created user, now adding the message")
 
-                            # Try the update again
                             result = db.users.update_one(
                                 {"user_id": actual_user_id, "client_username": client_username},
                                 {
                                     "$push": {"direct_messages": message_doc},
-                                    "$set": {"status": UserStatus.FIXED_REPLIED.value, "updated_at": datetime.now(timezone.utc)}
+                                    "$set": {"status": user_status_to_set, "updated_at": datetime.now(timezone.utc)}
                                 }
                             )
                             logger.info(f"[handle_message] Second attempt result: matched={result.matched_count}, modified={result.modified_count}")
                         else:
                             logger.debug(f"[handle_message] User {actual_user_id} exists in database")
 
-                            # Try an upsert operation as a last resort
                             try:
                                 result = db.users.update_one(
                                     {"user_id": actual_user_id, "client_username": client_username},
                                     {
                                         "$push": {"direct_messages": message_doc},
-                                        "$set": {"status": UserStatus.FIXED_REPLIED.value, "updated_at": datetime.now(timezone.utc)}
+                                        "$set": {"status": user_status_to_set, "updated_at": datetime.now(timezone.utc)}
                                     },
                                     upsert=True
                                 )
@@ -820,9 +803,6 @@ class InstagramService:
                     return False
 
                 return True
-
-            # Handle regular user messages
-            # Create a user message document
             message_doc = User.create_message_document(
                 text=message_text,
                 role=MessageRole.USER.value,
@@ -832,17 +812,22 @@ class InstagramService:
                 mid=message_data.get('id')
             )
 
-            # Check if assistant is enabled in app settings for this client
             client_settings = helpers.get_app_settings(client_username)
             is_assistant_enabled = client_settings.get(ModuleType.DM_ASSIST.value, True)
 
-            # Store message in database with appropriate status
+            new_user_status = UserStatus.WAITING.value
+
+            if is_assistant_enabled:
+                new_user_status = UserStatus.WAITING.value
+            else:
+                new_user_status = UserStatus.WAITING.value
+
             try:
                 result = db.users.update_one(
-                    {"user_id": actual_user_id, "client_username": client_username},  # Use the actual user ID and client
+                    {"user_id": actual_user_id, "client_username": client_username},
                     {
                         "$push": {"direct_messages": message_doc},
-                        "$set": {"status": UserStatus.WAITING.value, "updated_at": datetime.now(timezone.utc)}
+                        "$set": {"status": new_user_status, "updated_at": datetime.now(timezone.utc)}
                     }
                 )
 
@@ -865,11 +850,9 @@ class InstagramService:
         except Exception as e:
             logger.error(f"[handle_message] Unexpected error in handle_message: {str(e)}", exc_info=True)
             return False
-
     @staticmethod
     def handle_comment(db, comment_data, client_username):
         """Process and handle an Instagram comment for a specific client, using in-memory fixed responses if available."""
-        # Check client-specific fixed_responses setting
         client_settings = helpers.get_app_settings(client_username)
         if not client_settings.get(ModuleType.FIXED_RESPONSE.value, True):
             logger.info(f"Fixed responses are disabled for client {client_username}.")

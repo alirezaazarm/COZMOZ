@@ -35,7 +35,6 @@ class TelegramService:
             return None
     @staticmethod
     def _download_image(url):
-        """Download an image from a URL and return a PIL Image, or None on failure."""
         try:
             if not url:
                 raise ValueError("No URL provided")
@@ -51,10 +50,8 @@ class TelegramService:
             return None
     @staticmethod
     def get_client_credentials(client_username):
-        """Prefer in-memory credentials; fall back to DB and cache when missing."""
         try:
             creds = helpers.get_client_credentials(client_username)
-            # Ensure we actually have Telegram token cached; otherwise fetch and cache
             if creds and creds.get('telegram_access_token'):
                 return creds
             db_creds = Client.get_client_credentials(client_username)
@@ -67,7 +64,6 @@ class TelegramService:
 
     @staticmethod
     def get_client_credentials_from_db(client_username):
-        """Get client credentials for a specific client directly from the database."""
         try:
             return Client.get_client_credentials(client_username)
         except Exception as e:
@@ -76,10 +72,6 @@ class TelegramService:
 
     @staticmethod
     def _get_user_profile_photo_url(token, user_id):
-        """
-        Fetch the user's profile photo URL from Telegram.
-        Returns the URL of the highest resolution photo, or None.
-        """
         try:
             api_url = f"https://api.telegram.org/bot{token}/getUserProfilePhotos"
             params = {"user_id": user_id, "limit": 1}
@@ -90,14 +82,12 @@ class TelegramService:
             if not data.get("ok") or not data.get("result", {}).get("photos"):
                 return None
 
-            # Get the highest resolution photo (last in the list)
             highest_res_photo = data["result"]["photos"][0][-1]
             file_id = highest_res_photo.get("file_id")
 
             if not file_id:
                 return None
 
-            # Use the existing helper to get the final downloadable URL
             return TelegramService._get_file_url(token, file_id)
 
         except Exception as e:
@@ -133,25 +123,30 @@ class TelegramService:
         except Exception as e:
             logger.error(f"Telegram send failed: {str(e)}", exc_info=True)
             return None
-
     @staticmethod
     def handle_update(db, update, client_username):
         """Process and handle a Telegram update (message) for a specific client."""
         try:
             from datetime import timedelta
 
-            message = update.get('message').strip() or update.get('edited_message').strip()
-            if not message:
-                logger.info("Ignoring non-message Telegram update")
+            raw_message = update.get('message') or update.get('edited_message')
+            if not raw_message:
+                logger.info("Ignoring non-message Telegram update (no message or edited_message field).")
                 return True
 
-            from_user = message.get('from', {})
+            text_content = raw_message.get('text', '').strip()
+            caption_content = raw_message.get('caption', '').strip()
+
+            if not text_content and not caption_content and not raw_message.get('photo'):
+                logger.info("Ignoring Telegram update with no text, caption, or photo content.")
+                return True
+
+            from_user = raw_message.get('from', {})
             user_id = str(from_user.get('id')) if from_user.get('id') is not None else None
             if not user_id:
                 logger.error("Telegram update missing user id")
                 return False
 
-            # --- 1. Caching and Profile Photo Logic ---
             user_profile_data = {
                 'username': from_user.get('username', ''),
                 'first_name': from_user.get('first_name'),
@@ -160,7 +155,6 @@ class TelegramService:
                 'is_premium': from_user.get('is_premium', False)
             }
 
-            # Check if we need to refresh the profile photo
             user = User.get_by_id(user_id, client_username)
             should_fetch_photo = True
             CACHE_DURATION = timedelta(hours=24)
@@ -168,11 +162,8 @@ class TelegramService:
             if user and 'profile_photo_last_checked' in user and user.get('profile_photo_last_checked'):
                 last_checked = user['profile_photo_last_checked']
 
-                # --- FIX STARTS HERE ---
-                # Ensure the datetime from the database is timezone-aware before comparison
                 if last_checked.tzinfo is None:
                     last_checked = last_checked.replace(tzinfo=timezone.utc)
-                # --- FIX ENDS HERE ---
 
                 if datetime.now(timezone.utc) - last_checked < CACHE_DURATION:
                     should_fetch_photo = False
@@ -185,33 +176,26 @@ class TelegramService:
                     if photo_url:
                         user_profile_data['profile_photo_url'] = photo_url
 
-                # Always update the checked timestamp, even if fetching failed
                 user_profile_data['profile_photo_last_checked'] = datetime.now(timezone.utc)
 
 
-            # --- 2. Message Processing Logic (remains the same) ---
-            # (The existing logic for creating message documents goes here)
-            text = message.get('text', '') or ''
-            caption = message.get('caption', '') or ''
-            timestamp = datetime.fromtimestamp(message.get('date'), timezone.utc)
-            # ... and so on for the rest of the message parsing ...
+            text = text_content or caption_content
+            timestamp = datetime.fromtimestamp(raw_message.get('date'), timezone.utc)
             messages_to_push = []
-            if text.strip() or caption.strip() or message.get('photo'):
-                # Fleshed out this part based on previous code for a complete example
+            if text.strip() or raw_message.get('photo'):
                 message_doc = User.create_message_document(
-                    text=text or caption,
+                    text=text,
                     role=MessageRole.USER.value,
                     timestamp=timestamp,
-                    media_type='image' if message.get('photo') else 'text',
-                    message_id=message.get('message_id'),
-                    entities=message.get('entities'),
-                    reply_to_message_id=(message.get('reply_to_message') or {}).get('message_id'),
-                    edit_date=datetime.fromtimestamp(message.get('edit_date'), timezone.utc) if message.get('edit_date') else None
+                    media_type='image' if raw_message.get('photo') else 'text',
+                    message_id=raw_message.get('message_id'),
+                    entities=raw_message.get('entities'),
+                    reply_to_message_id=(raw_message.get('reply_to_message') or {}).get('message_id'),
+                    edit_date=datetime.fromtimestamp(raw_message.get('edit_date'), timezone.utc) if raw_message.get('edit_date') else None
                 )
                 messages_to_push.append(message_doc)
 
 
-            # --- 3. Call the centralized User model method to save everything ---
             success = User.upsert_telegram_user_and_messages(
                 user_id=user_id,
                 client_username=client_username,

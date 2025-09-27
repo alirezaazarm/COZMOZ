@@ -335,6 +335,7 @@ class OpenAIService:
     def process_messages(self, thread_id, message_texts):
         logger.info(f"Processing {len(message_texts)} messages for thread_id: {thread_id}")
         try:
+            self.wait_for_active_run_completion(thread_id)
             if len(message_texts) > 1:
                 message_content = "\n---\n".join(message_texts)
             else:
@@ -785,3 +786,16 @@ class OpenAIService:
         except Exception as e:
             logger.error(f"Error in _handle_check_order: {str(e)}")
             return "Error checking order."
+
+def wait_for_active_run_completion(self, thread_id):
+    try:
+        while True:
+            runs = self.client.beta.threads.runs.list(thread_id=thread_id)
+            active_runs = [run for run in runs.data if run.status in ["queued", "in_progress"]]
+            if not active_runs:
+                break
+            logger.info(f"Waiting for {len(active_runs)} active runs to complete...")
+            time.sleep(5)
+    except openai.APIError as e:
+        logger.error(f"Failed to check active runs: {e.message}")
+        raise RetryableError("Failed to check active runs")
