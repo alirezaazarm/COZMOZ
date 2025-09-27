@@ -725,9 +725,9 @@ class InstagramService:
                                 user_status_to_set = UserStatus.ASSISTANT_REPLIED.value
                                 logger.info(f"[handle_message] MID {message_mid} is from assistant, assigning assistant role and ASSISTANT_REPLIED status.")
                             else:
-                                msg_role = MessageRole.ADMIN.value
-                                user_status_to_set = UserStatus.ADMIN_REPLIED.value
-                                logger.info(f"[handle_message] No specific role found for last message, assigning ADMIN role and ADMIN_REPLIED status.")
+                                msg_role = MessageRole.FIXED_RESPONSE.value
+                                user_status_to_set = UserStatus.FIXED_REPLIED.value
+                                logger.info(f"[handle_message] No specific role found for last message, assigning FIXED_RESPONSE role and FIXED_REPLIED status.")
                         else:
                             logger.info(f"[handle_message] No previous messages, assigning ADMIN role and ADMIN_REPLIED status.")
                     else:
