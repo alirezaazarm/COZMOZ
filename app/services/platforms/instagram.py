@@ -118,8 +118,7 @@ class InstagramService:
     def send_split_messages(user_id, text, client_username):
         """Split a long message into multiple messages, preserving sentence integrity and links"""
         try:
-            # Set a conservative character limit for Instagram
-            MAX_CHAR_LIMIT = 950  # Reduced from 1500 to 950 based on API errors
+            MAX_CHAR_LIMIT = 950
 
             logger.info(f"Splitting message of length {len(text)} for user {user_id} for client: {client_username or 'default'}")
 
@@ -650,7 +649,7 @@ class InstagramService:
                 return False
 
             # Get message details
-            message_text = (message_data.get('text') or '').strip()
+            message_text = (message_data.get('text') or '')
             media_type = message_data.get('media_type')
             media_url = message_data.get('media_url')
             timestamp = parse_instagram_timestamp(message_data.get('timestamp'))
@@ -725,9 +724,9 @@ class InstagramService:
                                 user_status_to_set = UserStatus.ASSISTANT_REPLIED.value
                                 logger.info(f"[handle_message] MID {message_mid} is from assistant, assigning assistant role and ASSISTANT_REPLIED status.")
                             else:
-                                msg_role = MessageRole.FIXED_RESPONSE.value
-                                user_status_to_set = UserStatus.FIXED_REPLIED.value
-                                logger.info(f"[handle_message] No specific role found for last message, assigning FIXED_RESPONSE role and FIXED_REPLIED status.")
+                                msg_role = MessageRole.ADMIN.value
+                                user_status_to_set = UserStatus.ADMIN_REPLIED.value
+                                logger.info(f"[handle_message] No specific role found for last message, assigning ADMIN role and ADMIN_REPLIED status.")
                         else:
                             logger.info(f"[handle_message] No previous messages, assigning ADMIN role and ADMIN_REPLIED status.")
                     else:
