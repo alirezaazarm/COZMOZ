@@ -7,6 +7,7 @@ class UserStatus(Enum):
     ADMIN_REPLIED = "ADMIN_REPLIED"  # User has received an admin response
     ASSISTANT_REPLIED = "ASSISTANT_REPLIED"  # User has received an assistant response
     FIXED_REPLIED = "FIXED_REPLIED"  # User has received a fixed response
+    BROADCASTED = "BROADCASTED"    # User has received broadcast message
     INSTAGRAM_FAILED = "INSTAGRAM_FAILED"  # Instagram failed to send the message
     TELEGRAM_FAILED = "TELEGRAM_FAILED"  # telegram failed to send the message
     ASSISTANT_FAILED = "ASSISTANT_FAILED"  # Assistant (OpenAI) failed to generate a response
@@ -17,6 +18,7 @@ class MessageRole(Enum):
     ASSISTANT = "assistant"  # Message from the AI assistant
     ADMIN = "admin"       # Message from a human admin
     FIXED_RESPONSE = "fixed_response"  # Fixed response from the system
+    BROADCAST = "broadcast"         # Message sent to all users
 
 class ClientStatus(Enum):
     """Enumeration for client status."""

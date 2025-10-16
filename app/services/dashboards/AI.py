@@ -254,7 +254,7 @@ class DataManagerBackend:
         except Exception as e:
             logging.error(f"Error in rebuild_files_and_vs: {str(e)}")
             return False
-
+        
 class OpenAIBackend:
     def __init__(self, client_username=None):
         self.client_username = client_username

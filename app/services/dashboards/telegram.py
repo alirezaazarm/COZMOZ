@@ -5,6 +5,7 @@ from ...models.user import User
 from ...models.client import Client
 import pandas as pd
 import plotly.express as px
+import requests
 from ...services.platforms.telegram import TelegramService
 from ...models.enums import MessageRole, UserStatus
 
@@ -44,7 +45,7 @@ class AppConstants:
         "login": ":key:",
         "logout": ":door:",
         "user": ":bust_in_silhouette:", # Switched to shortcode for reliability
-        "magic": ":magic_wand:",
+        "broadcast": ":loudspeaker:",
         "controller": ":airplane:", # Added controller icon
         "default_user": "https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_960_720.png"
     }
@@ -87,7 +88,7 @@ class TelegramBackend:
 
     def get_user_messages(self, user_id):
         return User.get_user_messages(user_id, client_username=self.client_username, limit=100)
-    
+
     def get_user_by_id(self, user_id):
         return User.get_by_id(user_id, client_username=self.client_username)
 
@@ -107,13 +108,19 @@ class TelegramUI(BaseSection):
             st.session_state.selected_telegram_user = None
         if 'selected_telegram_user_data' not in st.session_state:
             st.session_state.selected_telegram_user_data = None
+        if 'broadcast_results' not in st.session_state:
+            st.session_state.broadcast_results = None
+        if 'broadcast_message_text' not in st.session_state:
+            st.session_state.broadcast_message_text = ""
+        if 'broadcast_image_url' not in st.session_state:
+            st.session_state.broadcast_image_url = ""
 
     def render(self):
         self._render_controller_panel()
         st.write("---")
-        
+
         statistics_tab, chat_tab = st.tabs([f"{self.const.ICONS['dashboard']} Statistics", f"{self.const.ICONS['chat']} Chat"])
-        
+
         with statistics_tab:
             # --- Centralized Controls ---
             col1, col2, col3 = st.columns([2, 2, 1])
@@ -128,7 +135,7 @@ class TelegramUI(BaseSection):
                 st.markdown("_")
                 if st.button(f"{self.const.ICONS['update']} Refresh", key=f"refresh_{key_suffix}", width='stretch'):
                     st.rerun()
-            
+
             end_datetime = datetime.now(timezone.utc)
             start_datetime = end_datetime - timedelta(days=days_back)
             # --- End of Centralized Controls ---
@@ -140,39 +147,39 @@ class TelegramUI(BaseSection):
 
         with chat_tab:
             self._render_chat_history()
-        
+
     def _render_controller_panel(self):
         """Render Telegram platform controller panel with improved UI."""
         with st.container(border=True):
-            
+
             try:
                 platform_config = Client.get_client_platforms_config(self.client_username)
                 telegram_config = platform_config.get('telegram', {})
-                
+
                 platform_enabled = telegram_config.get('enabled', False)
                 new_platform_enabled = st.toggle(
-                    "Enable Telegram Platform", 
-                    value=platform_enabled, 
+                    "Enable Telegram Platform",
+                    value=platform_enabled,
                     key="telegram_platform_enable"
                 )
-                
+
                 if new_platform_enabled != platform_enabled:
                     if Client.update_platform_enabled_status(self.client_username, 'telegram', new_platform_enabled):
                         st.success(f"Telegram platform {'enabled' if new_platform_enabled else 'disabled'} successfully")
                         st.rerun()
                     else:
                         st.error("Failed to update Telegram platform status")
-                
+
                 if new_platform_enabled:
                     st.markdown("##### Module Controls")
                     modules = telegram_config.get('modules', {})
                     col1, col2 = st.columns(2)
-                    
+
                     with col1:
                         fixed_response_enabled = modules.get('fixed_response', {}).get('enabled', False)
                         new_fixed_response = st.toggle(
-                            "Fixed Response", 
-                            value=fixed_response_enabled, 
+                            "Fixed Response",
+                            value=fixed_response_enabled,
                             key="telegram_fixed_response"
                         )
                         if new_fixed_response != fixed_response_enabled:
@@ -181,7 +188,7 @@ class TelegramUI(BaseSection):
                                 st.rerun()
                             else:
                                 st.error("Failed to update Fixed Response")
-                    
+
                     with col2:
                         dm_assist_enabled = modules.get('dm_assist', {}).get('enabled', False)
                         new_dm_assist = st.toggle("DM Assist", value=dm_assist_enabled, key="telegram_dm_assist")
@@ -201,10 +208,10 @@ class TelegramUI(BaseSection):
             if days_back == 0:
                 st.info("Please select a specific duration (e.g., '1 day', '7 days') to view message analytics.")
                 return
-            
+
             try:
                 message_stats = self.backend.get_message_statistics_by_role_within_timeframe_by_platform(time_frame, start_datetime, end_datetime, "telegram")
-                
+
                 if not message_stats:
                     st.info("No message data available for the selected time period.")
                     return
@@ -215,14 +222,14 @@ class TelegramUI(BaseSection):
                 if df.empty:
                     st.info("No message data to display.")
                     return
-                
+
                 summary_counts = df.groupby('Role')['Count'].sum()
-                
+
                 user_msgs = int(summary_counts.get('user', 0))
                 assistant_msgs = int(summary_counts.get('assistant', 0))
                 admin_msgs = int(summary_counts.get('admin', 0))
                 fixed_responses = int(summary_counts.get('fixed_response', 0))
-                
+
                 m_col1, m_col2, m_col3, m_col4 = st.columns(4)
                 m_col1.metric("User Messages", user_msgs)
                 m_col2.metric("Assistant Messages", assistant_msgs)
@@ -230,21 +237,21 @@ class TelegramUI(BaseSection):
                 m_col4.metric("Fixed Responses", fixed_responses)
                 st.write("---")
                 # --- End of Summary Metrics ---
-                
+
                 df['Date'] = pd.to_datetime(df['Date'])
                 df = df.sort_values('Date')
 
                 fig = px.bar(df, x='Date', y='Count', color='Role', title='Direct Messages by Role', color_discrete_map={'user': '#1f77b4', 'assistant': '#ff7f0e', 'admin': '#2ca02c', 'fixed_response': '#d62728'})
-                
+
                 if time_frame == "hourly":
                     fig.update_xaxes(tickformat="%Y-%m-%d %H:%M", title_text="Time")
                 else:
                     fig.update_xaxes(tickformat="%Y-%m-%d", title_text="Date")
-                
+
                 fig.update_yaxes(title_text="Number of Messages")
-                
+
                 st.plotly_chart(fig, width='stretch')
-                
+
             except Exception as e:
                 st.error(f"Error rendering message analytics: {str(e)}")
 
@@ -277,18 +284,251 @@ class TelegramUI(BaseSection):
             except Exception as e:
                 st.error(f"Error rendering user statistics: {str(e)}")
 
+    def _render_broadcast_panel(self):
+        """Render a broadcast message panel in the chat tab with image support."""
+        with st.container(border=True):
+            st.markdown("### 📢 Broadcast Message")
+
+            # Initialize session state for broadcast
+            if 'broadcast_results' not in st.session_state:
+                st.session_state.broadcast_results = None
+            if 'broadcast_message_text' not in st.session_state:
+                st.session_state.broadcast_message_text = ""
+            if 'broadcast_image_url' not in st.session_state:
+                st.session_state.broadcast_image_url = ""
+
+            # Image upload/URL section
+            st.markdown("#### Attach Image (Optional)")
+            image_option = st.radio(
+                "Image source:",
+                ["No Image", "Upload Image", "Image URL"],
+                horizontal=True,
+                key="broadcast_image_option"
+            )
+
+            image_url = None
+            uploaded_file = None
+
+            if image_option == "Upload Image":
+                uploaded_file = st.file_uploader(
+                    "Choose an image file",
+                    type=['jpg', 'jpeg', 'png', 'gif'],
+                    key="broadcast_image_upload"
+                )
+                if uploaded_file:
+                    # For now, we'll use a placeholder - in production you'd upload to a CDN
+                    st.image(uploaded_file, caption="Preview", width=200)
+                    st.info("Image upload functionality needs CDN integration for full implementation")
+                    # In a real implementation, you'd upload to S3/Cloud Storage and get URL
+
+            elif image_option == "Image URL":
+                image_url = st.text_input(
+                    "Image URL:",
+                    placeholder="https://example.com/image.jpg",
+                    key="broadcast_image_url_input"
+                )
+                if image_url:
+                    try:
+                        response = requests.head(image_url, timeout=10)
+                        if response.status_code == 200:
+                            st.image(image_url, caption="Preview", width=200)
+                        else:
+                            st.warning("⚠️ Could not load image from URL")
+                    except:
+                        st.warning("⚠️ Invalid image URL or cannot access")
+
+            # Message input
+            broadcast_text = st.text_area(
+                "Message to broadcast to all Telegram users:",
+                value=st.session_state.broadcast_message_text,
+                height=100,
+                key="broadcast_text_input",
+                placeholder="Enter the message you want to send to all users..."
+            )
+
+            # Configuration options
+            col1, col2 = st.columns(2)
+            with col1:
+                batch_size = st.slider(
+                    "Messages per batch (to avoid rate limiting):",
+                    min_value=10,
+                    max_value=100,
+                    value=50,
+                    step=10,
+                    key="broadcast_batch_size"
+                )
+            with col2:
+                delay_between_batches = st.slider(
+                    "Delay between batches (seconds):",
+                    min_value=0,
+                    max_value=5,
+                    value=1,
+                    step=1,
+                    key="broadcast_delay"
+                )
+
+            # Action buttons
+            col1, col2, col3 = st.columns([2, 1, 1])
+
+            with col1:
+                if st.button(
+                    f"{self.const.ICONS['broadcast']} Send Broadcast",
+                    key="broadcast_send_button",
+                    use_container_width=True,
+                    type="primary"
+                ):
+                    if not broadcast_text.strip():
+                        st.error("Please enter a message to broadcast.")
+                    else:
+                        # Determine image URL to use
+                        final_image_url = None
+                        if image_option == "Image URL" and image_url:
+                            final_image_url = image_url
+                        # Note: For file uploads, you'd need to handle file upload to CDN first
+
+                        with st.spinner("Broadcasting message to all users..."):
+                            try:
+                                results = TelegramService.broadcast_message(
+                                    text=broadcast_text,
+                                    client_username=self.client_username,
+                                    batch_size=batch_size,
+                                    delay_between_batches=delay_between_batches,
+                                    image_url=final_image_url
+                                )
+                                st.session_state.broadcast_results = results
+                                st.session_state.broadcast_message_text = ""
+                                st.session_state.broadcast_image_url = ""
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error during broadcast: {str(e)}")
+
+            with col2:
+                if st.button(
+                    f"{self.const.ICONS['delete']} Clear",
+                    key="broadcast_clear_button",
+                    use_container_width=True
+                ):
+                    st.session_state.broadcast_message_text = ""
+                    st.session_state.broadcast_image_url = ""
+                    st.session_state.broadcast_results = None
+                    st.rerun()
+
+            with col3:
+                if st.button(
+                    f"{self.const.ICONS['update']} Reset",
+                    key="broadcast_reset_button",
+                    use_container_width=True
+                ):
+                    st.session_state.broadcast_results = None
+                    st.rerun()
+
+        # Display results if available - FIXED: Check if it exists and is not None
+        if (hasattr(st.session_state, 'broadcast_results') and
+            st.session_state.broadcast_results is not None):
+            self._render_broadcast_results(st.session_state.broadcast_results)
+
+    def _render_broadcast_results(self, results):
+        """Render the results of a broadcast operation."""
+        with st.container(border=True):
+            st.markdown("### 📊 Broadcast Results")
+
+            # Summary metrics
+            total_users = results.get('total_users', 0)
+            successful = results.get('successful', 0)
+            failed = results.get('failed', 0)
+
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Total Users", total_users)
+            col2.metric(f"{self.const.ICONS['success']} Successful", successful, delta=None)
+            col3.metric(f"{self.const.ICONS['error']} Failed", failed, delta=None)
+            if total_users > 0:
+                success_rate = (successful / total_users) * 100
+                col4.metric("Success Rate", f"{success_rate:.1f}%")
+
+            st.write("---")
+
+            # Status indicators
+            if successful == total_users and total_users > 0:
+                st.success(f"✓ All {total_users} users received the message successfully!")
+            elif failed == 0 and total_users == 0:
+                st.info("No users available for broadcast.")
+            elif successful > 0 and failed > 0:
+                st.warning(f"⚠ Partial success: {successful}/{total_users} messages sent")
+            elif failed == total_users and total_users > 0:
+                st.error(f"✗ Failed to send message to all {total_users} users")
+
+            # Failed users list (if any)
+            if results.get('failed_users'):
+                with st.expander(f"Failed User IDs ({len(results['failed_users'])})"):
+                    failed_users_text = "\n".join(results['failed_users'])
+                    st.code(failed_users_text, language="text")
+
+            # Error messages (if any)
+            if results.get('errors'):
+                with st.expander(f"Error Details ({len(results['errors'])})"):
+                    for idx, error in enumerate(results['errors'], 1):
+                        st.write(f"{idx}. {error}")
+
+            # Export option
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("📥 Download Results as CSV", key="download_broadcast_csv"):
+                    import json
+                    csv_data = f"""Total Users,Successful,Failed,Success Rate
+    {total_users},{successful},{failed},{(successful/total_users)*100 if total_users > 0 else 0:.1f}%
+
+    Failed Users:
+    {','.join(results.get('failed_users', []))}
+    """
+                    st.download_button(
+                        label="Download CSV",
+                        data=csv_data,
+                        file_name=f"broadcast_results_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        key="actual_download_csv"
+                    )
+
+            with col2:
+                if st.button("🔄 New Broadcast", key="new_broadcast_button"):
+                    st.session_state.broadcast_results = None
+                    st.rerun()
+
     def _render_chat_history(self):
+        """Render chat history with broadcast capability."""
         try:
-            user_list_col, chat_display_col = st.columns([1, 2])
-            with user_list_col:
-                self._render_user_sidebar()
-            with chat_display_col:
-                if st.session_state.selected_telegram_user and st.session_state.selected_telegram_user_data:
-                    self._display_user_info(st.session_state.selected_telegram_user_data)
-                    self._display_chat_messages(st.session_state.selected_telegram_user_data)
-                else:
-                    with st.container(border=True, height=700):
-                        st.info("Select a conversation from the list to view the chat history.")
+            # Initialize session state variables at the beginning of the function
+            if 'broadcast_results' not in st.session_state:
+                st.session_state.broadcast_results = None
+            if 'broadcast_message_text' not in st.session_state:
+                st.session_state.broadcast_message_text = ""
+            if 'broadcast_image_url' not in st.session_state:
+                st.session_state.broadcast_image_url = ""
+
+            # Create two main sections: broadcast panel and user chat
+            broadcast_tab, user_chat_tab = st.tabs([
+                f"{self.const.ICONS['broadcast']} Broadcast",
+                f"{self.const.ICONS['chat']} Direct Messages"
+            ])
+
+            # Broadcast tab
+            with broadcast_tab:
+                self._render_broadcast_panel()
+
+            # User chat tab
+            with user_chat_tab:
+                user_list_col, chat_display_col = st.columns([1, 2])
+                with user_list_col:
+                    self._render_user_sidebar()
+                with chat_display_col:
+                    if (hasattr(st.session_state, 'selected_telegram_user') and
+                        hasattr(st.session_state, 'selected_telegram_user_data') and
+                        st.session_state.selected_telegram_user and
+                        st.session_state.selected_telegram_user_data):
+                        self._display_user_info(st.session_state.selected_telegram_user_data)
+                        self._display_chat_messages(st.session_state.selected_telegram_user_data)
+                    else:
+                        with st.container(border=True, height=700):
+                            st.info("Select a conversation from the list to view the chat history.")
         except Exception as e:
             st.error(f"Error rendering chat history: {str(e)}")
 
@@ -306,10 +546,10 @@ class TelegramUI(BaseSection):
                 for user in users:
                     user_id = user["user_id"]
                     display_name = user.get("username") or f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or user_id
-                    
+
                     entry = st.container(border=True)
                     col1, col2 = entry.columns([1, 4])
-                    
+
                     profile_pic = self.const.ICONS["default_user"]
                     col1.image(profile_pic, width=40, clamp=True)
 
@@ -317,7 +557,7 @@ class TelegramUI(BaseSection):
                         st.session_state.selected_telegram_user = user_id
                         st.session_state.selected_telegram_user_data = self.backend.get_user_by_id(user_id)
                         st.rerun()
-    
+
     def _display_user_info(self, user_data):
         with st.container(border=True):
             username = user_data.get("username", "N/A")
@@ -325,16 +565,16 @@ class TelegramUI(BaseSection):
             last_name = user_data.get("last_name", "")
             full_name = f"{first_name} {last_name}".strip() or "N/A"
             is_premium = "Yes" if user_data.get("is_premium") else "No"
-            
+
             col1, col2, col3 = st.columns(3)
             col1.metric("Username", username)
             col2.metric("Full Name", full_name)
             col3.metric("Premium", is_premium)
-            
+
 
     def _display_chat_messages(self, user_data):
         display_name = user_data.get("username") or user_data.get("first_name", "User")
-        
+
         chat_container = st.container(height=550, border=True)
         with chat_container:
             st.markdown(f"**Chat with {display_name}**")
@@ -345,12 +585,12 @@ class TelegramUI(BaseSection):
                 for msg in messages:
                     role = msg.get("role", "user")
                     display_role = "assistant" if role != "user" else "user"
-                    
+
                     with st.chat_message(display_role):
                         st.markdown(msg.get("text", "*No text content*"))
                         if msg.get("media_url"):
                             st.image(msg["media_url"])
-                        
+
                         timestamp = msg.get("timestamp")
                         if timestamp:
                             st.caption(timestamp.astimezone().strftime('%Y-%m-%d %H:%M'))

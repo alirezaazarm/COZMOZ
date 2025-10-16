@@ -11,7 +11,7 @@ from app.utils.helpers import load_main_app_globals_from_db
 
 logging.basicConfig(
     handlers=[logging.FileHandler('logs.txt', encoding='utf-8'), logging.StreamHandler()],
-    level=logging.INFO,
+    level=logging.ERROR,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 werkzeug_logger = logging.getLogger('werkzeug')

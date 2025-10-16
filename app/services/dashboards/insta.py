@@ -752,7 +752,7 @@ class InstagramUI(BaseSection):
         with col1:
             time_frame = st.selectbox("Time Frame", options=["daily", "hourly"], index=1, key=f"time_frame_{key_suffix}")
         with col2:
-            duration_options = {"1 day": 1, "7 days": 7, "1 month": 30, "3 months": 90, "All time": 0}
+            duration_options = {"1 day": 1, "7 days": 7, "1 month": 30, "3 months": 90, "6 months": 180, "Year": 365}
             selected_duration = st.selectbox("Duration", options=list(duration_options.keys()), index=0, key=f"duration_{key_suffix}")
             days_back = duration_options[selected_duration]
         with col3:

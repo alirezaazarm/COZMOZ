@@ -268,7 +268,7 @@ class AdminUI:
                 avatar_path = const.AVATARS.get(avatar_key)
                 base64_image = get_image_as_base64(avatar_path) if avatar_path else None
                 
-                img_tag = f'<img src="data:image/png;base64,{base64_image}">' if base64_image else "❓"
+                img_tag = f'<img src="data:image/png;base64,{base64_image}">' if base64_image else "?"
 
                 href = f"?auth_token={auth_token}&page={page_title}"
                 
