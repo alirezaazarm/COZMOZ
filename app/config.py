@@ -22,7 +22,7 @@ class Config:
     DEFAULT_FB_ACCESS_TOKEN = os.getenv('DEFAULT_FB_ACCESS_TOKEN', None)
     DEFAULT_PAGE_ID = os.getenv('DEFAULT_PAGE_ID', None)
     DEFAULT_OPENAI_API_KEY = os.getenv('DEFAULT_OPENAI_API_KEY', None)
-    DEFAULT_OPENAI_ASSISTANT_ID = os.getenv('DEFAULT_OPENAI_ASSISTANT_ID', None)
+    DEFAULT_OPENAI_MODEL = os.getenv('DEFAULT_OPENAI_MODEL', 'gpt-4.1-mini')
 
     # Legacy properties for backward compatibility (deprecated - use client-specific credentials instead)
     @property
@@ -42,8 +42,8 @@ class Config:
 
     @property
     def OPENAI_ASSISTANT_ID(self):
-        logger.warning("OPENAI_ASSISTANT_ID is deprecated. Use client-specific credentials instead.")
-        return self.DEFAULT_OPENAI_ASSISTANT_ID
+        logger.warning("OPENAI_ASSISTANT_ID is obsolete; configure a client model and instructions instead.")
+        return None
 
     @classmethod
     def get_fallback_credentials(cls):
@@ -57,7 +57,7 @@ class Config:
             },
             'openai': {
                 'api_key': cls.DEFAULT_OPENAI_API_KEY,
-                'assistant_id': cls.DEFAULT_OPENAI_ASSISTANT_ID
+                'model': cls.DEFAULT_OPENAI_MODEL
             }
         }
 

@@ -288,12 +288,6 @@ class ClientAdminUI:
                     help="Telegram Bot API token",
                     type="password"
                 )
-                assistant_id = st.text_input(
-                    "Assistant ID",
-                    placeholder="Enter OpenAI Assistant ID",
-                    help="OpenAI Assistant ID"
-                )
-                
                 vector_store_id = st.text_input(
                     "Vector Store ID",
                     placeholder="Enter Vector Store ID",
@@ -410,7 +404,6 @@ class ClientAdminUI:
                                 facebook_id=facebook_id,
                                 facebook_access_token=facebook_access_token,
                                 telegram_access_token=telegram_access_token,
-                                assistant_id=assistant_id,
                                 vector_store_id=vector_store_id,
                                 password=password,
                                 platforms=platforms,
@@ -552,11 +545,6 @@ class ClientAdminUI:
                                 type="password",
                                 key=f"edit_tg_token_{client['username']}"
                             )
-                            edit_assistant_id = st.text_input(
-                                "Assistant ID",
-                                value=keys.get('assistant_id', ''),
-                                key=f"edit_assistant_id_{client['username']}"
-                            )
                             edit_vector_store_id = st.text_input(
                                 "Vector Store ID",
                                 value=keys.get('vector_store_id', ''),
@@ -689,7 +677,6 @@ class ClientAdminUI:
                                         "ig_id": edit_ig_id,
                                         "facebook_access_token": edit_fb_token,
                                         "telegram_access_token": edit_tg_token,
-                                        "assistant_id": edit_assistant_id,
                                         "vector_store_id": edit_vector_store_id
                                     }
                                     

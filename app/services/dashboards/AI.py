@@ -337,6 +337,14 @@ class OpenAIBackend:
             logging.error(f"Error fetching assistant top_p: {str(e)}")
             return None
 
+    def get_model(self):
+        return self.openai_service.get_model() if self.openai_service else None
+
+    def update_model(self, model):
+        if not self.openai_service:
+            return {'success': False, 'message': 'OpenAI service not initialized'}
+        return self.openai_service.update_model(model)
+
     def update_assistant_instructions(self, new_instructions):
         logging.info("Updating assistant instructions.")
         try:
@@ -389,29 +397,27 @@ class OpenAIBackend:
             return {'success': False, 'message': str(e)}
 
     def create_chat_thread(self):
-        logging.info("Creating new chat thread.")
+        logging.info("Creating a new Responses API chat state.")
         try:
             if not self.openai_service:
                 logging.error("OpenAI service not initialized")
                 raise Exception("OpenAI service not initialized")
-            thread_id = self.openai_service.create_thread()
-            logging.info(f"Chat thread created successfully with ID: {thread_id}")
-            return thread_id
+            return self.openai_service.create_thread()
         except Exception as e:
             logging.error(f"Failed to create chat thread: {str(e)}", exc_info=True)
             raise
 
-    def send_message_to_thread(self, thread_id, user_message):
-        logging.info(f"Sending message to thread {thread_id}.")
+    def send_message_to_thread(self, previous_response_id, user_message):
+        logging.info("Sending message through Responses API.")
         try:
             if not self.openai_service:
                 logging.error("OpenAI service not initialized")
                 raise Exception("OpenAI service not initialized")
-            response = self.openai_service.send_message_to_thread(thread_id, user_message)
-            logging.info(f"Message sent to thread {thread_id} successfully.")
+            response = self.openai_service.send_message_to_thread(previous_response_id, user_message)
+            logging.info("Responses API message completed successfully.")
             return response
         except Exception as e:
-            logging.error(f"Failed to send message to thread {thread_id}: {str(e)}", exc_info=True)
+            logging.error(f"Failed to send message through Responses API: {str(e)}", exc_info=True)
             raise
 
     def process_uploaded_image(self, image_bytes):
@@ -610,11 +616,13 @@ class OpenAIManagementUI(BaseSection):
                         st.divider()
 
     def _render_settings_section(self):
+        current_model = self.backend.get_model()
         current_instructions = self.backend.get_assistant_instructions()
         current_temperature = self.backend.get_assistant_temperature()
         current_top_p = self.backend.get_assistant_top_p()
         default_temperature = 1.0 if current_temperature is None else current_temperature
         default_top_p = 1.0 if current_top_p is None else current_top_p
+        new_model = st.text_input("Model", value=current_model or "gpt-4.1-mini", help="Responses API model ID")
         new_instructions = st.text_area("Assistant Instructions", value=current_instructions or "", height=600, help="How the assistant should behave", label_visibility="collapsed")
         col1, col2, col3 = st.columns([4, 2, 4])
         with col1: new_temperature = st.slider("Temperature", 0.0, 2.0, float(default_temperature), 0.01, help="Randomness (0=strict, 2=creative)")
@@ -626,6 +634,7 @@ class OpenAIManagementUI(BaseSection):
         if update_btn:
             with st.spinner("Saving..."):
                 results = {
+                    'model': self.backend.update_model(new_model),
                     'instructions': self.backend.update_assistant_instructions(new_instructions),
                     'temperature': self.backend.update_assistant_temperature(new_temperature),
                     'top_p': self.backend.update_assistant_top_p(new_top_p)
@@ -638,9 +647,9 @@ class OpenAIManagementUI(BaseSection):
 
     def _render_chat_testing_section(self):
         st.subheader("Test your assistant")
-        if 'thread_id' not in st.session_state:
+        if 'response_id' not in st.session_state:
             try:
-                st.session_state['thread_id'] = self.backend.create_chat_thread()
+                st.session_state['response_id'] = self.backend.create_chat_thread()
                 st.session_state['messages'] = []
                 st.session_state['user_message_sent'] = True
                 st.session_state['processed_file_ids'] = set()
@@ -682,7 +691,8 @@ class OpenAIManagementUI(BaseSection):
             if last_message["role"] == "user":
                 with st.spinner("Assistant is thinking..."):
                     try:
-                        response = self.backend.send_message_to_thread(st.session_state['thread_id'], last_message["content"])
+                        response, response_id = self.backend.send_message_to_thread(st.session_state['response_id'], last_message["content"])
+                        st.session_state['response_id'] = response_id
                         st.session_state['messages'].append({"role": "assistant", "content": response})
                         st.session_state['user_message_sent'] = True
                         st.rerun()

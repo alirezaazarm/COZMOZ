@@ -1,5 +1,14 @@
 # Multi-Platform Bot & Assistant
 
+## OpenAI Responses API migration
+
+This project uses the Responses API and `file_search` with each client's
+existing Vector Store. Assistant and Thread IDs are no longer used. After
+deploying, run `python scripts/migrate_assistants_to_responses.py` once to add
+the per-client AI configuration and clear non-migratable legacy thread state.
+Configure the prompt, temperature and top-p in the AI dashboard; the default
+model for new clients is `gpt-4.1-mini`.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A Flask-based multi-client application that interacts with Instagram and Telegram, acting as an intelligent assistant to process messages, comments, and reactions. It can automate responses and actions using integrations like OpenAI.

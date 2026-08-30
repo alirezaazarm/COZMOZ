@@ -87,9 +87,17 @@ class Client:
                 "ig_id": facebook_id,  # Instagram ID (not Facebook ID)
                 "facebook_access_token": facebook_access_token,
                 "telegram_access_token": telegram_access_token,
+                # Kept only for reading legacy documents. Responses API does
+                # not use persistent Assistant objects.
                 "assistant_id": assistant_id,
                 "vector_store_id": vector_store_id,
                 "password": password  # Admin password for all clients
+            },
+            "ai": {
+                "model": "gpt-4.1-mini",
+                "instructions": "",
+                "temperature": 1.0,
+                "top_p": 1.0,
             },
             
             # Platform configurations (per-platform enable toggle and modules)

@@ -15,7 +15,7 @@ class User:
     1. Direct message history - text messages with roles and timestamps
     2. Comments history - post-related comments with parent references
     3. Reaction history - user reactions to various content
-    4. User info - status, username, user_id, thread_id
+    4. User info - status, username, user_id, response_id
     """
 
     # Status constants (for backward compatibility)
@@ -44,7 +44,8 @@ class User:
             "client_username": client_username,  # Links user to specific client
             "platform": platform,
             "status": status,
-            "thread_id": thread_id,
+            # New conversations use the Responses API's `response_id`.
+            "response_id": None,
             "created_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
             # Direct message history

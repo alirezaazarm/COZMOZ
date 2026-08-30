@@ -1,7 +1,7 @@
 flask
 python-dotenv
 pymongo
-openai
+openai>=1.74.0
 requests
 apscheduler
 tenacity

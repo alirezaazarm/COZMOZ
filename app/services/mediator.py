@@ -106,10 +106,11 @@ class Mediator:
             logger.info(f"Processing batch of {len(user_messages)} user messages: {message_texts} (client: {self.client_username})")
 
             # Process with OpenAI (client-specific)
-            thread_id = self.openai_service.ensure_thread(user)
+            previous_response_id = self.openai_service.ensure_thread(user)
             response_text = self.openai_service.process_messages(
-                thread_id,
-                message_texts
+                previous_response_id,
+                message_texts,
+                user_id=user_id,
             )
 
             if not response_text:

@@ -31,14 +31,14 @@ class AssistantRepository:
         
         return User.add_direct_message(user_id, message_doc, self.client_username)
 
-    def get_thread_id(self, user_id):
-        """Get thread ID for a user in the current client."""
+    def get_response_id(self, user_id):
+        """Get the latest Responses API ID for a user in the current client."""
         user = User.get_by_id(user_id, self.client_username)
-        return user.get('thread_id') if user else None
+        return user.get('response_id') if user else None
 
-    def update_thread_id(self, user_id, thread_id):
-        """Update thread ID for a user in the current client."""
-        return User.update(user_id, {'thread_id': thread_id}, self.client_username)
+    def update_response_id(self, user_id, response_id):
+        """Update the latest Responses API ID for a user in the current client."""
+        return User.update(user_id, {'response_id': response_id}, self.client_username)
 
     def get_waiting_users(self, cutoff_time=None):
         """Get waiting users for the current client."""
