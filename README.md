@@ -74,6 +74,11 @@ The application follows a modular architecture:
 
 Client-specific configurations, including platform settings, API keys, and assistant behavior, are stored in the database and managed through the client management features of the application.
 
+Copy `.env.example` to `.env` and populate the required values before starting
+the Flask application or Streamlit dashboard. `MONGODB_URI` and
+`MONGODB_DB_NAME` are both required; an absent database name prevents PyMongo
+from initializing the application.
+
 ## API Endpoints
 
 *   **`/reload-memory` (POST):** Reloads the main application memory from the database. This is useful for applying configuration changes without restarting the server.
