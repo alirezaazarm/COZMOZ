@@ -75,7 +75,7 @@ class InstagramService:
         return helpers.get_client_username_by_ig_id(ig_id)
 
     @staticmethod
-    def send_message(recipient_id, text, client_username):
+    def send_message(recipient_id, text, client_username, account_username=None, account_id=None, **kwargs):
 
         client_creds = helpers.get_client_credentials(client_username)
         if client_creds == {}:

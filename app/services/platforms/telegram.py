@@ -105,20 +105,40 @@ class TelegramService:
             return None
 
     @staticmethod
-    def send_message(chat_id, text, client_username=None):
-        """Send a message to a Telegram chat using the client's bot token."""
+    def send_message(chat_id, text, client_username=None, account_username=None, account_id=None, **kwargs):
+        """Send a message to a Telegram chat using the account-specific bot token if available."""
         try:
             if not client_username:
                 logger.error("Telegram send_message requires client_username context")
                 return None
 
-            # Prefer cached credentials
-            creds = TelegramService.get_client_credentials(client_username)
-            if not creds or not creds.get('telegram_access_token'):
-                logger.error(f"No Telegram token for client: {client_username}")
+            token = None
+            # Try per-account token first (new multi-account API passes account_username)
+            if account_username or account_id:
+                try:
+                    from ...models.enums import Platform
+                    target = account_username or account_id
+                    if target:
+                        normalized = str(target).lstrip("@")
+                        for acc in Client.get_platform_accounts(client_username, Platform.TELEGRAM.value):
+                            if str(acc.get("id")) == str(target) or (acc.get("username") or acc.get("bot_username")) == normalized:
+                                token = acc.get("telegram_access_token")
+                                break
+                        if not token and account_id:
+                            for acc in Client.get_platform_accounts(client_username, Platform.TELEGRAM.value):
+                                if str(acc.get("id")) == str(account_id):
+                                    token = acc.get("telegram_access_token")
+                                    break
+                except Exception:
+                    pass
+            # Fallback to global/client credentials
+            if not token:
+                creds = TelegramService.get_client_credentials(client_username)
+                if creds:
+                    token = creds.get('telegram_access_token')
+            if not token:
+                logger.error(f"No Telegram token for client: {client_username} (account: {account_username or account_id})")
                 return None
-
-            token = creds['telegram_access_token']
             url = f"https://api.telegram.org/bot{token}/sendMessage"
             payload = {"chat_id": chat_id, "text": text}
             resp = requests.post(url, json=payload, timeout=15)
