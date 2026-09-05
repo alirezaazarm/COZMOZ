@@ -33,6 +33,7 @@ class Platform(Enum):
     """Enumeration for platform."""
     INSTAGRAM = "instagram"
     TELEGRAM = "telegram"
+    BALE = "bale"
 
 class ModuleType(Enum):
     """Enumeration for available client modules."""
