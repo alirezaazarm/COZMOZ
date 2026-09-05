@@ -170,3 +170,49 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 .qodo
+
+# graphify - auto-generated knowledge graph
+graphify-out/
+.graphify/
+.graphify_labels.json
+.cache/graphify/
+
+# opencode / AI agent tooling - non-project
+.opencode/
+.claude/
+.cursor/
+opencode/
+
+# tests - local test artifacts / non-project
+tests/
+test/
+_tests/
+__pycache__/
+.pytest_cache/
+
+# frontend build artifacts (duplicates root node_modules for safety)
+frontend/node_modules/
+frontend/dist/
+node_modules/
+dist/
+build/
+
+# OS / IDE / editor - irrelevant
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
+*.sublime-*
+
+# logs & tmp & misc irrelevant
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+.coverage
+coverage.xml
+htmlcov/
