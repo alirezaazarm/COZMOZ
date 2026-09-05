@@ -1,0 +1,78 @@
+services:
+  mongo:
+    image: mongo:8.0
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGODB_DB_NAME}
+      MONGO_APP_USERNAME: ${MONGO_APP_USERNAME}
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD}
+    volumes:
+      - mongo-data:/data/db
+      - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    # Exposed only on localhost so you can inspect the LIVE database with a GUI
+    # (host port 27018; the legacy host mongod keeps 27017).
+    ports: ["127.0.0.1:27018:27017"]
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --username $$MONGO_INITDB_ROOT_USERNAME --password $$MONGO_INITDB_ROOT_PASSWORD --authenticationDatabase admin --eval 'db.adminCommand({ping:1}).ok' | grep 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+  api:
+    image: cozmoz-python:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    command: gunicorn --bind 0.0.0.0:5000 --workers 1 --threads 8 app.web:app
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MONGODB_URI: mongodb://${MONGO_APP_USERNAME}:${MONGO_APP_PASSWORD}@mongo:27017/${MONGODB_DB_NAME}?authSource=${MONGODB_DB_NAME}
+    depends_on:
+      mongo: { condition: service_healthy }
+    volumes:
+      - model-data:/data/models
+      - ./app:/app/app:ro
+      - /root/hooshang/from_colab:/data/vision_models:ro
+    expose: ["5000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+  worker:
+    image: cozmoz-python:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    command: python -m app.worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MONGODB_URI: mongodb://${MONGO_APP_USERNAME}:${MONGO_APP_PASSWORD}@mongo:27017/${MONGODB_DB_NAME}?authSource=${MONGODB_DB_NAME}
+    depends_on:
+      mongo: { condition: service_healthy }
+    volumes:
+      - model-data:/data/models
+      - ./app:/app/app:ro
+      - /root/hooshang/from_colab:/data/vision_models:ro
+    networks: [internal]
+  edge:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.edge
+    restart: unless-stopped
+    ports: ["127.0.0.1:${APP_PORT:-8080}:80"]
+    depends_on:
+      api: { condition: service_healthy }
+    read_only: true
+    tmpfs: [/var/cache/nginx, /var/run]
+    networks: [internal]
+volumes:
+  mongo-data:
+  model-data:
+networks:
+  internal:
