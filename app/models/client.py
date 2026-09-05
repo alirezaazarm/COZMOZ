@@ -800,9 +800,19 @@ class Client:
                 logger.warning(f"Authentication failed: Admin {username} is not active")
                 return None
             
-            # Simple password comparison (no hashing as requested)
+            # Support both plain and hashed (scrypt/pbkdf2) passwords
             admin_password = admin.get("keys", {}).get("password") or admin.get("password")
-            if admin_password == password:
+            ok = False
+            if admin_password:
+                if admin_password.startswith("scrypt:") or admin_password.startswith("pbkdf2:"):
+                    try:
+                        from werkzeug.security import check_password_hash
+                        ok = check_password_hash(admin_password, password)
+                    except Exception:
+                        ok = admin_password == password
+                else:
+                    ok = admin_password == password
+            if ok:
                 # Update last login time
                 db[CLIENTS_COLLECTION].update_one(
                     {"_id": admin["_id"]},
@@ -927,4 +937,275 @@ class Client:
             return result.modified_count > 0
         except PyMongoError as e:
             logger.error(f"Failed to append log for client {username}: {str(e)}")
+            return False
+
+    @staticmethod
+    @with_db
+    def migrate_all_clients():
+        """Stub for legacy web.py startup hook - ensures platform structure exists."""
+        try:
+            logger.info("migrate_all_clients: stub - no migration needed")
+            return True
+        except Exception as e:
+            logger.error(f"migrate_all_clients failed: {str(e)}", exc_info=True)
+            return False
+
+    @staticmethod
+    @with_db
+    def get_platform_accounts(username, platform=None):
+        """Return list of accounts for a given platform for a client. If platform is None, return all."""
+        try:
+            client = db[CLIENTS_COLLECTION].find_one({"username": username}, {"platforms": 1})
+            if not client:
+                return []
+            platforms = client.get("platforms") or {}
+            if platform is None:
+                all_accounts = []
+                for p_data in platforms.values():
+                    all_accounts.extend(p_data.get("accounts") or [])
+                return all_accounts
+            return (platforms.get(platform) or {}).get("accounts") or []
+        except PyMongoError as e:
+            logger.error(f"Failed to get platform accounts for {username}/{platform}: {str(e)}")
+            return []
+
+    @staticmethod
+    @with_db
+    def get_client_and_account_by_bale(client_username, account_id=None):
+        """Find client and specific Bale account by id."""
+        try:
+            client = Client.get_by_username(client_username)
+            if not client:
+                return None, None
+            accounts = (client.get("platforms") or {}).get(Platform.BALE.value, {}).get("accounts") or []
+            if account_id is not None:
+                for acc in accounts:
+                    if str(acc.get("id")) == str(account_id):
+                        return client, acc
+                return client, None
+            return client, (accounts[0] if accounts else None)
+        except Exception as e:
+            logger.error(f"Failed to get Bale account {client_username}/{account_id}: {str(e)}")
+            return None, None
+
+    @staticmethod
+    @with_db
+    def authenticate(username, password):
+        """Authenticate a client/admin by username and password."""
+        try:
+            admin = Client.authenticate_admin(username, password)
+            if admin:
+                return admin
+            client = db[CLIENTS_COLLECTION].find_one({"username": username})
+            if not client:
+                return None
+            stored = (client.get("keys") or {}).get("password") or client.get("password")
+            ok = False
+            if stored is not None:
+                if isinstance(stored, str) and (stored.startswith("scrypt:") or stored.startswith("pbkdf2:")):
+                    try:
+                        from werkzeug.security import check_password_hash
+                        ok = check_password_hash(stored, password)
+                    except Exception:
+                        ok = stored == password
+                else:
+                    ok = stored == password
+            if ok:
+                if client.get("status") in (None, "active"):
+                    return client
+            return None
+        except PyMongoError as e:
+            logger.error(f"Failed to authenticate {username}: {str(e)}")
+            return None
+
+    @staticmethod
+    def _normalize_vector_store_ids(value):
+        """Normalize vector_store_id(s) to a list of strings."""
+        if not value:
+            return []
+        if isinstance(value, str):
+            return [value] if value.strip() else []
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v).strip()]
+        return [str(value)]
+
+    @staticmethod
+    @with_db
+    def get_agents(username):
+        """Return list of agents for a client."""
+        try:
+            client = db[CLIENTS_COLLECTION].find_one({"username": username}, {"agents": 1})
+            if not client:
+                return []
+            return client.get("agents") or []
+        except PyMongoError as e:
+            logger.error(f"Failed to get agents for {username}: {str(e)}")
+            return []
+
+    @staticmethod
+    @with_db
+    def add_agent(username, status=None, platform=None, account_id=None, instruction="", model=None, title="", vector_store_id=None):
+        """Create a new agent for a client."""
+        try:
+            import uuid
+            agent_id = str(uuid.uuid4())
+            agent = {
+                "id": agent_id,
+                "status": status or "active",
+                "platform": platform,
+                "account_id": account_id,
+                "instruction": instruction or "",
+                "model": model or "gpt-4.1-mini",
+                "title": title or f"Agent {agent_id[:8]}",
+                "vector_store_id": vector_store_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            result = db[CLIENTS_COLLECTION].update_one(
+                {"username": username},
+                {"$push": {"agents": agent}, "$set": {"updated_at": datetime.now(timezone.utc)}}
+            )
+            if result.modified_count > 0:
+                return agent
+            client = Client.get_by_username(username)
+            if client and "agents" not in client:
+                db[CLIENTS_COLLECTION].update_one({"username": username}, {"$set": {"agents": [agent]}})
+                return agent
+            return None
+        except PyMongoError as e:
+            logger.error(f"Failed to add agent for {username}: {str(e)}")
+            return None
+
+    @staticmethod
+    @with_db
+    def update_agent(username, agent_id, payload):
+        """Update an existing agent."""
+        try:
+            allowed = {"status", "platform", "account_id", "instruction", "model", "title", "vector_store_id"}
+            set_data = {}
+            for k in allowed:
+                if k in payload:
+                    set_data[f"agents.$.{k}"] = payload[k]
+            if not set_data:
+                return False
+            set_data["agents.$.updated_at"] = datetime.now(timezone.utc).isoformat()
+            set_data["updated_at"] = datetime.now(timezone.utc)
+            result = db[CLIENTS_COLLECTION].update_one(
+                {"username": username, "agents.id": agent_id},
+                {"$set": set_data}
+            )
+            return result.modified_count > 0
+        except PyMongoError as e:
+            logger.error(f"Failed to update agent {agent_id} for {username}: {str(e)}")
+            return False
+
+    @staticmethod
+    @with_db
+    def remove_agent(username, agent_id):
+        """Remove an agent by id."""
+        try:
+            result = db[CLIENTS_COLLECTION].update_one(
+                {"username": username},
+                {"$pull": {"agents": {"id": agent_id}}, "$set": {"updated_at": datetime.now(timezone.utc)}}
+            )
+            return result.modified_count > 0
+        except PyMongoError as e:
+            logger.error(f"Failed to remove agent {agent_id} for {username}: {str(e)}")
+            return False
+
+    @staticmethod
+    @with_db
+    def add_platform_account(username, platform, payload):
+        """Create a platform account for a client."""
+        try:
+            import uuid
+            account_id = str(uuid.uuid4())
+            account = {
+                "id": account_id,
+                "platform": platform,
+                "name": payload.get("name") or payload.get("username") or account_id,
+                "username": payload.get("username"),
+                "bot_username": payload.get("bot_username"),
+                "status": payload.get("status", "active"),
+                "webhook_url": payload.get("webhook_url"),
+                "webhook_verified": False,
+                "modules": payload.get("modules") or {},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            for key in ("telegram_access_token", "bale_access_token", "page_access_token", "facebook_access_token", "ig_id", "secret_token"):
+                if payload.get(key):
+                    account[key] = payload[key]
+            for k, v in payload.items():
+                if k not in account:
+                    account[k] = v
+            result = db[CLIENTS_COLLECTION].update_one(
+                {"username": username},
+                {"$push": {f"platforms.{platform}.accounts": account}, "$set": {f"platforms.{platform}.enabled": True, "updated_at": datetime.now(timezone.utc)}}
+            )
+            if result.modified_count > 0:
+                return account
+            client = Client.get_by_username(username)
+            if client:
+                platforms = client.get("platforms") or {}
+                if platform not in platforms:
+                    db[CLIENTS_COLLECTION].update_one({"username": username}, {"$set": {f"platforms.{platform}": {"enabled": True, "accounts": [account], "modules": {}}}})
+                    return account
+            return None
+        except PyMongoError as e:
+            logger.error(f"Failed to add platform account {username}/{platform}: {str(e)}")
+            return None
+
+    @staticmethod
+    @with_db
+    def update_platform_account(username, account_id, payload):
+        """Update a platform account by id across all platforms."""
+        try:
+            client = db[CLIENTS_COLLECTION].find_one({"username": username}, {"platforms": 1})
+            if not client:
+                return False
+            platforms = client.get("platforms") or {}
+            target_platform = None
+            target_idx = None
+            for p_name, p_data in platforms.items():
+                for idx, acc in enumerate(p_data.get("accounts") or []):
+                    if str(acc.get("id")) == str(account_id):
+                        target_platform = p_name
+                        target_idx = idx
+                        break
+                if target_platform:
+                    break
+            if target_platform is None:
+                return False
+            set_data = {}
+            for k, v in payload.items():
+                set_data[f"platforms.{target_platform}.accounts.{target_idx}.{k}"] = v
+            set_data[f"platforms.{target_platform}.accounts.{target_idx}.updated_at"] = datetime.now(timezone.utc).isoformat()
+            set_data["updated_at"] = datetime.now(timezone.utc)
+            result = db[CLIENTS_COLLECTION].update_one({"username": username}, {"$set": set_data})
+            return result.modified_count > 0
+        except PyMongoError as e:
+            logger.error(f"Failed to update platform account {account_id}: {str(e)}")
+            return False
+
+    @staticmethod
+    @with_db
+    def delete_platform_account(username, account_id):
+        """Delete a platform account by id."""
+        try:
+            client = db[CLIENTS_COLLECTION].find_one({"username": username}, {"platforms": 1})
+            if not client:
+                return False
+            platforms = client.get("platforms") or {}
+            for p_name, p_data in platforms.items():
+                for acc in p_data.get("accounts") or []:
+                    if str(acc.get("id")) == str(account_id):
+                        result = db[CLIENTS_COLLECTION].update_one(
+                            {"username": username},
+                            {"$pull": {f"platforms.{p_name}.accounts": {"id": account_id}}, "$set": {"updated_at": datetime.now(timezone.utc)}}
+                        )
+                        return result.modified_count > 0
+            return False
+        except PyMongoError as e:
+            logger.error(f"Failed to delete platform account {account_id}: {str(e)}")
             return False

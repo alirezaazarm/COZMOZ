@@ -45,9 +45,6 @@ services:
     networks: [internal]
   worker:
     image: cozmoz-python:latest
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.backend
     command: python -m app.worker
     restart: unless-stopped
     env_file: .env

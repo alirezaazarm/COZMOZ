@@ -1,4 +1,5 @@
 flask
+gunicorn
 python-dotenv
 pymongo
 openai>=1.74.0

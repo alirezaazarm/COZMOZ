@@ -15,6 +15,13 @@ class Config:
     BASE_URL = os.getenv('BASE_URL')
     BATCH_WINDOW_SECONDS = int(os.getenv('BATCH_WINDOW_SECONDS', '10'))
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+    SESSION_SECRET = os.getenv('SESSION_SECRET') or os.getenv('SECRET_KEY') or 'dev-secret-change-me'
+    MAX_UPLOAD_BYTES = int(os.getenv('MAX_UPLOAD_BYTES', str(20 * 1024 * 1024)))
+    COOKIE_SECURE = os.getenv('COOKIE_SECURE', 'true').lower() in ('1', 'true', 'yes')
+    INITIAL_SYSTEM_ADMIN_USERNAME = os.getenv('INITIAL_SYSTEM_ADMIN_USERNAME') or (os.getenv('SYSTEM_ADMIN_USERNAMES', '').split(',')[0].strip() if os.getenv('SYSTEM_ADMIN_USERNAMES') else None)
+    INITIAL_SYSTEM_ADMIN_PASSWORD = os.getenv('INITIAL_SYSTEM_ADMIN_PASSWORD')
+    SYSTEM_ADMIN_USERNAMES = [u.strip() for u in os.getenv('SYSTEM_ADMIN_USERNAMES', '').split(',') if u.strip()]
+    AVAILABLE_MODELS = os.getenv('AVAILABLE_MODELS', 'gpt-4.1-mini,gpt-4o,gpt-4o-mini').split(',')
 
     # Development/Testing Fallback Credentials (optional)
     # These should only be used when no client is specified (backward compatibility)

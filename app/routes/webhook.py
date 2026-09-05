@@ -6,6 +6,8 @@ import json
 import requests
 from ..services.platforms.instagram import InstagramService
 from ..services.platforms.telegram import TelegramService
+from ..services.platforms.bale import BaleService
+from ..models.client import Client
 from ..utils.helpers import get_db
 from ..utils.helpers import (
     get_client_username_by_ig_id,
@@ -21,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 instagram_webhook_bp = Blueprint('instagram_webhook', __name__)
 telegram_webhook_bp = Blueprint('telegram_webhook', __name__)
+bale_webhook_bp = Blueprint('bale_webhook', __name__)
 
 @instagram_webhook_bp.route('/instagram', methods=['GET'])
 def instagram_webhook_verify():
@@ -120,6 +123,33 @@ def telegram_delete_webhook(client_username):
     except Exception as e:
         logger.error(f"Failed to delete Telegram webhook for {client_username}: {str(e)}", exc_info=True)
         return jsonify({"ok": False, "error": "exception"}), 500
+
+
+@bale_webhook_bp.route('/bale/<client_username>', methods=['POST'])
+@bale_webhook_bp.route('/bale/<client_username>/<account_id>', methods=['POST'])
+def bale_webhook(client_username, account_id=None):
+    """Bale webhook endpoint per client/account. Configure Bale bot webhook URL to point here."""
+    try:
+        data = request.get_json(silent=True) or {}
+        account_username = None
+        if account_id:
+            try:
+                for acc in Client.get_platform_accounts(client_username, "bale"):
+                    if str(acc.get("id")) == str(account_id) or acc.get("id") == account_id:
+                        account_username = acc.get("username") or acc.get("bot_username") or acc.get("id")
+                        break
+                if not account_username:
+                    account_username = account_id
+            except Exception:
+                account_username = account_id
+        with get_db() as db:
+            ok = BaleService.handle_update(db, data, client_username, account_username=account_username or account_id)
+            if ok:
+                return jsonify({"ok": True}), 200
+            return jsonify({"ok": False}), 200
+    except Exception as e:
+        logger.error(f"Bale webhook error for {client_username}/{account_id}: {str(e)}", exc_info=True)
+        return jsonify({"ok": False}), 200
 
 
 def verify_instagram_webhook():
