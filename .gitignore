@@ -174,45 +174,27 @@ cython_debug/
 # graphify - auto-generated knowledge graph
 graphify-out/
 .graphify/
-.graphify_labels.json
 .cache/graphify/
 
-# opencode / AI agent tooling - non-project
+# opencode - AI agent tooling
 .opencode/
-.claude/
-.cursor/
-opencode/
 
-# tests - local test artifacts / non-project
+# tests - local artifacts
 tests/
 test/
-_tests/
-__pycache__/
-.pytest_cache/
 
-# frontend build artifacts (duplicates root node_modules for safety)
+# scripts - local scripts
+scripts/
+
+# frontend deps & build (cache)
 frontend/node_modules/
-frontend/dist/
 node_modules/
-dist/
-build/
 
-# OS / IDE / editor - irrelevant
+# OS / IDE
 .DS_Store
-Thumbs.db
 .vscode/
 .idea/
-*.swp
-*~
-*.sublime-*
 
-# logs & tmp & misc irrelevant
+# logs & tmp
 logs/
 tmp/
-temp/
-*.tmp
-*.temp
-*.bak
-.coverage
-coverage.xml
-htmlcov/
