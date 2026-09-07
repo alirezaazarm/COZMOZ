@@ -793,9 +793,9 @@ async function createAccount() {
       modules: accountDraft.value.modules,
       set_webhook_now: isBotPlatform ? true : accountDraft.value.set_webhook_now,
       ...(isTelegram
-        ? { telegram_access_token: accountDraft.value.telegram_access_token || undefined }
+        ? { telegram_access_token: accountDraft.value.telegram_access_token || undefined, secret_token: accountDraft.value.secret_token || undefined }
         : isBale
-          ? { bale_access_token: accountDraft.value.bale_access_token || undefined }
+          ? { bale_access_token: accountDraft.value.bale_access_token || undefined, secret_token: accountDraft.value.secret_token || undefined }
           : {
               username: accountDraft.value.username || undefined,
               ig_id: accountDraft.value.ig_id || undefined,
@@ -1608,7 +1608,7 @@ onMounted(async () => {
                   </span>
                   <span class="chat-item-tags">
                     <img v-if="platformIcon(item.platform)" class="platform-icon" :src="platformIcon(item.platform)" :alt="item.platform" :title="platformMeta[item.platform as keyof typeof platformMeta]?.name || item.platform" />
-                    <span class="chat-item-account">{{ item.account_username ? `@${item.account_username}` : (item.username ? `@${item.username}` : '') }}</span>
+                    <span class="chat-item-account">{{ item.account_username ? `@${item.account_username}` : '' }}</span>
                     <span class="tag status-tag" :class="statusTagClass(item.status)">{{ (item.status || '').replaceAll("_", " ") }}</span>
                   </span>
                   <span class="chat-preview">{{ item.direct_messages?.[0]?.text || "No messages" }}</span>
@@ -1819,8 +1819,8 @@ onMounted(async () => {
 
             <!-- Card Actions -->
             <div class="card-actions">
-              <button v-if="acc.platformType === 'instagram'" class="quiet" :disabled="testingAccountId === acc.id" @click="triggerSetWebhook(acc)">
-                {{ testingAccountId === acc.id ? 'Connecting…' : '🔍 Verify Credentials' }}
+              <button class="quiet" :disabled="testingAccountId === acc.id" @click="triggerSetWebhook(acc)">
+                {{ testingAccountId === acc.id ? 'Connecting…' : (acc.platformType === 'instagram' ? '🔍 Verify Credentials' : '🔍 Verify Webhook') }}
               </button>
               <button class="quiet" @click="openEditModules(acc)">Configure</button>
               <button class="danger quiet" @click="deleteAccount(acc)">Delete</button>

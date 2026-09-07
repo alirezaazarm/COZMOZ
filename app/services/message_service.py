@@ -5,9 +5,28 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 class MessageService:
-    def __init__(self, db, client_username):
+    def __init__(self, db, client_username, account_username=None):
         self.db = db
         self.client_username = client_username
+        self.account_username = account_username
+
+    def _user_query(self, user_id, extra=None):
+        """Build a user lookup query scoped to client and (optionally) account.
+        Favour the new `source.*` schema, falling back to legacy flat fields only
+        when the document predates `source`."""
+        clause = [
+            {"source.client_username": self.client_username},
+            {"client_username": self.client_username, "source": {"$exists": False}},
+        ]
+        query = {"user_id": user_id, "$or": clause}
+        if extra:
+            query.update(extra)
+        if self.account_username:
+            query.setdefault("$and", []).append({"$or": [
+                {"source.account_username": self.account_username},
+                {"account_username": self.account_username},
+            ]})
+        return query
 
     def get_user_messages(self, user_id, cutoff_time=None):
         """
@@ -20,11 +39,11 @@ class MessageService:
         Returns:
             List of user messages since the last assistant/admin message
         """
-        logger.info(f"Getting batch messages for user {user_id} (client: {self.client_username})")
+        logger.info(f"Getting batch messages for user {user_id} (client: {self.client_username}, account: @{self.account_username})")
         try:
-            # Find user and get their direct messages (client-specific)
+            # Find user and get their direct messages (client + account scoped)
             user = self.db.users.find_one(
-                {"user_id": user_id, "status": UserStatus.WAITING.value, "client_username": self.client_username},
+                self._user_query(user_id, {"status": UserStatus.WAITING.value}),
                 {"direct_messages": 1}
             )
 
@@ -89,10 +108,10 @@ class MessageService:
         return timestamp
 
     def update_user_status(self, user_id, status):
-        logger.info(f"Updating user {user_id} status to {status} (client: {self.client_username})")
+        logger.info(f"Updating user {user_id} status to {status} (client: {self.client_username}, account: @{self.account_username})")
         try:
             result = self.db.users.update_one(
-                {"user_id": user_id, "client_username": self.client_username},
+                self._user_query(user_id),
                 {"$set": {"status": status, "updated_at": datetime.now(timezone.utc)}}
             )
 

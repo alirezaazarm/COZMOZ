@@ -494,25 +494,44 @@ class InstagramService:
             return None
 
     @staticmethod
-    def process_user(user_data, status, client_username):
+    def process_user(user_data, status, client_username, account_username=None):
         """Process a user with client-specific context"""
         try:
             user_id = user_data['id']
             username = user_data.get('username','')
-            logger.debug(f"[process_user] Processing user: {user_id}, data: {user_data}, client: {client_username}")
+            logger.debug(f"[process_user] Processing user: {user_id}, data: {user_data}, client: {client_username}, account: {account_username}")
 
             recipient_type = user_data.get('type', '')
             if 'recipient' in recipient_type:
                 logger.debug(f"[process_user] Skipping recipient user (ID: {user_id})")
                 return None
 
-            user = User.get_by_id(user_id, client_username)
+            if not account_username:
+                # Try to resolve account_username from Instagram platform accounts via ig_id mapping
+                try:
+                    creds = helpers.get_client_credentials(client_username)
+                    ig_id = creds.get('ig_id') if creds else None
+                    if ig_id:
+                        from ...models.client import Client as _Client
+                        for acc in _Client.get_platform_accounts(client_username, Platform.INSTAGRAM.value):
+                            if str(acc.get("ig_id")) == str(ig_id) or str(acc.get("id")) == str(ig_id):
+                                account_username = acc.get("username") or acc.get("ig_id") or ig_id
+                                break
+                        if not account_username:
+                            account_username = creds.get("username") or ig_id or client_username
+                except Exception:
+                    pass
+            if not account_username:
+                logger.error(f"[process_user] Missing account_username for client {client_username} - cannot create user without source.account_username")
+                return None
+
+            user = User.get_by_id(user_id, client_username, account_username=account_username)
             logger.debug(f"[process_user] User lookup result: {user is not None}")
 
             if not user:
-                logger.info(f"[process_user] Creating user {user_id} with username: {username} for client: {client_username}")
+                logger.info(f"[process_user] Creating user {user_id} with username: {username} for client: {client_username} account: {account_username}")
 
-                user_doc = User.create_instagram_user(user_id=user_id, username=username, client_username=client_username, status=status)
+                user_doc = User.create_instagram_user(user_id=user_id, username=username, client_username=client_username, status=status, account_username=account_username)
 
                 if user_doc:
                     logger.debug(f"[process_user] Created user: {user_doc['user_id']}")
@@ -619,8 +638,59 @@ class InstagramService:
         return helpers.get_ig_content_ids(client_username)
 
     @staticmethod
-    def handle_message(db, message_data, client_username):
-        """Process and handle an Instagram direct message for a specific client"""
+    def verify_credentials(page_access_token, ig_id=None):
+        """Verify Instagram/Facebook credentials via Graph API. Returns (ok, info_or_error)."""
+        try:
+            if not page_access_token:
+                return False, "Missing page_access_token"
+            # Prefer ig_id specific check, fallback to /me
+            if ig_id:
+                url = f"https://graph.facebook.com/v22.0/{ig_id}"
+                params = {"fields": "id,username,name", "access_token": page_access_token}
+                resp = requests.get(url, params=params, timeout=15)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("id"):
+                        return True, data
+                # fallback to /me if ig_id lookup fails
+            me_url = "https://graph.facebook.com/v22.0/me"
+            params = {"fields": "id,name", "access_token": page_access_token}
+            resp = requests.get(me_url, params=params, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("id"):
+                    return True, data
+            try:
+                err = resp.json().get("error", {}).get("message", resp.text)
+            except Exception:
+                err = resp.text
+            return False, err or "Graph API verification failed"
+        except Exception as e:
+            logger.error(f"Instagram verify_credentials failed: {str(e)}")
+            return False, str(e)
+
+    @staticmethod
+    def handle_message(db, message_data, client_username, account_username=None):
+        """Process and handle an Instagram direct message for a specific client.
+        account_username is the Instagram account (source.account_username) that received the message."""
+        if not account_username:
+            # Try to infer from credentials / platform accounts
+            try:
+                creds = helpers.get_client_credentials(client_username)
+                ig_id = creds.get('ig_id') if creds else None
+                if ig_id:
+                    from ...models.client import Client as _Client
+                    for acc in _Client.get_platform_accounts(client_username, Platform.INSTAGRAM.value):
+                        if str(acc.get("ig_id")) == str(ig_id) or str(acc.get("id")) == str(ig_id):
+                            account_username = acc.get("username") or acc.get("ig_id") or ig_id
+                            break
+                    if not account_username:
+                        account_username = creds.get("username") or ig_id or client_username
+            except Exception:
+                pass
+        if not account_username:
+            logger.error(f"[handle_message] Missing account_username for client {client_username} - cannot process message without source.account_username")
+            return False
         try:
             logger.debug(f"[handle_message] Received message data: {message_data} for client: {client_username}")
 
@@ -675,34 +745,41 @@ class InstagramService:
                     actual_user_id = user_id
                 else:
                     logger.debug(f"[handle_message] Using recipient ID as actual user: {actual_user_id}")
-                    user_check = db.users.find_one({"user_id": actual_user_id, "client_username": client_username})
+                    user_check = db.users.find_one({"user_id": actual_user_id, "source.client_username": client_username, "source.platform": Platform.INSTAGRAM.value, "source.account_username": account_username})
                     if not user_check:
                         logger.info(f"[handle_message] Creating user record for recipient: {actual_user_id}")
                         user_doc = User.create_instagram_document(
                             user_id=actual_user_id,
                             username=sender_info.get('username', ''),
-                            client_username=client_username
+                            client_username=client_username,
+                            account_username=account_username
                         )
                         db.users.insert_one(user_doc)
-                        logger.info(f"[handle_message] Created new user record for recipient ID: {actual_user_id}")
+                        logger.info(f"[handle_message] Created new user record for recipient ID: {actual_user_id} with account @{account_username}")
                     else:
                         logger.debug(f"[handle_message] Found existing user record for recipient ID: {actual_user_id}")
 
             if not is_echo or user_id != client_page_id:
-                user = InstagramService.process_user(sender_info, UserStatus.WAITING.value, client_username)
+                user = InstagramService.process_user(sender_info, UserStatus.WAITING.value, client_username, account_username=account_username)
                 if not user:
-                    logger.error(f"[handle_message] Failed to process user: {user_id}")
+                    logger.error(f"[handle_message] Failed to process user: {user_id} for account @{account_username}")
                     return False
 
             if is_echo:
                 message_mid = message_data.get('id')
                 mid_exists = User.check_mid_exists(actual_user_id, message_mid, client_username)
+                # Also check with account scoping if legacy check misses
+                if not mid_exists and account_username:
+                    try:
+                        mid_exists = db.users.find_one({"user_id": actual_user_id, "source.account_username": account_username, "direct_messages.mid": message_mid}, {"direct_messages.$": 1}) is not None
+                    except Exception:
+                        pass
 
                 if mid_exists:
                     logger.info(f"[handle_message] MID {message_mid} already exists in database, skipping duplicate echo")
                     return True
                 else:
-                    user_doc = db.users.find_one({"user_id": actual_user_id, "client_username": client_username})
+                    user_doc = db.users.find_one({"user_id": actual_user_id, "source.client_username": client_username, "source.platform": Platform.INSTAGRAM.value, "source.account_username": account_username})
                     msg_role = MessageRole.ADMIN.value
                     user_status_to_set = UserStatus.ADMIN_REPLIED.value
 
@@ -748,7 +825,7 @@ class InstagramService:
 
                 try:
                     result = db.users.update_one(
-                        {"user_id": actual_user_id, "client_username": client_username},
+                        {"user_id": actual_user_id, "source.client_username": client_username, "source.platform": Platform.INSTAGRAM.value, "source.account_username": account_username},
                         {
                             "$push": {"direct_messages": message_doc},
                             "$set": {"status": user_status_to_set, "updated_at": datetime.now(timezone.utc)}
@@ -758,24 +835,25 @@ class InstagramService:
                     logger.debug(f"[handle_message] DB update result for echo message: matched={result.matched_count}, modified={result.modified_count}")
 
                     if result.modified_count > 0:
-                        logger.info(f"[handle_message] Successfully stored echo message {message_data.get('id')} for user {actual_user_id} with role {msg_role} and status {user_status_to_set}")
+                        logger.info(f"[handle_message] Successfully stored echo message {message_data.get('id')} for user {actual_user_id} with role {msg_role} and status {user_status_to_set} via @{account_username}")
                     else:
-                        logger.warning(f"[handle_message] Failed to update user document for echo message {message_data.get('id')} from user {actual_user_id}")
-                        user_check = db.users.find_one({"user_id": actual_user_id, "client_username": client_username})
+                        logger.warning(f"[handle_message] Failed to update user document for echo message {message_data.get('id')} from user {actual_user_id} via @{account_username}")
+                        user_check = db.users.find_one({"user_id": actual_user_id, "source.client_username": client_username, "source.platform": Platform.INSTAGRAM.value, "source.account_username": account_username})
                         if not user_check:
-                            logger.error(f"[handle_message] User {actual_user_id} not found in database!")
+                            logger.error(f"[handle_message] User {actual_user_id} not found in database for account @{account_username}!")
 
-                            logger.info(f"[handle_message] Creating missing user record for recipient: {actual_user_id}")
+                            logger.info(f"[handle_message] Creating missing user record for recipient: {actual_user_id} via @{account_username}")
                             user_doc = User.create_instagram_document(
                                 user_id=actual_user_id,
                                 username=sender_info.get('username', ''),
-                                client_username=client_username
+                                client_username=client_username,
+                                account_username=account_username
                             )
                             db.users.insert_one(user_doc)
                             logger.info(f"[handle_message] Created user, now adding the message")
 
                             result = db.users.update_one(
-                                {"user_id": actual_user_id, "client_username": client_username},
+                                {"user_id": actual_user_id, "source.client_username": client_username, "source.platform": Platform.INSTAGRAM.value, "source.account_username": account_username},
                                 {
                                     "$push": {"direct_messages": message_doc},
                                     "$set": {"status": user_status_to_set, "updated_at": datetime.now(timezone.utc)}
@@ -787,7 +865,7 @@ class InstagramService:
 
                             try:
                                 result = db.users.update_one(
-                                    {"user_id": actual_user_id, "client_username": client_username},
+                                    {"user_id": actual_user_id, "source.client_username": client_username, "source.platform": Platform.INSTAGRAM.value, "source.account_username": account_username},
                                     {
                                         "$push": {"direct_messages": message_doc},
                                         "$set": {"status": user_status_to_set, "updated_at": datetime.now(timezone.utc)}
@@ -823,7 +901,7 @@ class InstagramService:
 
             try:
                 result = db.users.update_one(
-                    {"user_id": actual_user_id, "client_username": client_username},
+                    {"user_id": actual_user_id, "source.client_username": client_username, "source.platform": Platform.INSTAGRAM.value, "source.account_username": account_username},
                     {
                         "$push": {"direct_messages": message_doc},
                         "$set": {"status": new_user_status, "updated_at": datetime.now(timezone.utc)}
@@ -833,7 +911,7 @@ class InstagramService:
                 logger.debug(f"[handle_message] DB update result for user message: matched={result.matched_count}, modified={result.modified_count}")
 
                 if result.modified_count == 0:
-                    logger.warning(f"[handle_message] Failed to update user document for user message from {actual_user_id}")
+                    logger.warning(f"[handle_message] Failed to update user document for user message from {actual_user_id} via @{account_username}")
 
             except Exception as db_error:
                 logger.error(f"[handle_message] Database error while storing user message: {str(db_error)}", exc_info=True)
@@ -850,8 +928,25 @@ class InstagramService:
             logger.error(f"[handle_message] Unexpected error in handle_message: {str(e)}", exc_info=True)
             return False
     @staticmethod
-    def handle_comment(db, comment_data, client_username):
+    def handle_comment(db, comment_data, client_username, account_username=None):
         """Process and handle an Instagram comment for a specific client, using in-memory fixed responses if available."""
+        if not account_username:
+            try:
+                creds = helpers.get_client_credentials(client_username)
+                ig_id = creds.get('ig_id') if creds else None
+                if ig_id:
+                    from ...models.client import Client as _Client
+                    for acc in _Client.get_platform_accounts(client_username, Platform.INSTAGRAM.value):
+                        if str(acc.get("ig_id")) == str(ig_id):
+                            account_username = acc.get("username") or acc.get("ig_id") or ig_id
+                            break
+                    if not account_username:
+                        account_username = creds.get("username") or ig_id or client_username
+            except Exception:
+                pass
+        if not account_username:
+            logger.error(f"handle_comment missing account_username for client {client_username}")
+            return False
         client_settings = helpers.get_app_settings(client_username)
         if not client_settings.get(ModuleType.FIXED_RESPONSE.value, True):
             logger.info(f"Fixed responses are disabled for client {client_username}.")
@@ -875,9 +970,9 @@ class InstagramService:
             }
 
             # Process the user who made the comment
-            user = InstagramService.process_user(user_info, UserStatus.SCRAPED.value, client_username)
+            user = InstagramService.process_user(user_info, UserStatus.SCRAPED.value, client_username, account_username=account_username)
             if not user:
-                logger.error(f"Failed to process user: {user_info['id']}")
+                logger.error(f"Failed to process user: {user_info['id']} for account @{account_username}")
                 return False
 
             # In MongoDB, user is always a dictionary
@@ -902,9 +997,9 @@ class InstagramService:
             # Add status field to comment document
             comment_doc['status'] = 'pending'
 
-            # Add comment to user's comments array
+            # Add comment to user's comments array (scoped to account)
             result = db.users.update_one(
-                {"user_id": user_id, "client_username": client_username},
+                {"user_id": user_id, "source.client_username": client_username, "source.platform": Platform.INSTAGRAM.value, "source.account_username": account_username},
                 {"$push": {"comments": comment_doc}}
             )
 
@@ -956,15 +1051,15 @@ class InstagramService:
                             timestamp=datetime.now(timezone.utc),
                             mid=mid
                         )
-                        # Add the fixed response message to user's direct messages and update status
+                        # Add the fixed response message to user's direct messages and update status (scoped to account)
                         db.users.update_one(
-                            {"user_id": user_id, "client_username": client_username},
+                            {"user_id": user_id, "source.client_username": client_username, "source.platform": Platform.INSTAGRAM.value, "source.account_username": account_username},
                             {
                                 "$push": {"direct_messages": message_doc},
                                 "$set": {"status": UserStatus.FIXED_REPLIED.value, "updated_at": datetime.now(timezone.utc)}
                             }
                         )
-                        logger.info(f"Stored fixed response DM message and set status to FIXED_REPLIED for user {user_id}")
+                        logger.info(f"Stored fixed response DM message and set status to FIXED_REPLIED for user {user_id} via @{account_username}")
                     elif not mid:
                         private_reply_success = InstagramService.send_comment_private_reply(comment_data['comment_id'], dm_reply_text, client_username)
                         if private_reply_success:
@@ -976,9 +1071,9 @@ class InstagramService:
                                 role=MessageRole.FIXED_RESPONSE.value,
                                 timestamp=datetime.now(timezone.utc)
                             )
-                            # Add the fixed response message to user's direct messages and update status
+                            # Add the fixed response message to user's direct messages and update status (scoped)
                             db.users.update_one(
-                                {"user_id": user_id, "client_username": client_username},
+                                {"user_id": user_id, "source.client_username": client_username, "source.platform": Platform.INSTAGRAM.value, "source.account_username": account_username},
                                 {
                                     "$push": {"direct_messages": message_doc},
                                     "$set": {"status": UserStatus.FIXED_REPLIED.value, "updated_at": datetime.now(timezone.utc)}

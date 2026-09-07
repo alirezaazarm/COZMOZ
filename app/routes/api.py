@@ -1279,9 +1279,13 @@ def add_platform_account():
     # If client requested immediate webhook configuration
     if payload.get("set_webhook_now"):
         if platform == Platform.TELEGRAM.value and account.get("telegram_access_token"):
+            webhook_url = account.get("webhook_url") or f"{Config.BASE_URL}/telegram/{scoped_client()}/{account['id']}"
+            if not account.get("webhook_url"):
+                Client.update_platform_account(scoped_client(), account["id"], {"webhook_url": webhook_url})
+                account["webhook_url"] = webhook_url
             ok, msg = TelegramService.set_webhook(
                 account["telegram_access_token"],
-                account["webhook_url"],
+                webhook_url,
                 secret_token=account.get("secret_token")
             )
             if ok:
@@ -1295,9 +1299,13 @@ def add_platform_account():
                 account["webhook_verified"] = True
                 account["bot_username"] = bot_username
         elif platform == Platform.BALE.value and account.get("bale_access_token"):
+            webhook_url = account.get("webhook_url") or f"{Config.BASE_URL}/bale/{scoped_client()}/{account['id']}"
+            if not account.get("webhook_url"):
+                Client.update_platform_account(scoped_client(), account["id"], {"webhook_url": webhook_url})
+                account["webhook_url"] = webhook_url
             ok, msg = BaleService.set_webhook(
                 account["bale_access_token"],
-                account["webhook_url"],
+                webhook_url,
                 secret_token=account.get("secret_token")
             )
             if ok:
@@ -1511,24 +1519,35 @@ def replace_client_credentials(username):
 @api_auth(system_admin=True)
 @require_csrf
 def configure_telegram_webhook(username):
+    """System-admin alias for configuring Telegram webhooks.
+
+    Delegates to the per-account flow: every Telegram account of the client gets
+    its own account-scoped webhook URL (same as the Connect page 'Verify Webhook').
+    """
     if not Config.BASE_URL.startswith("https://"):
         return error("BASE_URL must be a trusted HTTPS public origin before configuring webhooks.", 409, "invalid_configuration")
+    accounts = Client.get_platform_accounts(username, Platform.TELEGRAM.value)
+    if accounts:
+        results = []
+        for acc in accounts:
+            token = acc.get("telegram_access_token")
+            if not token:
+                results.append({"account_id": acc.get("id"), "ok": False, "error": "missing_token"})
+                continue
+            url = acc.get("webhook_url") or f"{Config.BASE_URL.rstrip('/')}/telegram/{username}/{acc.get('id')}"
+            ok, msg = TelegramService.set_webhook(token, url, secret_token=acc.get("secret_token"))
+            if ok and not acc.get("webhook_url"):
+                Client.update_platform_account(username, acc.get("id"), {"webhook_url": url})
+            results.append({"account_id": acc.get("id"), "ok": ok, "url": url, **({"error": msg} if not ok else {})})
+        all_ok = all(r.get("ok") for r in results)
+        return response({"configured": all_ok, "results": results}, 200 if all_ok else 502)
+    # Legacy: client-level token only
     credentials = TelegramService.get_client_credentials(username)
     token = credentials.get("telegram_access_token") if credentials else None
     if not token:
         return error("This client has no Telegram bot credential.", 400)
-    import requests
-
-    result = requests.post(
-        f"https://api.telegram.org/bot{token}/setWebhook",
-        json={
-            "url": f"{Config.BASE_URL.rstrip('/')}/telegram/{username}",
-            "secret_token": Config.TELEGRAM_WEBHOOK_SECRET,
-        },
-        timeout=20,
-    )
-    data = result.json() if result.content else {}
-    if not result.ok or not data.get("ok"):
+    ok, msg = TelegramService.set_webhook(token, f"{Config.BASE_URL.rstrip('/')}/telegram/{username}")
+    if not ok:
         return error("Telegram rejected the webhook configuration.", 502, "platform_rejected")
     return response({"configured": True})
 

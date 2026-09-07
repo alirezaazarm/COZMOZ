@@ -28,13 +28,35 @@ class User:
     STATUS_SCRAPED = UserStatus.SCRAPED.value
 
     @staticmethod
-    def create_user_document(user_id, username, client_username, thread_id=None, status=UserStatus.WAITING.value, platform=None, first_name=None, last_name=None, language_code=None, is_premium=False, profile_photo_url=None):
+    def create_user_document(user_id, username, client_username, thread_id=None, status=UserStatus.WAITING.value, platform=None, first_name=None, last_name=None, language_code=None, is_premium=False, profile_photo_url=None, account_username=None):
         """Create a new user document structure"""
         if platform is None:
             raise ValueError("platform is required when creating a user document")
+        if not client_username:
+            raise ValueError("client_username is required when creating a user document")
+        if not account_username:
+            # Fallback: try to infer from first platform account for this client/platform
+            try:
+                from .client import Client
+                from .enums import Platform as _Platform
+                platform_key = platform
+                # attempt to find account for this platform
+                accts = Client.get_platform_accounts(client_username, platform_key)
+                if accts:
+                    account_username = accts[0].get("username") or accts[0].get("bot_username") or accts[0].get("ig_id") or accts[0].get("id") or client_username
+                else:
+                    account_username = client_username
+                logger.warning(f"create_user_document called without account_username for user {user_id} client {client_username} platform {platform} - falling back to {account_username}")
+            except Exception:
+                account_username = client_username
         document = {
             "user_id": str(user_id),
             "username": username,
+            "source": {
+                "client_username": client_username,
+                "platform": platform,
+                "account_username": account_username,
+            },
             "first_name": first_name,
             "last_name": last_name,
             "language_code": language_code,
@@ -138,11 +160,25 @@ class User:
 
     @staticmethod
     @with_db
-    def get_by_id(user_id, client_username=None):
-        """Get a user by ID, optionally filtered by client"""
+    @staticmethod
+    def _apply_account(query, account_username):
+        """Scope a query to a specific bot account, matching legacy docs too."""
+        if account_username:
+            query["$or"] = [
+                {"source.account_username": account_username},
+                {"account_username": account_username},
+                {"source": {"$exists": False}, "account_username": {"$exists": False}},
+            ]
+        return query
+
+    @staticmethod
+    @with_db
+    def get_by_id(user_id, client_username=None, account_username=None):
+        """Get a user by ID, optionally filtered by client and account"""
         query = {"user_id": user_id}
         if client_username:
             query["client_username"] = client_username
+        query = User._apply_account(query, account_username)
         return db[USERS_COLLECTION].find_one(query)
 
     @staticmethod
@@ -165,24 +201,26 @@ class User:
 
     @staticmethod
     @with_db
-    def create(user_id, username, client_username, status, thread_id=None, platform=None):
+    def create(user_id, username, client_username, status, thread_id=None, platform=None, account_username=None):
         """Create a new user"""
         if platform is None:
             raise ValueError("platform is required when creating a user")
+        # account_username fallback handled inside create_user_document (with warning)
         user_doc = User.create_user_document(
             user_id=user_id,
             username=username,
             client_username=client_username,
             thread_id=thread_id,
             status=status,
-            platform=platform
+            platform=platform,
+            account_username=account_username
         )
         db[USERS_COLLECTION].insert_one(user_doc)
         return user_doc
 
     # -------- Platform-specific helpers --------
     @staticmethod
-    def create_instagram_user(user_id, username, client_username, status, thread_id=None):
+    def create_instagram_user(user_id, username, client_username, status, thread_id=None, account_username=None):
         """Create a new Instagram user"""
         return User.create(
             user_id=user_id,
@@ -191,10 +229,11 @@ class User:
             status=status,
             thread_id=thread_id,
             platform=Platform.INSTAGRAM.value,
+            account_username=account_username,
         )
 
     @staticmethod
-    def create_telegram_user(user_id, username, client_username, status, thread_id=None):
+    def create_telegram_user(user_id, username, client_username, status, thread_id=None, account_username=None):
         """Create a new Telegram user"""
         return User.create(
             user_id=user_id,
@@ -203,10 +242,11 @@ class User:
             status=status,
             thread_id=thread_id,
             platform=Platform.TELEGRAM.value,
+            account_username=account_username,
         )
 
     @staticmethod
-    def create_instagram_document(user_id, username, client_username, thread_id=None, status=UserStatus.WAITING.value):
+    def create_instagram_document(user_id, username, client_username, thread_id=None, status=UserStatus.WAITING.value, account_username=None):
         """Create an Instagram user document (without insertion)"""
         return User.create_user_document(
             user_id=user_id,
@@ -215,10 +255,11 @@ class User:
             thread_id=thread_id,
             status=status,
             platform=Platform.INSTAGRAM.value,
+            account_username=account_username,
         )
 
     @staticmethod
-    def create_telegram_document(user_id, username, client_username, thread_id=None, status=UserStatus.WAITING.value, first_name=None, last_name=None, language_code=None, is_premium=False, profile_photo_url=None):
+    def create_telegram_document(user_id, username, client_username, thread_id=None, status=UserStatus.WAITING.value, first_name=None, last_name=None, language_code=None, is_premium=False, profile_photo_url=None, account_username=None):
         """Create a Telegram user document (without insertion)"""
         return User.create_user_document(
             user_id=user_id,
@@ -231,12 +272,13 @@ class User:
             last_name=last_name,
             language_code=language_code,
             is_premium=is_premium,
-            profile_photo_url=profile_photo_url
+            profile_photo_url=profile_photo_url,
+            account_username=account_username
         )
     
     @staticmethod
     @with_db
-    def upsert_telegram_user_and_messages(user_id, client_username, user_profile_data, message_docs):
+    def upsert_telegram_user_and_messages(user_id, client_username, user_profile_data, message_docs, platform=None, account_username=None):
         """
         Atomically updates a Telegram user's profile and pushes new messages.
         If the user doesn't exist, they are created.
@@ -246,12 +288,22 @@ class User:
         :param client_username: The client context.
         :param user_profile_data: A dict with keys like 'username', 'first_name', etc.
         :param message_docs: A list of message documents to push.
+        :param platform: Platform value (defaults to telegram).
+        :param account_username: Bot/account username that received the message.
         """
         try:
+            if not account_username:
+                raise ValueError("account_username is required for upsert")
+            platform = platform or Platform.TELEGRAM.value
             # 1. Define the fields that should be updated on every interaction
             set_spec = {
                 "status": UserStatus.WAITING.value,
                 "updated_at": datetime.now(timezone.utc),
+                "source.client_username": client_username,
+                "source.platform": platform,
+                "source.account_username": account_username,
+                "client_username": client_username,
+                "platform": platform,
                 **user_profile_data # Unpack all profile data here
             }
 
@@ -264,12 +316,23 @@ class User:
                 first_name=user_profile_data.get('first_name'),
                 last_name=user_profile_data.get('last_name'),
                 language_code=user_profile_data.get('language_code'),
-                is_premium=user_profile_data.get('is_premium', False)
+                is_premium=user_profile_data.get('is_premium', False),
+                profile_photo_url=user_profile_data.get('profile_photo_url'),
+                account_username=account_username,
             )
+            if platform != Platform.TELEGRAM.value:
+                user_doc_on_insert["source"]["platform"] = platform
+                user_doc_on_insert["platform"] = platform
 
-            # 3. IMPORTANT: Remove any keys from $setOnInsert that are also in $set to avoid conflict
+            # 3. IMPORTANT: Remove any keys from $setOnInsert that are also in $set to avoid conflict.
+            # Note: $set contains dotted paths ("source.client_username", ...), so the whole
+            # "source" subdocument must also be dropped from $setOnInsert - otherwise MongoDB
+            # rejects the update with a path conflict error.
             for key in set_spec.keys():
                 user_doc_on_insert.pop(key, None)
+                top_level_key = key.split(".")[0]
+                if top_level_key != key:
+                    user_doc_on_insert.pop(top_level_key, None)
             
             # Remove array keys that will be handled by $push
             user_doc_on_insert.pop("direct_messages", None)
@@ -286,19 +349,41 @@ class User:
             if message_docs:
                 update_query["$push"] = {"direct_messages": {"$each": message_docs}}
 
-            # 6. Execute the atomic upsert operation
+            # 6. Execute the atomic upsert operation - identity includes all source fields
+            identity = {
+                "user_id": user_id,
+                "source.client_username": client_username,
+                "source.platform": platform,
+                "source.account_username": account_username,
+            }
             result = db[USERS_COLLECTION].update_one(
-                {"user_id": user_id, "client_username": client_username},
+                identity,
                 update_query,
                 upsert=True
             )
             
             return result.modified_count > 0 or result.upserted_id is not None or result.matched_count > 0
 
+        except ValueError as e:
+            logger.error(f"Invalid upsert params: {str(e)}")
+            return False
         except PyMongoError as e:
             logger.error(f"Failed to upsert Telegram user and messages: {str(e)}")
             return False
-        
+
+    @staticmethod
+    @with_db
+    def upsert_bale_user_and_messages(user_id, client_username, user_profile_data, message_docs, account_username=None):
+        """Bale-specific wrapper around the generic upsert (keeps platform='bale')."""
+        return User.upsert_telegram_user_and_messages(
+            user_id=user_id,
+            client_username=client_username,
+            user_profile_data=user_profile_data,
+            message_docs=message_docs,
+            platform=Platform.BALE.value,
+            account_username=account_username,
+        )
+
     @staticmethod
     @with_db
     def update(user_id, update_data, client_username=None):
@@ -318,11 +403,12 @@ class User:
 
     @staticmethod
     @with_db
-    def update_status(user_id, status, client_username=None):
+    def update_status(user_id, status, client_username=None, account_username=None):
         """Update a user's status"""
         query = {"user_id": user_id}
         if client_username:
             query["client_username"] = client_username
+        query = User._apply_account(query, account_username)
 
         result = db[USERS_COLLECTION].update_one(
             query,
@@ -337,11 +423,12 @@ class User:
 
     @staticmethod
     @with_db
-    def add_direct_message(user_id, message_doc, client_username=None):
+    def add_direct_message(user_id, message_doc, client_username=None, account_username=None):
         """Add a direct message to user's direct_messages array"""
         query = {"user_id": user_id}
         if client_username:
             query["client_username"] = client_username
+        query = User._apply_account(query, account_username)
 
         result = db[USERS_COLLECTION].update_one(
             query,

@@ -468,6 +468,17 @@ class BaleService:
     @staticmethod
     def handle_update(db, update, client_username, account_username=None):
         """Process and handle a Bale update (message) for a specific client."""
+        if not account_username:
+            try:
+                accts = Client.get_platform_accounts(client_username, Platform.BALE.value)
+                if accts:
+                    first = accts[0]
+                    account_username = first.get("username") or first.get("bot_username") or first.get("id")
+            except Exception:
+                pass
+        if not account_username:
+            logger.error(f"Bale handle_update missing account_username for client {client_username} - cannot create user without source.account_username")
+            return False
         try:
             from datetime import timedelta
 

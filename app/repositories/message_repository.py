@@ -82,14 +82,14 @@ class MessageRepository:
         """Get a user by ID for the current client."""
         return User.get_by_id(user_id, self.client_username)
 
-    def create_user_if_not_exists(self, user_id, username, status=UserStatus.WAITING.value, platform=None):
+    def create_user_if_not_exists(self, user_id, username, status=UserStatus.WAITING.value, platform=None, account_username=None):
         """Create a user if they don't exist for the current client."""
         if not self.client_username:
             raise ValueError("Client username is required for user creation")
             
-        existing_user = User.get_by_id(user_id, self.client_username)
+        existing_user = User.get_by_id(user_id, self.client_username, account_username=account_username)
         if not existing_user:
             if platform is None:
                 raise ValueError("platform is required for user creation")
-            return User.create(user_id, username, self.client_username, status, platform=platform)
+            return User.create(user_id, username, self.client_username, status, platform=platform, account_username=account_username)
         return existing_user

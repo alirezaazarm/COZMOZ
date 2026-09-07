@@ -36,12 +36,40 @@ def instagram_webhook():
     """Instagram webhook endpoint (POST)."""
     return handle_instagram_webhook_post()
 @telegram_webhook_bp.route('/telegram/<client_username>', methods=['POST'])
-def telegram_webhook(client_username):
-    """Telegram webhook endpoint per client. Configure Telegram bot webhook URL to point here."""
+@telegram_webhook_bp.route('/telegram/<client_username>/<account_id>', methods=['POST'])
+def telegram_webhook(client_username, account_id=None):
+    """Telegram webhook endpoint per client/account. Configure Telegram bot webhook URL to point here."""
     try:
         data = request.get_json(silent=True) or {}
+        account_username = None
+        if account_id:
+            try:
+                for acc in Client.get_platform_accounts(client_username, "telegram"):
+                    if str(acc.get("id")) == str(account_id) or acc.get("id") == account_id:
+                        account_username = acc.get("username") or acc.get("bot_username") or acc.get("id")
+                        break
+                if not account_username:
+                    account_username = account_id
+            except Exception:
+                account_username = account_id
+        # fallback: if no account_id in path, resolve via Telegram secret-token header first,
+        # then fall back to the client's first telegram account (legacy single-bot mode)
+        if not account_username:
+            try:
+                secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+                accounts = Client.get_platform_accounts(client_username, "telegram")
+                if secret:
+                    for acc in accounts:
+                        if acc.get("secret_token") and acc.get("secret_token") == secret:
+                            account_username = acc.get("username") or acc.get("bot_username") or acc.get("id")
+                            break
+                if not account_username and accounts:
+                    first = accounts[0]
+                    account_username = first.get("username") or first.get("bot_username") or first.get("id")
+            except Exception:
+                pass
         with get_db() as db:
-            ok = TelegramService.handle_update(db, data, client_username)
+            ok = TelegramService.handle_update(db, data, client_username, account_username=account_username or account_id)
             if ok:
                 return jsonify({"ok": True}), 200
             return jsonify({"ok": False}), 200  # Telegram requires 200 even on soft failure
@@ -52,28 +80,42 @@ def telegram_webhook(client_username):
 
 @telegram_webhook_bp.route('/telegram/<client_username>/set', methods=['POST'])
 def telegram_set_webhook(client_username):
-    """Programmatically set Telegram webhook for a client using stored bot token."""
+    """Legacy helper: set Telegram webhook(s) for a client.
+
+    If the client has per-account Telegram bots configured, each account gets
+    its own account-scoped webhook URL (/telegram/<client>/<account_id>) so it
+    never conflicts with the multi-account flow. Otherwise falls back to the
+    client-level token and /telegram/<client> URL.
+    """
     try:
-        # Determine target URL
         body = request.get_json(silent=True) or {}
         override_url = body.get('url') or request.args.get('url')
-        target_url = override_url or f"{Config.BASE_URL}/telegram/{client_username}"
 
-        # Get bot token from client credentials
+        # Prefer per-account setup when accounts exist (multi-account flow)
+        accounts = Client.get_platform_accounts(client_username, "telegram")
+        results = []
+        if accounts and not override_url:
+            for acc in accounts:
+                token = acc.get("telegram_access_token")
+                if not token:
+                    results.append({"account_id": acc.get("id"), "ok": False, "error": "missing_token"})
+                    continue
+                url = f"{Config.BASE_URL}/telegram/{client_username}/{acc.get('id')}"
+                ok, msg = TelegramService.set_webhook(token, url, secret_token=acc.get("secret_token"))
+                results.append({"account_id": acc.get("id"), "ok": ok, "url": url, **({"error": msg} if not ok else {})})
+            all_ok = all(r.get("ok") for r in results)
+            return jsonify({"ok": all_ok, "results": results}), 200 if all_ok else 207
+
+        # Legacy single-token fallback
+        target_url = override_url or f"{Config.BASE_URL}/telegram/{client_username}"
         creds = TelegramService.get_client_credentials(client_username)
         token = creds.get('telegram_access_token') if creds else None
         if not token:
             logger.error(f"No Telegram token for client: {client_username}")
             return jsonify({"ok": False, "error": "missing_token"}), 400
 
-        resp = requests.post(
-            f"https://api.telegram.org/bot{token}/setWebhook",
-            json={"url": target_url},
-            timeout=20
-        )
-        data = resp.json() if resp.content else {"ok": False}
-        status = 200 if data.get('ok') else 400
-        return jsonify({"ok": data.get('ok', False), "result": data}), status
+        ok, msg = TelegramService.set_webhook(token, target_url)
+        return jsonify({"ok": ok, "result": msg}), 200 if ok else 400
     except Exception as e:
         logger.error(f"Failed to set Telegram webhook for {client_username}: {str(e)}", exc_info=True)
         return jsonify({"ok": False, "error": "exception"}), 500
@@ -200,10 +242,27 @@ def handle_instagram_webhook_post():
                     failure_count += 1
                     continue
 
-                logger.info(f"Processing entry for client: {client_username} (ig_id: {entry_id})")
+                # Resolve account_username for Instagram: find platform account whose ig_id matches entry_id
+                account_username = None
+                try:
+                    for acc in Client.get_platform_accounts(client_username, "instagram"):
+                        if str(acc.get("ig_id")) == str(entry_id) or str(acc.get("id")) == str(entry_id):
+                            account_username = acc.get("username") or acc.get("ig_id") or entry_id
+                            break
+                    if not account_username:
+                        # fallback to credentials username or entry_id
+                        creds = get_client_credentials(client_username)
+                        if creds:
+                            account_username = creds.get("username") or creds.get("ig_id") or entry_id
+                        if not account_username:
+                            account_username = entry_id
+                except Exception:
+                    account_username = entry_id
+
+                logger.info(f"Processing entry for client: {client_username} (ig_id: {entry_id}) account: @{account_username}")
 
                 messaging_events = entry.get('messaging', [])
-                logger.info(f"Processing {len(messaging_events)} messaging events for client: {client_username}")
+                logger.info(f"Processing {len(messaging_events)} messaging events for client: {client_username} account: @{account_username}")
 
                 # Handle all message events, including echoes
                 for event in messaging_events:
@@ -219,7 +278,7 @@ def handle_instagram_webhook_post():
                         timestamp = raw_ts  # assume already datetime
 
                     try:
-                        if process_instagram_message_event(db, event, event['sender']['id'], timestamp, client_username):
+                        if process_instagram_message_event(db, event, event['sender']['id'], timestamp, client_username, account_username=account_username):
                             success_count += 1
                         else:
                             failure_count += 1
@@ -230,10 +289,10 @@ def handle_instagram_webhook_post():
                 # Process comment change events if present
                 comment_events = entry.get('changes', [])
                 entry_time = entry.get('time')
-                logger.info(f"Processing {len(comment_events)} changes for client: {client_username}")
+                logger.info(f"Processing {len(comment_events)} changes for client: {client_username} account: @{account_username}")
                 for change in comment_events:
                     try:
-                        if process_instagram_comment_event(db, change, entry_time, client_username):
+                        if process_instagram_comment_event(db, change, entry_time, client_username, account_username=account_username):
                             success_count += 1
                         else:
                             failure_count += 1
@@ -335,13 +394,25 @@ def process_instagram_event(db, event, client_username):
         return False
 
 
-def process_instagram_message_event(db, event, sender_id, timestamp, client_username):
+def process_instagram_message_event(db, event, sender_id, timestamp, client_username, account_username=None):
     """
     Processes incoming Instagram messaging events, including story replies, story mentions, and other attachments.
     Delegates fixed-response logic to InstagramService.handle_shared_content and falls back to standard processing.
     Returns True if processed successfully or fixed-response triggered, False on error or failure.
+    account_username is source.account_username (Instagram account that received the message).
     """
-    logger.debug(f"Processing message event for client {client_username}. sender_id={sender_id}, timestamp={timestamp}")
+    if not account_username:
+        try:
+            for acc in Client.get_platform_accounts(client_username, "instagram"):
+                if str(acc.get("ig_id")) == str(sender_id) or str(acc.get("ig_id")) == str(event.get('recipient', {}).get('id')):
+                    account_username = acc.get("username") or acc.get("ig_id")
+                    break
+            if not account_username:
+                creds = get_client_credentials(client_username)
+                account_username = (creds or {}).get("username") or (creds or {}).get("ig_id") or client_username
+        except Exception:
+            account_username = client_username
+    logger.debug(f"Processing message event for client {client_username} account @{account_username}. sender_id={sender_id}, timestamp={timestamp}")
     try:
         message = event['message']
         logger.debug(f"Message data from event: {message}")
@@ -403,8 +474,8 @@ def process_instagram_message_event(db, event, sender_id, timestamp, client_user
             # Ensure user exists before processing story reply
             if not is_echo:  # Only for non-echo messages (actual user messages)
                 user_info = {'id': sender_id, 'username': ''}
-                InstagramService.process_user(user_info, UserStatus.WAITING.value, client_username)
-                logger.info(f"Ensured user {sender_id} exists for story reply processing for client {client_username}")
+                InstagramService.process_user(user_info, UserStatus.WAITING.value, client_username, account_username=account_username)
+                logger.info(f"Ensured user {sender_id} exists for story reply processing for client {client_username} account @{account_username}")
             
             story_payload = message['reply_to']['story']
             attachment = {
@@ -514,7 +585,7 @@ def process_instagram_message_event(db, event, sender_id, timestamp, client_user
                     logger.info(f"Storing attachment message with ID: {attachment_message_id}")
                     
                     # Store this attachment message separately with its individual analysis
-                    success = InstagramService.handle_message(db, attachment_message_data, client_username)
+                    success = InstagramService.handle_message(db, attachment_message_data, client_username, account_username=account_username)
                     if success:
                         logger.info(f"Successfully stored attachment {i+1} with analysis: {result}")
                         if result:
@@ -540,7 +611,7 @@ def process_instagram_message_event(db, event, sender_id, timestamp, client_user
                     if recipient_id:
                         text_message_data['recipient'] = {'id': recipient_id}
                     
-                    success = InstagramService.handle_message(db, text_message_data, client_username)
+                    success = InstagramService.handle_message(db, text_message_data, client_username, account_username=account_username)
                     if success:
                         logger.info(f"Successfully stored original text message: {message.get('text')}")
                     else:
@@ -550,7 +621,7 @@ def process_instagram_message_event(db, event, sender_id, timestamp, client_user
                 return True
 
         # 3) Handle messages without attachments - route to standard message handling
-        success = InstagramService.handle_message(db, message_data, client_username)
+        success = InstagramService.handle_message(db, message_data, client_username, account_username=account_username)
         if success:
             logger.info(f"Successfully processed message {message_data['id']} from user {sender_id}")
             return True
@@ -567,7 +638,7 @@ def process_instagram_message_event(db, event, sender_id, timestamp, client_user
         return False
 
 
-def process_instagram_comment_event(db, change, entry_time=None, client_username=None):
+def process_instagram_comment_event(db, change, entry_time=None, client_username=None, account_username=None):
     try:
         if change.get('field') == 'comments':
             comment_data = change.get('value', {})
@@ -615,7 +686,7 @@ def process_instagram_comment_event(db, change, entry_time=None, client_username
                     'parent_id': parent_comment_id,
                     'timestamp': timestamp,
                     'status': 'not_replied'
-                }, client_username=client_username):
+                }, client_username=client_username, account_username=account_username):
                     return True
                 else:
                     return False

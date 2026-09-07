@@ -25,12 +25,14 @@ class OpenAIService:
     DEFAULT_MODEL = Config.DEFAULT_OPENAI_MODEL
     openai_client = openai.OpenAI(api_key=Config.OPENAI_API_KEY)
 
-    def __init__(self, client_username=None):
+    def __init__(self, client_username=None, agent=None):
         if not client_username: raise ValueError('Must provide client_username')
         self.client_username = client_username
         self.client_obj = Client.get_by_username(client_username)
         if not self.client_obj: raise ValueError(f'Client not found: {client_username}')
         self.client = self.__class__.openai_client
+        # Optional agent override: per-account model/instructions/vector_store
+        self.agent = agent
 
     # Configuration is stored locally because Responses has no persistent Assistant object.
     def _refresh(self): self.client_obj = Client.get_by_username(self.client_username) or self.client_obj
@@ -112,25 +114,36 @@ class OpenAIService:
         return bool(vs_id)
 
     def _tools(self):
-        tools, vs_id = [], self.client_obj.get('keys', {}).get('vector_store_id')
+        tools = []
+        if self.agent and self.agent.get('vector_store_id'):
+            vs_id = self.agent.get('vector_store_id')
+        else:
+            vs_id = self.client_obj.get('keys', {}).get('vector_store_id')
         if vs_id: tools.append({'type':'file_search','vector_store_ids':[vs_id],'max_num_results':20})
         if get_app_settings(self.client_username).get(ModuleType.ORDERBOOK.value, False):
             props = {'tx_id':{'type':'integer'},'first_name':{'type':'string'},'last_name':{'type':'string'},'address':{'type':'string'},'phone':{'type':'string'},'product':{'type':'string'},'price':{'type':'string'},'count':{'type':'string'}}
             tools += [{'type':'function','name':'create_order','description':'Register a new order.','parameters':{'type':'object','properties':props,'required':list(props),'additionalProperties':False}}, {'type':'function','name':'check_order','description':'Look up an order by transaction reference.','parameters':{'type':'object','properties':{'tx_id':{'type':'integer'}},'required':['tx_id'],'additionalProperties':False}}]
         return tools
     def _params(self, input_data, previous_response_id=None):
-        result = {'model':self._setting('model',self.DEFAULT_MODEL),'instructions':self._setting('instructions',''),'input':input_data,'tools':self._tools(),'store':True,'temperature':self._setting('temperature',1.0),'top_p':self._setting('top_p',1.0)}
+        model = (self.agent or {}).get('model') or self._setting('model', self.DEFAULT_MODEL)
+        instructions = (self.agent or {}).get('instruction') if (self.agent or {}).get('instruction') is not None else self._setting('instructions', '')
+        instructions = instructions or ''
+        result = {'model':model,'instructions':instructions,'input':input_data,'tools':self._tools(),'store':True,'temperature':self._setting('temperature',1.0),'top_p':self._setting('top_p',1.0)}
         if previous_response_id: result['previous_response_id'] = previous_response_id
         return result
     def ensure_thread(self, user): return user.get('response_id') # old thread ids intentionally never reused
-    def process_messages(self, previous_response_id, message_texts, user_id=None):
+    def process_messages(self, previous_response_id, message_texts, user_id=None, user_query=None):
         content = '\n---\n'.join(str(msg) for msg in message_texts if msg)
         if not content: raise PermanentError('Cannot create a response from empty messages.')
         try:
             response = self._complete_functions(self.client.responses.create(**self._params(content, previous_response_id)))
             text = clean_sources(response.output_text or '')
             if not text: raise PermanentError('Responses API returned no text.')
-            if user_id is not None: db.users.update_one({'user_id':str(user_id),'client_username':self.client_username},{'$set':{'response_id':response.id,'updated_at':datetime.now(timezone.utc)},'$unset':{'thread_id':''}})
+            if user_id is not None:
+                # user_query (preferred) targets the exact user document (same user_id can
+                # exist once per client+platform+account); fall back to legacy lookup.
+                query = user_query or {'user_id':str(user_id),'client_username':self.client_username}
+                db.users.update_one(query,{'$set':{'response_id':response.id,'updated_at':datetime.now(timezone.utc)},'$unset':{'thread_id':''}})
             return text
         except openai.APIError as exc: raise RetryableError(f'OpenAI API error: {exc}') from exc
     def _complete_functions(self, response):
@@ -143,6 +156,27 @@ class OpenAIService:
                 outputs.append({'type':'function_call_output','call_id':call.call_id,'output':result})
             response = self.client.responses.create(**self._params(outputs, response.id))
     def create_thread(self): return None # dashboard compatibility: no request is made until user sends a message
+
+    def preview_agent(self, agent, message, conversation_id=None, image=None):
+        """Run a one-off Responses call using an agent's model/instructions/vector store.
+        Returns (reply_text, new_conversation_id)."""
+        ag = {**(agent or {})}
+        if not ag.get('model'): ag['model'] = self._setting('model', self.DEFAULT_MODEL)
+        if ag.get('instruction') is None: ag['instruction'] = ''
+        self.agent = ag
+        input_payload = ''
+        if image:
+            input_payload = [{'type': 'input_text', 'text': message or ''}, {'type': 'input_image', 'image_url': image}]
+            input_payload = [{'role': 'user', 'content': input_payload}] if input_payload else None
+        else:
+            input_payload = message or ''
+        try:
+            response = self._complete_functions(self.client.responses.create(**self._params(input_payload, conversation_id)))
+            text = clean_sources(response.output_text or '')
+            if not text: raise PermanentError('Responses API returned no text.')
+            return text, response.id
+        except openai.APIError as exc:
+            raise RetryableError(f'OpenAI API error: {exc}') from exc
     def send_message_to_thread(self, previous_response_id, message):
         response=self._complete_functions(self.client.responses.create(**self._params(message, previous_response_id))); text=clean_sources(response.output_text or '')
         if not text: raise PermanentError('Responses API returned no text.')

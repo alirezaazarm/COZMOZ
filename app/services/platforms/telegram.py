@@ -4,7 +4,7 @@ import requests
 from io import BytesIO
 from PIL import Image
 from ...models.user import User
-from ...models.enums import UserStatus, MessageRole, ModuleType
+from ...models.enums import UserStatus, MessageRole, ModuleType, Platform
 from ...models.client import Client
 from ...utils import helpers
 from ..AI.img_search import process_image
@@ -103,6 +103,41 @@ class TelegramService:
         except Exception as e:
             logger.error(f"Failed to get user profile photo for {user_id}: {str(e)}")
             return None
+
+    @staticmethod
+    def set_webhook(token, webhook_url, secret_token=None):
+        """Set Telegram webhook URL and optional secret token."""
+        try:
+            payload = {
+                "url": webhook_url,
+                "drop_pending_updates": False
+            }
+            if secret_token:
+                payload["secret_token"] = secret_token
+            resp = requests.post(
+                f"https://api.telegram.org/bot{token}/setWebhook",
+                json=payload,
+                timeout=15
+            )
+            data = resp.json()
+            if not data.get("ok"):
+                return False, data.get("description", "Failed to set webhook")
+            return True, "Webhook configured successfully on Telegram"
+        except Exception as e:
+            logger.error(f"Failed to set Telegram webhook: {str(e)}")
+            return False, str(e)
+
+    @staticmethod
+    def get_webhook_info(token):
+        """Query Telegram Bot API for current webhook info and bot details."""
+        try:
+            info_resp = requests.get(f"https://api.telegram.org/bot{token}/getWebhookInfo", timeout=15)
+            me_resp = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=15)
+            info = info_resp.json().get("result", {}) if info_resp.status_code == 200 else {}
+            me = me_resp.json().get("result", {}) if me_resp.status_code == 200 else {}
+            return True, {"webhook": info, "bot": me}
+        except Exception as e:
+            return False, {"error": str(e)}
 
     @staticmethod
     def send_message(chat_id, text, client_username=None, account_username=None, account_id=None, **kwargs):
@@ -387,8 +422,21 @@ class TelegramService:
             }
 
     @staticmethod
-    def handle_update(db, update, client_username):
-        """Process and handle a Telegram update (message) for a specific client."""
+    def handle_update(db, update, client_username, account_username=None):
+        """Process and handle a Telegram update (message) for a specific client.
+        account_username is the bot/account that received the message (source.account_username)."""
+        if not account_username:
+            # try to infer from first telegram account for this client
+            try:
+                accts = Client.get_platform_accounts(client_username, Platform.TELEGRAM.value) if 'Platform' in globals() else Client.get_platform_accounts(client_username, "telegram")
+                if accts:
+                    first = accts[0]
+                    account_username = first.get("username") or first.get("bot_username") or first.get("id")
+            except Exception:
+                pass
+        if not account_username:
+            logger.error(f"Telegram handle_update missing account_username for client {client_username} - cannot create user without source.account_username")
+            return False
         try:
             from datetime import timedelta
 
@@ -418,7 +466,7 @@ class TelegramService:
                 'is_premium': from_user.get('is_premium', False)
             }
 
-            user = User.get_by_id(user_id, client_username)
+            user = User.get_by_id(user_id, client_username, account_username=account_username)
             should_fetch_photo = True
             CACHE_DURATION = timedelta(hours=24)
 
@@ -433,7 +481,18 @@ class TelegramService:
 
             if should_fetch_photo:
                 creds = TelegramService.get_client_credentials(client_username)
+                # prefer per-account token when available
                 token = (creds or {}).get('telegram_access_token')
+                if account_username:
+                    try:
+                        normalized = str(account_username).lstrip("@")
+                        for acc in Client.get_platform_accounts(client_username, Platform.TELEGRAM.value):
+                            if (acc.get("username") or acc.get("bot_username")) == normalized:
+                                if acc.get("telegram_access_token"):
+                                    token = acc.get("telegram_access_token")
+                                break
+                    except Exception:
+                        pass
                 if token:
                     photo_url = TelegramService._get_user_profile_photo_url(token, user_id)
                     if photo_url:
@@ -463,7 +522,9 @@ class TelegramService:
                 user_id=user_id,
                 client_username=client_username,
                 user_profile_data=user_profile_data,
-                message_docs=messages_to_push
+                message_docs=messages_to_push,
+                platform=Platform.TELEGRAM.value,
+                account_username=account_username
             )
 
             if not success:
