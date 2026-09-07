@@ -303,6 +303,52 @@ def agents():
     return response(Client.get_agents(scoped_client()))
 
 
+# Cache for OpenAI models list (shared across requests, 1h TTL)
+_openai_models_cache = {"ts": 0.0, "models": None}
+
+def _get_openai_models():
+    """Fetch model IDs live from OpenAI API only (no static fallback), cached 1h."""
+    import time as _time
+    now = _time.time()
+    cached = _openai_models_cache.get("models")
+    ts = _openai_models_cache.get("ts", 0)
+    if cached is not None and (now - ts) < 3600:
+        return cached
+    api_key = Config.OPENAI_API_KEY
+    if not api_key:
+        logging.getLogger(__name__).warning("OPENAI_API_KEY not set — returning empty models list (API-only mode).")
+        _openai_models_cache["models"] = []
+        _openai_models_cache["ts"] = now
+        return []
+    try:
+        import openai as _openai
+        _client = _openai.OpenAI(api_key=api_key, timeout=12.0)
+        resp = _client.models.list()
+        ids = [m.id for m in getattr(resp, "data", []) or [] if getattr(m, "id", None)]
+        if not ids:
+            raise ValueError("Empty models list from OpenAI")
+        def _sort_key(x: str):
+            xl = x.lower()
+            if "gpt-4.1" in xl: return (0, xl)
+            if "gpt-4o" in xl: return (1, xl)
+            if "gpt-4" in xl: return (2, xl)
+            if "gpt-3.5" in xl: return (3, xl)
+            if xl.startswith("o1"): return (4, xl)
+            if "gpt" in xl: return (5, xl)
+            return (10, xl)
+        models = sorted(ids, key=_sort_key)
+        _openai_models_cache["models"] = models
+        _openai_models_cache["ts"] = now
+        return models
+    except Exception as exc:
+        logging.getLogger(__name__).warning(f"OpenAI models fetch failed (API-only mode): {exc}")
+        # Return cached if any, otherwise empty — no static fallback
+        if cached is not None:
+            return cached
+        _openai_models_cache["models"] = []
+        _openai_models_cache["ts"] = now
+        return []
+
 @api_bp.get("/agents/options")
 @api_auth()
 def agent_options():
@@ -318,8 +364,14 @@ def agent_options():
                 "username": acc.get("username") or acc.get("bot_username"),
                 "status": acc.get("status"),
             })
+    # Live list from OpenAI API only (no static Config.AVAILABLE_MODELS fallback)
+    models = _get_openai_models()
+    # Allow manual refresh: /agents/options?refresh=1 bypasses cache
+    if request.args.get("refresh") == "1":
+        _openai_models_cache["ts"] = 0
+        models = _get_openai_models()
     return response({
-        "models": list(Config.AVAILABLE_MODELS),
+        "models": models,
         "vector_store_ids": Client._normalize_vector_store_ids(
             (client.get("keys", {}) or {}).get("vector_store_id")
         ),
@@ -561,6 +613,146 @@ def send_message(user_id):
         {"$push": {"direct_messages": message}, "$set": {"status": UserStatus.ADMIN_REPLIED.value, "updated_at": datetime.now(timezone.utc)}},
     )
     return response(message, 201)
+
+
+@api_bp.get("/conversations/stream")
+@api_auth()
+def conversations_stream():
+    """SSE stream for conversation list — realtime with DB.
+
+    Reuses the same query filters as GET /conversations (platform, account,
+    status, date_from, date_to, search, page, limit) and pushes an event
+    whenever the filtered set changes. Polling-based so it works without a
+    Mongo replica set / change stream; the client (EventSource) will
+    auto-reconnect on disconnect.
+    """
+    # Capture immutable filter snapshot outside generator so request context is not needed inside
+    # But we need to re-evaluate on each loop from current request args — args are static
+    # per connection; the stream reflects the subscription as opened.
+    query = conversation_filters()
+    params = page_params()
+    if params is None:
+        page, limit = 1, 25
+    else:
+        page, limit = params
+
+    def generate():
+        import hashlib
+
+        last_hash = None
+        heartbeat_counter = 0
+        while True:
+            try:
+                projection = {"direct_messages": {"$slice": -1}, "response_id": 0}
+                total = db[USERS_COLLECTION].count_documents(query)
+                items = list(
+                    db[USERS_COLLECTION].find(query, projection)
+                    .sort("updated_at", DESCENDING)
+                    .skip((page - 1) * limit)
+                    .limit(limit)
+                )
+                for item in items:
+                    source = item.get("source") or {}
+                    item["platform"] = source.get("platform") or item.get("platform")
+                    item["client_username"] = source.get("client_username") or item.get("client_username")
+                    item["account_username"] = source.get("account_username")
+
+                payload = json_value({"items": items, "page": page, "limit": limit, "total": total})
+
+                # Change detection hash: total + ordered list of (user_id, updated_at)
+                hash_input_parts = [str(total)]
+                for it in items:
+                    # updated_at is now an ISO string after json_value
+                    hash_input_parts.append(f"{it.get('user_id')}|{it.get('updated_at')}|{it.get('status')}")
+                    # also include last message text snippet for new message detection
+                    dm = (it.get("direct_messages") or [])
+                    if dm:
+                        hash_input_parts.append(str(dm[0].get("timestamp") or "") + str(dm[0].get("text") or "")[:40])
+                cur_hash = hashlib.md5("|".join(hash_input_parts).encode()).hexdigest()
+
+                if cur_hash != last_hash:
+                    last_hash = cur_hash
+                    data = json.dumps(payload)
+                    yield f"event: conversations\ndata: {data}\n\n"
+                    heartbeat_counter = 0
+                else:
+                    heartbeat_counter += 1
+                    if heartbeat_counter % 8 == 0:
+                        yield ": heartbeat\n\n"
+                time.sleep(2)
+            except GeneratorExit:
+                break
+            except Exception as exc:
+                # Emit error event but keep stream alive; client may reconnect
+                try:
+                    yield f"event: error\ndata: {json.dumps({'message': str(exc)})}\n\n"
+                except Exception:
+                    pass
+                time.sleep(5)
+
+    return _sse_response(generate)
+
+
+@api_bp.get("/conversations/<user_id>/messages/stream")
+@api_auth()
+def conversation_messages_stream(user_id):
+    """SSE stream for a single conversation thread — realtime with DB.
+
+    Query params: platform (required) + account (optional, @-prefixed allowed).
+    Pushes event `messages` with the full direct_messages array (last 100)
+    whenever the thread changes. Polling-based for compatibility.
+    """
+    platform = request.args.get("platform")
+    if platform not in {item.value for item in Platform}:
+        return error("A supported conversation platform is required.")
+    account = str(request.args.get("account", "")).strip().lstrip("@")
+    query = {"source.client_username": scoped_client(), "user_id": user_id, "source.platform": platform}
+    if account:
+        query["source.account_username"] = account
+
+    def generate():
+        import hashlib
+
+        last_hash = None
+        heartbeat_counter = 0
+        while True:
+            try:
+                conversation = db[USERS_COLLECTION].find_one(
+                    query,
+                    {"direct_messages": {"$slice": -100}, "_id": 0},
+                )
+                if not conversation:
+                    yield f"event: error\ndata: {json.dumps({'message': 'Conversation not found.'})}\n\n"
+                    time.sleep(5)
+                    continue
+                messages = conversation.get("direct_messages") or []
+                payload = json_value(messages)
+                # hash by length + last timestamp/text
+                hash_input = str(len(messages))
+                if messages:
+                    last = messages[-1]
+                    hash_input += f"|{last.get('timestamp')}|{last.get('text','')[:50]}|{last.get('role')}"
+                cur_hash = hashlib.md5(hash_input.encode()).hexdigest()
+                if cur_hash != last_hash:
+                    last_hash = cur_hash
+                    data = json.dumps(payload)
+                    yield f"event: messages\ndata: {data}\n\n"
+                    heartbeat_counter = 0
+                else:
+                    heartbeat_counter += 1
+                    if heartbeat_counter % 10 == 0:
+                        yield ": heartbeat\n\n"
+                time.sleep(1.5)
+            except GeneratorExit:
+                break
+            except Exception as exc:
+                try:
+                    yield f"event: error\ndata: {json.dumps({'message': str(exc)})}\n\n"
+                except Exception:
+                    pass
+                time.sleep(3)
+
+    return _sse_response(generate)
 
 
 @api_bp.get("/analytics")
@@ -854,6 +1046,19 @@ def custom_broadcast():
             # delivery succeeded even if persistence failed - keep successful count
             pass
     return response(sent)
+
+
+def _sse_response(generator_fn):
+    """Wrap a generator yielding SSE events into a Flask streaming Response."""
+    return Response(
+        stream_with_context(generator_fn()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 def _stream_ndjson_response(generator_fn):
@@ -1243,8 +1448,18 @@ def list_platform_accounts():
     platform = request.args.get("platform")
     if platform and platform not in {item.value for item in Platform}:
         return error("Invalid platform parameter.", 400)
-    accounts = Client.get_platform_accounts(scoped_client(), platform=platform)
-    return response(accounts)
+    if platform:
+        accounts = Client.get_platform_accounts(scoped_client(), platform=platform)
+        return response(accounts)
+    # Frontend expects grouped object {instagram:[], telegram:[], bale:[]} for overview/messages/agents filters
+    client = Client.get_by_username(scoped_client())
+    platforms = (client.get("platforms") or {}) if client else {}
+    grouped = {
+        "instagram": (platforms.get("instagram") or {}).get("accounts") or [],
+        "telegram": (platforms.get("telegram") or {}).get("accounts") or [],
+        "bale": (platforms.get("bale") or {}).get("accounts") or [],
+    }
+    return response(grouped)
 
 
 @api_bp.post("/settings/accounts")

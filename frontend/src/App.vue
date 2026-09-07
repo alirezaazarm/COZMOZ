@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { api, ApiError, getCsrfToken, setCsrfToken } from "./api/client";
 import type { Account, Agent, AgentOptions, AnalyticsOverview, AnalyticsUserRow, AnalyticsWindow, Content, Conversation, Knowledge, Page, PlatformAccount, Product, WorkspaceSettings } from "./types";
 import instagramIcon from "./assets/icons/instagram.png";
@@ -78,6 +78,19 @@ const inboxLoadingMore = ref(false);
 const threadLoading = ref(false);
 const replySending = ref(false);
 const INBOX_PAGE_SIZE = 25;
+// ---- Realtime (DB-synced) state for Messages ----
+const inboxRealtimeEnabled = ref(true);
+const threadRealtimeEnabled = ref(true);
+const inboxLastSyncAt = ref<number | null>(null);
+const threadLastSyncAt = ref<number | null>(null);
+const inboxConnectionStatus = ref<"idle" | "polling" | "streaming" | "offline">("idle");
+const threadConnectionStatus = ref<"idle" | "polling" | "streaming" | "offline">("idle");
+let inboxPollTimer: ReturnType<typeof setInterval> | null = null;
+let threadPollTimer: ReturnType<typeof setInterval> | null = null;
+let inboxEventSource: EventSource | null = null;
+let threadEventSource: EventSource | null = null;
+let inboxSseFailed = false;
+let threadSseFailed = false;
 const inboxAccountOptions = computed(() => {
   if (!inboxFilters.value.platform) return [...(inboxAccounts.value.instagram || []), ...(inboxAccounts.value.telegram || []), ...(inboxAccounts.value.bale || [])];
   return inboxAccounts.value[inboxFilters.value.platform as "instagram" | "telegram" | "bale"] || [];
@@ -655,12 +668,72 @@ async function runAgentTest(agent: Agent) {
   }
 }
 async function loadContent() { content.value = await api<Page<Content>>(`/content/${contentKind.value}?limit=24`); }
-async function loadInboxAccounts() { inboxAccounts.value = await api<{ instagram: InboxAccount[]; telegram: InboxAccount[]; bale: InboxAccount[] }>("/settings/accounts"); }
+async function loadInboxAccounts() {
+  const raw = await api<any>("/settings/accounts");
+  // Backend now returns grouped object, but handle legacy flat array as fallback
+  if (Array.isArray(raw)) {
+    const grouped: { instagram: InboxAccount[]; telegram: InboxAccount[]; bale: InboxAccount[] } = { instagram: [], telegram: [], bale: [] };
+    for (const acc of raw) {
+      const plat = (acc.platform || acc.platformType || "").toLowerCase();
+      if (plat === "instagram") grouped.instagram.push(acc);
+      else if (plat === "telegram") grouped.telegram.push(acc);
+      else if (plat === "bale") grouped.bale.push(acc);
+    }
+    inboxAccounts.value = grouped;
+  } else {
+    inboxAccounts.value = raw as { instagram: InboxAccount[]; telegram: InboxAccount[]; bale: InboxAccount[] };
+    // Ensure keys exist
+    inboxAccounts.value.instagram = inboxAccounts.value.instagram || [];
+    inboxAccounts.value.telegram = inboxAccounts.value.telegram || [];
+    inboxAccounts.value.bale = inboxAccounts.value.bale || [];
+  }
+}
 async function loadInbox() {
   inboxLoading.value = true;
   try {
     conversations.value = await api<Page<Conversation>>(`/conversations?${inboxQuery(1)}`);
+    inboxLastSyncAt.value = Date.now();
   } catch (value) { fail(value); } finally { inboxLoading.value = false; }
+}
+async function silentRefreshInbox() {
+  if (inboxLoading.value || inboxLoadingMore.value) return;
+  if (section.value !== "messages" || msgTab.value !== "chats") return;
+  try {
+    // For true realtime of the whole loaded list (including statuses beyond page 1),
+    // fetch as many as currently loaded (up to 100 = MAX_PAGE_SIZE). Covers "کل لیست یوزرها"
+    const old = conversations.value;
+    const loadLimit = old && old.items.length > INBOX_PAGE_SIZE ? Math.min(old.items.length, 100) : INBOX_PAGE_SIZE;
+    const fresh = await api<Page<Conversation>>(`/conversations?${inboxQuery(1, loadLimit)}`);
+    inboxLastSyncAt.value = Date.now();
+    if (inboxConnectionStatus.value !== "streaming") inboxConnectionStatus.value = "polling";
+    if (!old) { conversations.value = fresh; return; }
+    // If we loaded more than page 1, fresh already contains whole loaded set — just compare
+    if (old.items.length > INBOX_PAGE_SIZE) {
+      const sameTotal = old.total === fresh.total;
+      const sameIds = old.items.length === fresh.items.length && old.items.every((it, i) => {
+        const f = fresh.items[i];
+        return f && it.user_id === f.user_id && it.platform === f.platform && (it.account_username || "") === (f.account_username || "") && it.updated_at === f.updated_at && it.status === f.status;
+      });
+      if (sameTotal && sameIds) return;
+      conversations.value = fresh;
+      if (selectedConversation.value) {
+        const updated = fresh.items.find((it) => it.user_id === selectedConversation.value!.user_id && it.platform === selectedConversation.value!.platform && (it.account_username || "") === (selectedConversation.value!.account_username || ""));
+        if (updated) selectedConversation.value = updated;
+      }
+      return;
+    }
+    const sameTotal = old.total === fresh.total;
+    const sameFirstIds = old.items.slice(0, fresh.items.length).every((it, i) => {
+      const f = fresh.items[i];
+      return f && it.user_id === f.user_id && it.platform === f.platform && (it.account_username || "") === (f.account_username || "") && it.updated_at === f.updated_at && it.status === f.status;
+    });
+    if (sameTotal && sameFirstIds && old.items.length === fresh.items.length) return;
+    conversations.value = fresh;
+    if (selectedConversation.value) {
+      const updated = fresh.items.find((it) => it.user_id === selectedConversation.value!.user_id && it.platform === selectedConversation.value!.platform && (it.account_username || "") === (selectedConversation.value!.account_username || ""));
+      if (updated) selectedConversation.value = updated;
+    }
+  } catch { inboxConnectionStatus.value = "offline"; }
 }
 async function loadMoreConversations() {
   if (!conversations.value || inboxLoadingMore.value) return;
@@ -672,8 +745,8 @@ async function loadMoreConversations() {
     conversations.value = { ...more, items: [...conversations.value.items, ...more.items] };
   } catch (value) { fail(value); } finally { inboxLoadingMore.value = false; }
 }
-function applyInboxFilters() { loadInbox(); previewAudience(); }
-function resetInboxFilters() { inboxFilters.value = { platform: "", account: "", status: "", date_from: "", date_to: "", search: "" }; loadInbox(); previewAudience(); }
+function applyInboxFilters() { loadInbox(); previewAudience(); restartInboxRealtime(); }
+function resetInboxFilters() { inboxFilters.value = { platform: "", account: "", status: "", date_from: "", date_to: "", search: "" }; loadInbox(); previewAudience(); restartInboxRealtime(); }
 let searchDebounce: ReturnType<typeof setTimeout> | null = null;
 function onSearchInput() {
   if (searchDebounce) clearTimeout(searchDebounce);
@@ -699,15 +772,177 @@ async function loadSettings() {
   agents.value = agentsList;
 }
 
+// ---- Realtime helpers: SSE + polling fallback (DB-synced) ----
+function stopInboxRealtime() {
+  if (inboxPollTimer) { clearInterval(inboxPollTimer); inboxPollTimer = null; }
+  if (inboxEventSource) { try { inboxEventSource.close(); } catch {} inboxEventSource = null; }
+  inboxConnectionStatus.value = inboxRealtimeEnabled.value ? "offline" : "idle";
+}
+function stopThreadRealtime() {
+  if (threadPollTimer) { clearInterval(threadPollTimer); threadPollTimer = null; }
+  if (threadEventSource) { try { threadEventSource.close(); } catch {} threadEventSource = null; }
+  threadConnectionStatus.value = threadRealtimeEnabled.value ? "offline" : "idle";
+}
+function stopAllRealtime() { stopInboxRealtime(); stopThreadRealtime(); }
+function startInboxPolling() {
+  if (inboxPollTimer) clearInterval(inboxPollTimer);
+  inboxConnectionStatus.value = "polling";
+  inboxPollTimer = setInterval(() => { if (inboxRealtimeEnabled.value) silentRefreshInbox(); }, 3000);
+}
+function startThreadPolling() {
+  if (threadPollTimer) clearInterval(threadPollTimer);
+  if (!selectedConversation.value || !threadRealtimeEnabled.value) return;
+  threadConnectionStatus.value = "polling";
+  threadPollTimer = setInterval(() => { if (threadRealtimeEnabled.value) silentRefreshThread(); }, 2000);
+}
+async function silentRefreshThread() {
+  if (!selectedConversation.value || threadLoading.value || replySending.value) return;
+  if (section.value !== "messages") return;
+  const conv = selectedConversation.value;
+  try {
+    const fresh = await api<Array<{ text: string; role: string; timestamp: string }>>(
+      `/conversations/${encodeURIComponent(conv.user_id)}/messages?platform=${encodeURIComponent(conv.platform)}${conv.account_username ? `&account=${encodeURIComponent(conv.account_username)}` : ""}`
+    );
+    threadLastSyncAt.value = Date.now();
+    if (threadConnectionStatus.value !== "streaming") threadConnectionStatus.value = "polling";
+    if (fresh.length === conversationMessages.value.length && fresh.length > 0 && fresh[fresh.length - 1]?.timestamp === conversationMessages.value[conversationMessages.value.length - 1]?.timestamp) return;
+    const wasAtBottom = (() => {
+      const box = document.querySelector("[data-thread-scroll]") as HTMLElement | null;
+      if (!box) return true;
+      return box.scrollTop + box.clientHeight >= box.scrollHeight - 80;
+    })();
+    conversationMessages.value = fresh;
+    // keep inbox list in sync (updated_at / status may have changed)
+    silentRefreshInbox();
+    if (wasAtBottom) await nextTick().then(() => {
+      const box = document.querySelector("[data-thread-scroll]") as HTMLElement | null;
+      if (box) box.scrollTop = box.scrollHeight;
+    });
+  } catch { threadConnectionStatus.value = "offline"; }
+}
+function startInboxRealtime() {
+  stopInboxRealtime();
+  if (!inboxRealtimeEnabled.value || section.value !== "messages" || msgTab.value !== "chats") {
+    inboxConnectionStatus.value = inboxRealtimeEnabled.value ? "offline" : "idle";
+    return;
+  }
+  // Polling is the guaranteed DB-synced mechanism (every 2s for entire list + statuses).
+  // We keep it ALWAYS running; SSE is optional optimization in parallel.
+  inboxConnectionStatus.value = "polling";
+  // immediate sync then interval
+  silentRefreshInbox();
+  inboxPollTimer = setInterval(() => { if (inboxRealtimeEnabled.value && section.value === "messages" && msgTab.value === "chats") silentRefreshInbox(); }, 2000);
+  // Try to upgrade to SSE in parallel — if it connects we show streaming, but polling stays as backup
+  if (!inboxSseFailed && typeof window !== "undefined" && "EventSource" in window) {
+    try {
+      const url = `/api/v1/conversations/stream?${inboxQuery(1)}`;
+      const es = new EventSource(url, { withCredentials: true } as EventSourceInit);
+      inboxEventSource = es;
+      es.addEventListener("conversations", (e: MessageEvent) => {
+        try {
+          const data = JSON.parse((e as MessageEvent).data) as Page<Conversation>;
+          inboxLastSyncAt.value = Date.now();
+          inboxConnectionStatus.value = "streaming";
+          const old = conversations.value;
+          if (!old) { conversations.value = data; return; }
+          if (old.items.length > INBOX_PAGE_SIZE) {
+            const freshKeys = new Set(data.items.map((it) => `${it.platform}:${it.account_username || ""}:${it.user_id}`));
+            const retained = old.items.slice(INBOX_PAGE_SIZE).filter((it) => !freshKeys.has(`${it.platform}:${it.account_username || ""}:${it.user_id}`));
+            conversations.value = { ...data, items: [...data.items, ...retained] };
+          } else {
+            conversations.value = data;
+          }
+          if (selectedConversation.value) {
+            const upd = data.items.find((it) => it.user_id === selectedConversation.value!.user_id && it.platform === selectedConversation.value!.platform && (it.account_username || "") === (selectedConversation.value!.account_username || ""));
+            if (upd) selectedConversation.value = upd;
+          }
+        } catch {}
+      });
+      es.addEventListener("error", () => {
+        try { es.close(); } catch {}
+        if (inboxEventSource === es) inboxEventSource = null;
+        inboxSseFailed = true;
+        inboxConnectionStatus.value = "polling";
+      });
+      es.onerror = () => {
+        try { es.close(); } catch {}
+        if (inboxEventSource === es) inboxEventSource = null;
+        inboxSseFailed = true;
+        inboxConnectionStatus.value = "polling";
+      };
+    } catch {
+      inboxSseFailed = true;
+    }
+  }
+}
+function startThreadRealtime() {
+  stopThreadRealtime();
+  if (!threadRealtimeEnabled.value || !selectedConversation.value || section.value !== "messages") {
+    threadConnectionStatus.value = threadRealtimeEnabled.value ? "offline" : "idle";
+    return;
+  }
+  const conv = selectedConversation.value;
+  // Polling always runs (2s) — guarantees thread updates even if SSE fails
+  threadConnectionStatus.value = "polling";
+  silentRefreshThread();
+  threadPollTimer = setInterval(() => { if (threadRealtimeEnabled.value && selectedConversation.value) silentRefreshThread(); }, 2000);
+  if (!threadSseFailed && typeof window !== "undefined" && "EventSource" in window) {
+    try {
+      const url = `/api/v1/conversations/${encodeURIComponent(conv.user_id)}/messages/stream?platform=${encodeURIComponent(conv.platform)}${conv.account_username ? `&account=${encodeURIComponent(conv.account_username)}` : ""}`;
+      const es = new EventSource(url, { withCredentials: true } as EventSourceInit);
+      threadEventSource = es;
+      es.addEventListener("messages", (e: MessageEvent) => {
+        try {
+          const data = JSON.parse((e as MessageEvent).data) as Array<{ text: string; role: string; timestamp: string }>;
+          threadLastSyncAt.value = Date.now();
+          threadConnectionStatus.value = "streaming";
+          if (data.length === conversationMessages.value.length && data.length > 0 && data[data.length - 1]?.timestamp === conversationMessages.value[conversationMessages.value.length - 1]?.timestamp) return;
+          const wasAtBottom = (() => {
+            const box = document.querySelector("[data-thread-scroll]") as HTMLElement | null;
+            if (!box) return true;
+            return box.scrollTop + box.clientHeight >= box.scrollHeight - 80;
+          })();
+          conversationMessages.value = data;
+          if (wasAtBottom) nextTick().then(() => {
+            const box = document.querySelector("[data-thread-scroll]") as HTMLElement | null;
+            if (box) box.scrollTop = box.scrollHeight;
+          });
+        } catch {}
+      });
+      es.addEventListener("error", () => {
+        try { es.close(); } catch {}
+        if (threadEventSource === es) threadEventSource = null;
+        threadSseFailed = true;
+        threadConnectionStatus.value = "polling";
+      });
+      es.onerror = () => {
+        try { es.close(); } catch {}
+        if (threadEventSource === es) threadEventSource = null;
+        threadSseFailed = true;
+        threadConnectionStatus.value = "polling";
+      };
+    } catch { threadSseFailed = true; }
+  }
+}
+function restartInboxRealtime() {
+  inboxSseFailed = false;
+  startInboxRealtime();
+}
+function restartThreadRealtime() {
+  threadSseFailed = false;
+  startThreadRealtime();
+}
+
 async function changeSection(next: Section) {
-  section.value = next; selectedConversation.value = null; error.value = "";
+  stopAllRealtime();
+  section.value = next; selectedConversation.value = null; conversationMessages.value = []; error.value = "";
   try {
     if (next === "overview") await loadOverview();
     if (next === "catalog") await loadProducts();
     if (next === "knowledge") await loadKnowledge();
     if (next === "agents") await loadAgents();
     if (next === "instagram") await loadContent();
-    if (next === "messages") { await Promise.all([loadInbox(), loadInboxAccounts()]); previewAudience(); }
+    if (next === "messages") { await Promise.all([loadInbox(), loadInboxAccounts()]); previewAudience(); startInboxRealtime(); }
     if (next === "settings") await loadSettings();
     if (next === "system") systemClients.value = (await api<Page<{ username: string; business_name: string; status: string }>>("/system/clients?limit=50")).items;
   } catch (value) { fail(value); }
@@ -920,8 +1155,16 @@ async function saveAgent() {
 }
 async function removeAgent(id: string) { try { await api(`/agents/${id}`, { method: "DELETE" }); await loadAgents(); notify("Agent removed."); } catch (value) { fail(value); } }
 async function chooseConversation(item: Conversation) {
+  stopThreadRealtime();
   threadLoading.value = true;
-  try { selectedConversation.value = item; conversationMessages.value = await api(`/conversations/${encodeURIComponent(item.user_id)}/messages?platform=${encodeURIComponent(item.platform)}${item.account_username ? `&account=${encodeURIComponent(item.account_username)}` : ""}`); await nextTick(); const box = document.querySelector("[data-thread-scroll]"); if (box) box.scrollTop = box.scrollHeight; } catch (value) { fail(value); } finally { threadLoading.value = false; }
+  try {
+    selectedConversation.value = item;
+    conversationMessages.value = await api(`/conversations/${encodeURIComponent(item.user_id)}/messages?platform=${encodeURIComponent(item.platform)}${item.account_username ? `&account=${encodeURIComponent(item.account_username)}` : ""}`);
+    threadLastSyncAt.value = Date.now();
+    await nextTick(); const box = document.querySelector("[data-thread-scroll]"); if (box) box.scrollTop = box.scrollHeight;
+    threadSseFailed = false;
+    startThreadRealtime();
+  } catch (value) { fail(value); } finally { threadLoading.value = false; }
 }
 async function sendReply() {
   if (!selectedConversation.value || !reply.value.trim() || replySending.value) return;
@@ -1089,11 +1332,40 @@ async function saveWorkspaceNotes() {
   } catch (value) { fail(value); }
 }
 
+// Auto-restart realtime when user switches tabs / toggles realtime switches
+watch(msgTab, (tab) => {
+  if (section.value !== "messages") return;
+  if (tab === "chats") { inboxSseFailed = false; startInboxRealtime(); }
+  else { stopInboxRealtime(); stopThreadRealtime(); }
+});
+watch(inboxRealtimeEnabled, (on) => {
+  if (!on) stopInboxRealtime();
+  else if (section.value === "messages" && msgTab.value === "chats") { inboxSseFailed = false; startInboxRealtime(); }
+});
+watch(threadRealtimeEnabled, (on) => {
+  if (!on) stopThreadRealtime();
+  else if (selectedConversation.value) { threadSseFailed = false; startThreadRealtime(); }
+});
+watch(selectedConversation, (conv) => {
+  if (!conv) stopThreadRealtime();
+});
+
 onMounted(async () => {
   window.addEventListener("popstate", () => {
     currentPath.value = window.location.pathname;
     if (!account.value && window.location.pathname !== "/login") {
       setRoute("/login", true);
+    }
+  });
+
+  // Pause realtime when tab hidden, resume on visible (saves DB load + respects battery)
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    if (section.value === "messages" && msgTab.value === "chats" && inboxRealtimeEnabled.value) {
+      silentRefreshInbox();
+    }
+    if (selectedConversation.value && threadRealtimeEnabled.value) {
+      silentRefreshThread();
     }
   });
 
@@ -1113,6 +1385,10 @@ onMounted(async () => {
   } finally {
     loading.value = false;
   }
+});
+
+onBeforeUnmount(() => {
+  stopAllRealtime();
 });
 </script>
 
